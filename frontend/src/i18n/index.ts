@@ -1572,7 +1572,6 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '测试用例详情': 'Test case details',
   '测试步骤': 'Test steps',
   '备注': 'Remarks',
-  '上传截图': 'Upload screenshots',
   '暂无截图': 'No screenshots',
   '无法加载测试用例详情': 'Failed to load test case details',
   '标题（可选）': 'Title (optional)',
