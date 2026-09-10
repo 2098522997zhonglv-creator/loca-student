@@ -20,10 +20,23 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() == "true"
 ALLOWED_HOSTS = [item.strip() for item in os.environ.get(
     "DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost,192.168.32.138"
 ).split(",") if item.strip()]
+# Local physical-machine access: keep LAN IP even if an old .env omitted it.
+if DEBUG:
+    for host in ("127.0.0.1", "localhost", "192.168.32.138"):
+        if host not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS.append(host)
 CSRF_TRUSTED_ORIGINS = [item.strip() for item in os.environ.get(
     "DJANGO_CSRF_TRUSTED_ORIGINS",
     "http://127.0.0.1:8000,http://localhost:8000,http://192.168.32.138:8000",
 ).split(",") if item.strip()]
+if DEBUG:
+    for origin in (
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://192.168.32.138:8000",
+    ):
+        if origin not in CSRF_TRUSTED_ORIGINS:
+            CSRF_TRUSTED_ORIGINS.append(origin)
 
 INSTALLED_APPS = [
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
