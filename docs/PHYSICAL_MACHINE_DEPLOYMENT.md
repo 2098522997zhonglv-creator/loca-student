@@ -36,7 +36,11 @@ conda activate local-knowledge-center
 
 然后用 `http://192.168.32.138:8000` 访问（IP 以实际为准）。请确认 `.env` 中 `DJANGO_ALLOWED_HOSTS` 包含该 IP；不要直接暴露到公网。
 
-## 4. 数据备份
+## 4. Windows 自动拉取更新（方案 A）
+
+推送到 GitHub `main` 后，由物理机计划任务自动 `git pull`、按需构建并重启服务。详见 [WINDOWS_AUTO_UPDATE.md](./WINDOWS_AUTO_UPDATE.md)。
+
+## 5. 数据备份
 
 停止服务后备份整个 `data/`：其中包含业务 SQLite、LangGraph 会话、嵌入式 Qdrant 索引及上传文件。恢复时复制回同一项目根目录即可。
 
