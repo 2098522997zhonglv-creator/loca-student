@@ -1,0 +1,107 @@
+"""Local-only settings for the extracted WHartTest knowledge center."""
+
+import os
+from datetime import timedelta
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR.parent / "data"
+FRONTEND_DIST = BASE_DIR.parent / "frontend" / "dist"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "local-knowledge-center-change-me")
+DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() == "true"
+ALLOWED_HOSTS = [item.strip() for item in os.environ.get(
+    "DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost"
+).split(",") if item.strip()]
+
+INSTALLED_APPS = [
+    "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
+    "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
+    "rest_framework", "rest_framework_simplejwt", "django_filters", "corsheaders",
+    "drf_spectacular", "accounts.apps.AccountsConfig", "projects", "api_keys",
+    "prompts", "file_management.apps.FileManagementConfig",
+    "knowledge.apps.KnowledgeConfig", "requirements", "mcp_tools.apps.McpToolsConfig",
+    "skills", "langgraph_integration", "orchestrator_integration", "operation_logs",
+]
+
+MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "operation_logs.middleware.OperationLogMiddleware",
+]
+
+ROOT_URLCONF = "wharttest_django.urls"
+TEMPLATES = [{
+    "BACKEND": "django.template.backends.django.DjangoTemplates",
+    "DIRS": [FRONTEND_DIST], "APP_DIRS": True,
+    "OPTIONS": {"context_processors": [
+        "django.template.context_processors.request",
+        "django.contrib.auth.context_processors.auth",
+        "django.contrib.messages.context_processors.messages",
+    ]},
+}]
+WSGI_APPLICATION = "wharttest_django.wsgi.application"
+ASGI_APPLICATION = "wharttest_django.asgi.application"
+
+DATABASES = {"default": {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": Path(os.environ.get("DATABASE_PATH", DATA_DIR / "knowledge_center.sqlite3")),
+    "OPTIONS": {"timeout": 30},
+}}
+
+AUTH_PASSWORD_VALIDATORS = []
+LANGUAGE_CODE = "zh-hans"
+TIME_ZONE = os.environ.get("TIME_ZONE", "Asia/Shanghai")
+USE_I18N = True
+USE_TZ = True
+STATIC_URL = "/static/"
+STATIC_ROOT = DATA_DIR / "static"
+MEDIA_URL = "/media/"
+MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", DATA_DIR / "media"))
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+CORS_ALLOWED_ORIGINS = [item.strip() for item in os.environ.get(
+    "DJANGO_CORS_ALLOWED_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173"
+).split(",") if item.strip()]
+CORS_ALLOW_CREDENTIALS = True
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        "api_keys.authentication.APIKeyAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_PAGINATION_CLASS": "wharttest_django.pagination.StandardPagination",
+    "PAGE_SIZE": 20,
+}
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+}
+SPECTACULAR_SETTINGS = {"TITLE": "Local Knowledge Center API", "VERSION": "1.0.0"}
+
+# No Redis or worker is required in local mode.
+CELERY_TASK_ALWAYS_EAGER = True
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_BROKER_URL = "memory://"
+CELERY_RESULT_BACKEND = "cache+memory://"
+
+FILE_MANAGEMENT_MAX_FILE_SIZE = int(os.environ.get("FILE_MANAGEMENT_MAX_FILE_SIZE", 104857600))
+FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE = int(os.environ.get("FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE", 0))
+LANGGRAPH_CHECKPOINT_SQLITE_PATH = os.environ.get(
+    "LANGGRAPH_CHECKPOINT_SQLITE_PATH", str(DATA_DIR / "chat_history.sqlite3")
+)
+DJANGO_BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://127.0.0.1:8000")
+LOGGING = {
+    "version": 1, "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "root": {"handlers": ["console"], "level": os.environ.get("LOG_LEVEL", "INFO")},
+}

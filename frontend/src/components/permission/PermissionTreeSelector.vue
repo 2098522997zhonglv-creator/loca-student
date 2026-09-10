@@ -1,0 +1,614 @@
+<template>
+  <div class="permission-tree-selector">
+    <!-- 搜索和操作区域 -->
+    <div class="tree-header">
+      <div class="search-box">
+        <a-input-search
+          v-model="searchKeyword"
+          :placeholder="text.searchPermission"
+          allow-clear
+          style="width: 300px"
+          @search="handleSearch"
+          @clear="handleSearch"
+        />
+      </div>
+      <div class="action-buttons">
+        <a-space>
+          <a-button
+            size="small"
+            @click="toggleExpandAll"
+          >
+            {{ isAllExpanded ? text.collapseAll : text.expandAll }}
+          </a-button>
+          <a-button
+            type="primary"
+            :loading="saveLoading"
+            @click="handleSavePermissions"
+          >
+            <template #icon><icon-save /></template>
+            {{ text.savePermissions }}
+          </a-button>
+        </a-space>
+      </div>
+    </div>
+
+    <!-- 权限树 -->
+    <div class="tree-container">
+      <a-spin :loading="loading" style="width: 100%; height: 100%;">
+        <div style="height: 100%; overflow: auto;">
+          <a-tree
+            v-if="permissionTreeData.length > 0"
+            :data="filteredPermissionTreeData"
+            :field-names="{ key: 'id', title: 'title' }"
+            checkable
+            show-line
+            block-node
+            :checked-keys="checkedKeys"
+            :half-checked-keys="halfCheckedKeys"
+            :expanded-keys="expandedKeys"
+            @check="onPermissionCheck"
+            @expand="onNodeExpand"
+          >
+            <template #title="nodeData">
+              <div class="permission-node">
+                <span class="permission-name">{{ nodeData.title }}</span>
+                <span v-if="nodeData.isGroup && nodeData.children" class="permission-count">
+                  ({{ nodeData.children.length }})
+                </span>
+                <a-tag
+                  v-if="!nodeData.isGroup && nodeData.hasPermission"
+                  color="green"
+                  size="small"
+                  class="permission-tag"
+                >
+                  {{ text.existing }}
+                </a-tag>
+              </div>
+            </template>
+          </a-tree>
+          <a-empty v-else :description="text.noPermissionData" />
+        </div>
+      </a-spin>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from 'vue';
+import { Message, Modal } from '@arco-design/web-vue';
+import { IconSave } from '@arco-design/web-vue/es/icon';
+import { useAppI18n } from '@/composables/useAppI18n';
+import {
+  getPermissionList,
+  getUserPermissions,
+  getGroupPermissions,
+  updateUserPermissions,
+  updateGroupPermissions,
+  type Permission,
+} from '@/services/permissionService';
+
+// 权限树节点接口
+interface PermissionTreeNode {
+  id: string | number;
+  title: string;
+  isGroup: boolean;
+  hasPermission?: boolean;
+  children?: PermissionTreeNode[];
+  app_label?: string;
+  model?: string;
+  permission?: Permission;
+  modelCn?: string; // 模型中文名称
+}
+
+const props = defineProps<{
+  type: 'user' | 'group';
+  id: number;
+  lazy?: boolean; // 是否懒加载，默认false
+}>();
+
+const emit = defineEmits<{
+  (e: 'refresh'): void;
+}>();
+const { isEnglish } = useAppI18n();
+
+const text = computed(() => (
+  isEnglish.value
+    ? {
+        searchPermission: 'Search permissions',
+        collapseAll: 'Collapse All',
+        expandAll: 'Expand All',
+        savePermissions: 'Save Permissions',
+        existing: 'Existing',
+        noPermissionData: 'No permission data',
+        fetchPermissionListFailed: 'Failed to fetch permission list',
+        fetchPermissionListError: 'An error occurred while fetching permissions',
+        fetchEntityPermissionsFailed: (entityType: string) => `Failed to fetch ${entityType} permissions`,
+        fetchPermissionsError: 'An error occurred while fetching permissions',
+        user: 'user',
+        group: 'group',
+        confirmSaveTitle: 'Confirm saving permissions',
+        confirmSaveContent: (entityType: string, count: number) => `Save current permission settings?\n\nThis will fully replace the ${entityType} permission list. The ${count} checked permission(s) will become all direct permissions for this ${entityType}.`,
+        saveSuccess: 'Permissions saved successfully',
+        saveFailed: 'Failed to save permissions',
+        saveError: 'An error occurred while saving permissions',
+      }
+    : {
+        searchPermission: '搜索权限名称',
+        collapseAll: '收起全部',
+        expandAll: '展开全部',
+        savePermissions: '保存权限',
+        existing: '已有',
+        noPermissionData: '暂无权限数据',
+        fetchPermissionListFailed: '获取权限列表失败',
+        fetchPermissionListError: '获取权限列表时发生错误',
+        fetchEntityPermissionsFailed: (entityType: string) => `获取${entityType}权限失败`,
+        fetchPermissionsError: '获取权限时发生错误',
+        user: '用户',
+        group: '组织',
+        confirmSaveTitle: '确认保存权限',
+        confirmSaveContent: (entityType: string, count: number) => `确定要保存当前的权限设置吗？\n\n注意：此操作将完全替换${entityType}的权限列表，当前勾选的 ${count} 个权限将成为${entityType}的全部直接权限。`,
+        saveSuccess: '权限保存成功',
+        saveFailed: '权限保存失败',
+        saveError: '保存权限时发生错误',
+      }
+));
+
+// 响应式数据
+const loading = ref(false);
+const saveLoading = ref(false);
+const searchKeyword = ref('');
+
+// 权限数据
+const allPermissions = ref<Permission[]>([]);
+const userPermissions = ref<Permission[]>([]);
+
+// 树形数据
+const permissionTreeData = computed(() => {
+  // 依赖 isEnglish.value 触发重新计算，确保语言切换时重新渲染权限树
+  isEnglish.value;
+  return buildPermissionTree(allPermissions.value, userPermissions.value);
+});
+const checkedKeys = ref<(string | number)[]>([]);
+const halfCheckedKeys = ref<(string | number)[]>([]);
+const expandedKeys = ref<(string | number)[]>([]); // 默认全部收起
+
+// 选中的权限ID
+const selectedPermissionIds = computed(() => {
+  return checkedKeys.value.filter(key => typeof key === 'number') as number[];
+});
+
+// 是否全部展开
+const isAllExpanded = computed(() => {
+  const allGroupKeys = getAllGroupKeys(permissionTreeData.value);
+  return allGroupKeys.length > 0 && allGroupKeys.every(key => expandedKeys.value.includes(key));
+});
+
+// 过滤后的树形数据
+const filteredPermissionTreeData = computed(() => {
+  if (!searchKeyword.value) {
+    return permissionTreeData.value;
+  }
+
+  return filterTreeData(permissionTreeData.value, searchKeyword.value.toLowerCase());
+});
+
+// 过滤树形数据
+const filterTreeData = (treeData: PermissionTreeNode[], keyword: string): PermissionTreeNode[] => {
+  return treeData.reduce((filtered: PermissionTreeNode[], node) => {
+    const matchesKeyword = node.title.toLowerCase().includes(keyword);
+    const filteredChildren = node.children ? filterTreeData(node.children, keyword) : [];
+
+    if (matchesKeyword || filteredChildren.length > 0) {
+      filtered.push({
+        ...node,
+        children: filteredChildren.length > 0 ? filteredChildren : node.children,
+      });
+    }
+
+    return filtered;
+  }, []);
+};
+
+// 构建权限树
+const buildPermissionTree = (permissions: Permission[], userPerms: Permission[]): PermissionTreeNode[] => {
+  const userPermIds = new Set(userPerms.map(p => p.id));
+  const useEn = isEnglish.value;
+
+  // 按第一层分类和第二层子分类进行分组
+  const groupedByCategory = permissions.reduce((categories, permission) => {
+    const appLabelDisplay = useEn
+      ? (permission.content_type.app_label_en || permission.content_type.app_label_cn || permission.content_type.app_label)
+      : (permission.content_type.app_label_cn || permission.content_type.app_label);
+    const appLabelSort = permission.content_type.app_label_sort || 999;
+    const appLabelSubcategory = useEn
+      ? (permission.content_type.app_label_subcategory_en || permission.content_type.app_label_subcategory)
+      : permission.content_type.app_label_subcategory;
+    const appLabelSubcategorySort = permission.content_type.app_label_subcategory_sort || 999;
+    const appLabel = permission.content_type.app_label;
+    const model = permission.content_type.model;
+
+    if (!categories[appLabelDisplay]) {
+      categories[appLabelDisplay] = {
+        sortOrder: appLabelSort,
+        subcategories: {}
+      };
+    }
+
+    const subcategoryKey = appLabelSubcategory || appLabel;
+    if (!categories[appLabelDisplay].subcategories[subcategoryKey]) {
+      categories[appLabelDisplay].subcategories[subcategoryKey] = {
+        app_label: appLabel,
+        app_label_subcategory: appLabelSubcategory,
+        app_label_subcategory_sort: appLabelSubcategorySort,
+        models: {}
+      };
+    }
+    if (!categories[appLabelDisplay].subcategories[subcategoryKey].models[model]) {
+      categories[appLabelDisplay].subcategories[subcategoryKey].models[model] = {
+        model_cn: useEn
+          ? (permission.content_type.model_en || permission.content_type.model_cn || permission.content_type.model_verbose || model)
+          : (permission.content_type.model_cn || permission.content_type.model_verbose || model),
+        permissions: []
+      };
+    }
+    categories[appLabelDisplay].subcategories[subcategoryKey].models[model].permissions.push(permission);
+    return categories;
+  }, {} as Record<string, { sortOrder: number; subcategories: Record<string, { app_label: string; app_label_subcategory: string; app_label_subcategory_sort: number; models: Record<string, { model_cn: string; permissions: Permission[] }> }> }>);
+
+  // 构建三层树形结构：第一层分类 -> 第二层子分类 -> 具体权限
+  const sortedCategories = Object.entries(groupedByCategory).sort(([, categoryA], [, categoryB]) => {
+    return categoryA.sortOrder - categoryB.sortOrder;
+  });
+
+  return sortedCategories.map(([categoryName, categoryData]) => {
+    const subcategoryEntries = Object.entries(categoryData.subcategories);
+    const sortedSubcategories = subcategoryEntries.sort(([, subcategoryA], [, subcategoryB]) => {
+      return subcategoryA.app_label_subcategory_sort - subcategoryB.app_label_subcategory_sort;
+    });
+
+    const children: PermissionTreeNode[] = [];
+
+    sortedSubcategories.forEach(([subcategoryKey, subcategoryData]) => {
+      const modelEntries = Object.entries(subcategoryData.models);
+
+      // 如果有 app_label_subcategory，创建子分类层
+      if (subcategoryData.app_label_subcategory) {
+        children.push({
+          id: `subcategory_${subcategoryKey}`,
+          title: subcategoryData.app_label_subcategory,
+          isGroup: true,
+          children: modelEntries.map(([model, modelData]) => ({
+            id: `model_${subcategoryKey}_${model}`,
+            title: modelData.model_cn || model,
+            isGroup: true,
+            children: modelData.permissions.map(permission => ({
+              id: permission.id,
+              title: useEn ? (permission.name_en || permission.name) : (permission.name_cn || permission.name),
+              isGroup: false,
+              hasPermission: userPermIds.has(permission.id),
+              permission,
+            })),
+          })),
+        });
+      } else {
+        // 没有 app_label_subcategory，model_cn 直接顶上去作为第二层
+        modelEntries.forEach(([model, modelData]) => {
+          children.push({
+            id: `model_${subcategoryKey}_${model}`,
+            title: modelData.model_cn || model,
+            isGroup: true,
+            children: modelData.permissions.map(permission => ({
+              id: permission.id,
+              title: useEn ? (permission.name_en || permission.name) : (permission.name_cn || permission.name),
+              isGroup: false,
+              hasPermission: userPermIds.has(permission.id),
+              permission,
+            })),
+          });
+        });
+      }
+    });
+
+    return {
+      id: `category_${categoryName}`,
+      title: categoryName,
+      isGroup: true,
+      children,
+    };
+  });
+};
+
+// 获取所有权限
+const fetchAllPermissions = async () => {
+  loading.value = true;
+  try {
+    const response = await getPermissionList({ page: 1, pageSize: 1000 });
+    if (response.success && response.data) {
+      allPermissions.value = response.data;
+    } else {
+      Message.error(response.error || text.value.fetchPermissionListFailed);
+    }
+  } catch (error) {
+    console.error('获取权限列表出错:', error);
+    Message.error(text.value.fetchPermissionListError);
+  } finally {
+    loading.value = false;
+  }
+};
+
+// 获取用户/组织权限
+const fetchUserPermissions = async () => {
+  if (!props.id) return;
+
+  try {
+    let response;
+    if (props.type === 'user') {
+      response = await getUserPermissions(props.id);
+    } else {
+      response = await getGroupPermissions(props.id);
+    }
+
+    if (response.success && response.data) {
+      userPermissions.value = response.data;
+      updateCheckedKeys();
+    } else {
+      Message.error(response.error || text.value.fetchEntityPermissionsFailed(props.type === 'user' ? text.value.user : text.value.group));
+    }
+  } catch (error) {
+    console.error('获取权限出错:', error);
+    Message.error(text.value.fetchPermissionsError);
+  }
+};
+
+// 懒加载权限数据（供外部调用）
+const loadPermissions = async () => {
+  if (allPermissions.value.length === 0) {
+    await fetchAllPermissions();
+  }
+  if (props.id) {
+    await fetchUserPermissions();
+  }
+};
+
+// 更新选中状态
+const updateCheckedKeys = () => {
+  const userPermIds = userPermissions.value.map(p => p.id);
+  checkedKeys.value = userPermIds;
+};
+
+// 权限选择处理
+const onPermissionCheck = (checkedKeysValue: (string | number)[], info: any) => {
+  checkedKeys.value = checkedKeysValue;
+  halfCheckedKeys.value = info.halfCheckedKeys || [];
+};
+
+// 节点展开处理
+const onNodeExpand = (expandedKeysValue: (string | number)[]) => {
+  expandedKeys.value = expandedKeysValue;
+};
+
+// 获取所有分组节点的key
+const getAllGroupKeys = (treeData: PermissionTreeNode[]): (string | number)[] => {
+  const keys: (string | number)[] = [];
+
+  const traverse = (nodes: PermissionTreeNode[]) => {
+    nodes.forEach(node => {
+      if (node.isGroup) {
+        keys.push(node.id);
+        if (node.children) {
+          traverse(node.children);
+        }
+      }
+    });
+  };
+
+  traverse(treeData);
+  return keys;
+};
+
+// 切换展开全部/收起全部
+const toggleExpandAll = () => {
+  if (isAllExpanded.value) {
+    // 收起全部
+    expandedKeys.value = [];
+  } else {
+    // 展开全部
+    expandedKeys.value = getAllGroupKeys(permissionTreeData.value);
+  }
+};
+
+// 搜索处理
+const handleSearch = () => {
+  if (searchKeyword.value) {
+    // 搜索时自动展开包含匹配项的节点
+    const matchedGroupKeys = getMatchedGroupKeys(permissionTreeData.value, searchKeyword.value.toLowerCase());
+    expandedKeys.value = matchedGroupKeys;
+  } else {
+    // 清空搜索时收起所有节点
+    expandedKeys.value = [];
+  }
+};
+
+// 获取包含匹配项的分组节点key
+const getMatchedGroupKeys = (treeData: PermissionTreeNode[], keyword: string): (string | number)[] => {
+  const keys: (string | number)[] = [];
+
+  const traverse = (nodes: PermissionTreeNode[], parentKeys: (string | number)[] = []) => {
+    nodes.forEach(node => {
+      const currentPath = [...parentKeys, node.id];
+
+      if (node.isGroup && node.children) {
+        // 检查子节点是否有匹配项
+        const hasMatchedChildren = hasMatchedDescendants(node.children, keyword);
+        if (hasMatchedChildren) {
+          keys.push(...parentKeys, node.id);
+        }
+        traverse(node.children, currentPath);
+      }
+    });
+  };
+
+  traverse(treeData);
+  return [...new Set(keys)]; // 去重
+};
+
+// 检查节点及其后代是否有匹配项
+const hasMatchedDescendants = (nodes: PermissionTreeNode[], keyword: string): boolean => {
+  return nodes.some(node => {
+    const matches = node.title.toLowerCase().includes(keyword);
+    const childMatches = node.children ? hasMatchedDescendants(node.children, keyword) : false;
+    return matches || childMatches;
+  });
+};
+
+// 保存权限（完全替换）
+const handleSavePermissions = () => {
+  const entityType = props.type === 'user' ? text.value.user : text.value.group;
+
+  Modal.confirm({
+    title: text.value.confirmSaveTitle,
+    content: text.value.confirmSaveContent(entityType, selectedPermissionIds.value.length),
+    onOk: async () => {
+      saveLoading.value = true;
+      try {
+        let response;
+        if (props.type === 'user') {
+          response = await updateUserPermissions(props.id, selectedPermissionIds.value);
+        } else {
+          response = await updateGroupPermissions(props.id, selectedPermissionIds.value);
+        }
+
+        if (response.success) {
+          Message.success(response.message || text.value.saveSuccess);
+          await fetchUserPermissions();
+          emit('refresh');
+        } else {
+          Message.error(response.error || text.value.saveFailed);
+        }
+      } catch (error) {
+        console.error('保存权限出错:', error);
+        Message.error(text.value.saveError);
+      } finally {
+        saveLoading.value = false;
+      }
+    }
+  });
+};
+
+
+
+// 监听props变化
+watch(() => props.id, () => {
+  if (props.id) {
+    fetchUserPermissions();
+  }
+}, { immediate: true });
+
+// 组件挂载
+onMounted(async () => {
+  if (!props.lazy) {
+    await fetchAllPermissions();
+    if (props.id) {
+      await fetchUserPermissions();
+    }
+  }
+});
+
+// 暴露给父组件的方法
+defineExpose({
+  loadPermissions
+});
+</script>
+
+<style scoped>
+.permission-tree-selector {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.tree-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--theme-surface);
+  border: 1px solid var(--theme-border);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+  border-radius: 6px;
+}
+
+.tree-container {
+  flex: 1;
+  background: var(--theme-shell-soft, var(--theme-surface-soft));
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  padding: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.permission-node {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.permission-name {
+  flex: 1;
+  color: var(--theme-text);
+}
+
+.permission-count {
+  color: var(--theme-text-tertiary);
+  font-size: 12px;
+}
+
+.permission-tag {
+  margin-left: auto;
+}
+
+:deep(.arco-tree-node-title) {
+  flex: 1;
+  color: var(--theme-text);
+  border-radius: 6px;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+:deep(.arco-tree-node-title:hover) {
+  background: rgba(var(--theme-accent-rgb), 0.08);
+}
+
+:deep(.arco-tree-node-selected .arco-tree-node-title) {
+  background: rgba(var(--theme-accent-rgb), 0.12);
+}
+
+:deep(.arco-empty-description) {
+  color: var(--theme-empty-text);
+}
+
+:deep(.arco-empty-icon) {
+  color: var(--theme-empty-icon);
+}
+
+:deep(.arco-tree-node-switcher) {
+  color: var(--theme-text-tertiary);
+}
+
+:deep(.arco-tree-node-indent-line) {
+  border-color: var(--theme-border);
+}
+
+:deep(.arco-btn-secondary) {
+  background: var(--theme-surface);
+  border-color: var(--theme-border);
+  color: var(--theme-text-secondary);
+}
+
+:deep(.arco-btn-secondary:hover) {
+  color: var(--theme-accent);
+  border-color: var(--theme-accent);
+}
+</style>

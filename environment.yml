@@ -1,0 +1,9 @@
+name: local-knowledge-center
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip>=25
+  - nodejs=20
+  - pip:
+      - -r requirements.txt
