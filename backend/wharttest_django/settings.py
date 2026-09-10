@@ -4,15 +4,25 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR.parent / "data"
-FRONTEND_DIST = BASE_DIR.parent / "frontend" / "dist"
+PROJECT_ROOT = BASE_DIR.parent
+DATA_DIR = PROJECT_ROOT / "data"
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Load project-root .env so Windows can start without manually exporting vars.
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "local-knowledge-center-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() == "true"
 ALLOWED_HOSTS = [item.strip() for item in os.environ.get(
-    "DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost"
+    "DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost,192.168.32.138"
+).split(",") if item.strip()]
+CSRF_TRUSTED_ORIGINS = [item.strip() for item in os.environ.get(
+    "DJANGO_CSRF_TRUSTED_ORIGINS",
+    "http://127.0.0.1:8000,http://localhost:8000,http://192.168.32.138:8000",
 ).split(",") if item.strip()]
 
 INSTALLED_APPS = [

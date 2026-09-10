@@ -21,11 +21,20 @@ Python 包来自根目录 `requirements.txt`，前端包来自 `frontend/package
 
 ## 3. 启动
 
+macOS / Linux：
+
 ```bash
 ./scripts/start_backend.sh
 ```
 
-默认仅监听 `127.0.0.1:8000`。如果需要局域网访问，明确修改 `start_backend.sh` 的监听地址为物理机内网地址或 `0.0.0.0`，并同步设置 `DJANGO_ALLOWED_HOSTS`；不要直接暴露到公网。
+Windows（局域网访问，监听 `0.0.0.0:8000`）：
+
+```powershell
+conda activate local-knowledge-center
+.\scripts\start_backend.ps1
+```
+
+然后用 `http://192.168.32.138:8000` 访问（IP 以实际为准）。请确认 `.env` 中 `DJANGO_ALLOWED_HOSTS` 包含该 IP；不要直接暴露到公网。
 
 ## 4. 数据备份
 
