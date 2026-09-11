@@ -1,104 +1,89 @@
-from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User
-from prompts.models import UserPrompt, PromptType
+from django.core.management.base import BaseCommand
+
+from prompts.services import get_default_prompts, initialize_user_prompts
 
 
 class Command(BaseCommand):
-    help = 'Initializes the database with default prompts for the system.'
+    help = (
+        "从 prompts.default_templates（与 WHartTest 同源）为用户初始化默认提示词。"
+        "包含：默认通用提示词、六维评审分析、测试用例执行、智能用例生成、图表生成。"
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
-            '--user',
+            "--user",
             type=int,
-            help='User ID to assign the prompts to (default: first superuser)',
+            help="指定用户 ID；不传则默认第一个超级用户",
+        )
+        parser.add_argument(
+            "--all-users",
+            action="store_true",
+            help="为所有用户初始化提示词",
+        )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="强制用模板覆盖已存在的同名/同类型提示词",
+        )
+        parser.add_argument(
+            "--language",
+            choices=["zh", "en"],
+            default="zh",
+            help="模板语言（默认 zh）",
         )
 
-    def handle(self, *args, **kwargs):
-        self.stdout.write('Initializing default prompts...')
+    def handle(self, *args, **options):
+        language = options["language"]
+        force_update = options["force"]
+        templates = get_default_prompts(language)
+        self.stdout.write(
+            f"模板来源: prompts.default_templates/{language}.py （共 {len(templates)} 条）"
+        )
 
-        # 获取用户
-        user_id = kwargs.get('user')
-        if user_id:
+        if options["all_users"]:
+            users = list(User.objects.order_by("id"))
+            if not users:
+                self.stdout.write(self.style.ERROR("系统中没有任何用户"))
+                return
+        elif options.get("user"):
             try:
-                user = User.objects.get(id=user_id)
+                users = [User.objects.get(id=options["user"])]
             except User.DoesNotExist:
-                self.stdout.write(self.style.ERROR(f'User with ID {user_id} not found'))
+                self.stdout.write(self.style.ERROR(f"用户 ID={options['user']} 不存在"))
                 return
         else:
-            # 默认使用第一个超级用户
-            user = User.objects.filter(is_superuser=True).first()
+            user = User.objects.filter(is_superuser=True).order_by("id").first()
             if not user:
-                self.stdout.write(self.style.ERROR('No superuser found. Please create a superuser first or specify a user ID.'))
+                self.stdout.write(
+                    self.style.ERROR("未找到超级用户，请先创建或使用 --user / --all-users")
+                )
                 return
+            users = [user]
 
-        self.stdout.write(f'Using user: {user.username} (ID: {user.id})')
-
-        # 提示词内容
-        prompts_to_create = [
-            {
-                "name": "测试用例执行提示词",
-                "prompt_type": PromptType.TEST_CASE_EXECUTION,
-                "content": """# 角色
-你是一个专业的软件测试执行引擎。
-
-# 任务
-根据下面提供的测试用例信息,使用你可用的工具(特别是Playwright浏览器工具)来执行UI自动化测试。
-
-# 测试用例信息
-- **用例ID**: {testcase_id}
-- **用例名称**: {testcase_name}
-- **前置条件**: {precondition}
-
-# 执行步骤
-{steps}
-
-# 输出格式
-在所有步骤执行完毕后,你**必须**返回一个JSON对象,格式如下:
-```json
-{{
-  "testcase_id": {testcase_id},
-  "status": "pass" | "fail",
-  "summary": "对执行过程的简短总结。",
-  "steps": [
-    {{
-      "step_number": 1,
-      "description": "步骤的描述",
-      "status": "pass" | "fail",
-      "screenshot": "path/to/screenshot.png" | null,
-      "error": "如果失败,记录错误信息" | null
-    }},
-    ...
-  ]
-}}
-```""",
-                "description": "用于驱动测试用例自动执行的系统提示词",
-                "is_active": True,
-            }
-        ]
-
-        for prompt_data in prompts_to_create:
-            # 使用 get_or_create 来避免重复创建
-            # 注意：程序调用类型的提示词每个用户只能有一个
-            prompt, created = UserPrompt.objects.get_or_create(
-                user=user,
-                prompt_type=prompt_data["prompt_type"],
-                defaults={
-                    'name': prompt_data["name"],
-                    'content': prompt_data["content"].strip(),
-                    'description': prompt_data.get("description", ""),
-                    'is_active': prompt_data.get("is_active", True),
-                }
+        for user in users:
+            self.stdout.write(f"→ 初始化用户 {user.username} (id={user.id})")
+            result = initialize_user_prompts(
+                user, force_update=force_update, language=language
             )
+            summary = result.get("summary", {})
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"  created/updated={summary.get('created_count', 0)} "
+                    f"skipped={summary.get('skipped_count', 0)} "
+                    f"deleted={summary.get('deleted_count', 0)}"
+                )
+            )
+            for item in result.get("created", []):
+                action = item.get("action", "created")
+                self.stdout.write(f"    [{action}] {item.get('name')} ({item.get('prompt_type')})")
+            for item in result.get("skipped", [])[:5]:
+                self.stdout.write(f"    [skipped] {item.get('name')}")
+            if len(result.get("skipped", [])) > 5:
+                self.stdout.write(f"    ... 另有 {len(result['skipped']) - 5} 条跳过")
 
-            if created:
-                self.stdout.write(self.style.SUCCESS(f'Successfully created prompt: "{prompt.name}" for user {user.username}'))
-            else:
-                # 如果已存在,更新内容
-                prompt.name = prompt_data["name"]
-                prompt.content = prompt_data["content"].strip()
-                prompt.description = prompt_data.get("description", "")
-                prompt.is_active = prompt_data.get("is_active", True)
-                prompt.save()
-                self.stdout.write(self.style.WARNING(f'Prompt "{prompt.name}" already exists for user {user.username}. Updated it.'))
-
-        self.stdout.write(self.style.SUCCESS('Default prompts initialization complete.'))
+        self.stdout.write(self.style.SUCCESS("默认提示词初始化完成。"))
+        if not force_update:
+            self.stdout.write(
+                "提示：若需用 WHartTest 模板覆盖已有内容，请追加 --force"
+            )
