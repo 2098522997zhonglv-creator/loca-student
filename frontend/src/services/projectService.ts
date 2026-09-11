@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 // 用户详情接口
 export interface UserDetail {
@@ -117,12 +118,13 @@ export const getProjectList = async (params?: PaginationParams): Promise<Project
       },
     });
 
-    // API返回的格式为 { status: 'success', code: 200, data: [...] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    // 统一格式：{ status, data: [...] } 或 { status, data: { results, count } }
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<Project>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
-        total: response.data.data.length,
+        data: results,
+        total: count,
         statusCode: response.data.code,
       };
     } else {
@@ -369,14 +371,11 @@ export const getProjectMembers = async (projectId: number): Promise<{
       },
     });
 
-    // 打印原始响应，便于调试
-    console.log('项目成员API响应:', response.data);
-
-    // API返回的格式为 { status: 'success', code: 200, data: [...] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results } = normalizeListPayload<ProjectMember>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
       };
     } else {

@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 // 组织数据接口
 export interface Organization {
@@ -104,13 +105,14 @@ export const getOrganizationList = async (params: PaginationParams): Promise<Org
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...组织数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    // 统一格式：{ status, data: [...] } 或分页 { results, count }
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<Organization>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.data.length, // 使用数组长度作为总数
+        total: count,
       };
     } else {
       return {
@@ -405,13 +407,13 @@ export const getOrganizationUsers = async (organizationId: number, params?: Pagi
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...用户数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<OrganizationUser>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.data.length, // 使用数组长度作为总数
+        total: count,
       };
     } else {
       return {

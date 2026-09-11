@@ -55,6 +55,21 @@ def auto_assign_admin_permissions(sender, instance, created, **kwargs):
             # 条件：从管理员降级；动作：清空直接权限；结果：保留组权限但移除管理员直授能力。
             instance.user_permissions.clear()
             logger.info(f"用户 {instance.username} 取消管理员，已移除所有直接权限（用户组权限保留）")
+
+    # 新用户自动灌入默认提示词（与知识问答页“初始化提示词”同源模板）
+    if created:
+        try:
+            from prompts.services import initialize_user_prompts
+
+            result = initialize_user_prompts(instance, force_update=False, language='zh')
+            logger.info(
+                "用户 %s 默认提示词初始化完成: created=%s skipped=%s",
+                instance.username,
+                result.get('summary', {}).get('created_count'),
+                result.get('summary', {}).get('skipped_count'),
+            )
+        except Exception:
+            logger.exception("用户 %s 默认提示词初始化失败", instance.username)
     
     # 清理临时缓存字段，避免污染后续业务逻辑。
     if hasattr(instance, '_old_is_staff'):

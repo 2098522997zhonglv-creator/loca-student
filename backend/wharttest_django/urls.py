@@ -47,6 +47,12 @@ if (settings.FRONTEND_DIST / "index.html").exists():
 
     urlpatterns += [
         re_path(r"^assets/(?P<path>.*)$", serve, {"document_root": settings.FRONTEND_DIST / "assets"}),
+        # Vite copies public/* to dist root (e.g. brand-mark.svg); serve before SPA fallback.
+        re_path(
+            r"^(?P<path>[^/]+\.(?:svg|png|jpe?g|gif|ico|webp|txt|json|map))$",
+            serve,
+            {"document_root": settings.FRONTEND_DIST},
+        ),
         re_path(
             r"^(?!api/|admin/|media/|static/|assets/).*$",
             TemplateView.as_view(template_name="index.html"),

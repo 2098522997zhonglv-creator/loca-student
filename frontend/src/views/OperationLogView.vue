@@ -91,12 +91,13 @@
       </div>
 
       <a-table
+        class="operation-log-table"
         :columns="columns"
         :data="logs"
         :loading="loading"
         :pagination="pagination"
-        :bordered="false"
-        :scroll="{ y: 'calc(100vh - 240px)' }"
+        :bordered="{ cell: true }"
+        :scroll="{ x: 1280, y: 'calc(100vh - 260px)' }"
         @page-change="handlePageChange"
         @page-size-change="handlePageSizeChange"
       >
@@ -317,12 +318,14 @@ const columns = computed(() => [
     title: tl('请求路径'),
     dataIndex: 'path',
     slotName: 'path',
+    width: 260,
+    ellipsis: true,
   },
   {
     title: tl('状态码'),
     dataIndex: 'response_code',
     slotName: 'response_code',
-    width: 110,
+    width: 100,
     align: 'center' as const,
   },
   {
@@ -337,6 +340,7 @@ const columns = computed(() => [
     slotName: 'optional',
     width: 100,
     align: 'center' as const,
+    fixed: 'right' as const,
   },
 ]);
 
@@ -643,12 +647,20 @@ const getStatusTagColor = (code: number | null) => {
   padding: 2px 6px;
   border-radius: 4px;
   color: var(--color-text-2);
-  max-width: 320px;
+  max-width: 100%;
   display: inline-block;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   vertical-align: middle;
+}
+
+.operation-log-table :deep(.arco-table-td) {
+  overflow: hidden;
+}
+
+.operation-log-table :deep(.arco-table-cell) {
+  overflow: hidden;
 }
 
 /* 详情抽屉样式 */

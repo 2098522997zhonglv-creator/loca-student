@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 // 权限数据接口
 export interface Permission {
@@ -95,13 +96,13 @@ export const getPermissionList = async (params?: PaginationParams): Promise<Perm
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...权限数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<Permission>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.total || response.data.data.length,
+        total: response.data.total || count,
       };
     } else {
       return {
@@ -233,13 +234,13 @@ export const getUserPermissions = async (userId: number): Promise<PermissionList
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...权限数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<Permission>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.data.length,
+        total: count,
       };
     } else {
       return {
@@ -313,13 +314,13 @@ export const getGroupPermissions = async (groupId: number): Promise<PermissionLi
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...权限数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<Permission>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.data.length,
+        total: count,
       };
     } else {
       return {

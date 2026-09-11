@@ -2,6 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 // 内容类型数据接口
 export interface ContentType {
@@ -52,13 +53,13 @@ export const getContentTypeList = async (params?: ContentTypeQueryParams): Promi
       },
     });
 
-    // 假设API返回的数据格式为 { status: 'success', code: 200, message: '数据获取成功', data: [...内容类型数组] }
-    if (response.data && response.data.status === 'success' && Array.isArray(response.data.data)) {
+    if (response.data && response.data.status === 'success') {
+      const { results, count } = normalizeListPayload<ContentType>(response.data.data);
       return {
         success: true,
-        data: response.data.data,
+        data: results,
         statusCode: response.data.code,
-        total: response.data.total || response.data.data.length,
+        total: response.data.total || count,
       };
     } else {
       return {

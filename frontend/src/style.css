@@ -1599,3 +1599,16 @@ body {
   color: var(--theme-text-secondary);
   font-size: 14px;
 }
+
+/* 管理页表格：避免列内容互相叠压 */
+body:not([arco-theme='dark']) .arco-table-th,
+body:not([arco-theme='dark']) .arco-table-header {
+  background: #eef4f2 !important;
+  color: #35524a !important;
+  font-weight: 600;
+}
+
+.arco-table-td .arco-table-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

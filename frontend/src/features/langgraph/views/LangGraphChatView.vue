@@ -170,7 +170,8 @@ import {
   resumeAgentLoop
 } from '@/features/langgraph/services/chatService';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
-import { getUserPrompts } from '@/features/prompts/services/promptService';
+import { getUserPrompts, initializeUserPrompts } from '@/features/prompts/services/promptService';
+import { toArray } from '@/utils/responseHelpers';
 import type { ChatRequest, ChatHistoryMessage, ChatSessionDetail } from '@/features/langgraph/types/chat';
 import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
 import { useProjectStore } from '@/store/projectStore';
@@ -249,6 +250,7 @@ const pageText = computed(() => (
         noAvailableLlmConfig: 'No available LLM configuration found',
         getLlmConfigFailed: 'Failed to get LLM configuration',
         addPromptFirst: 'Please add or initialize prompts before starting a conversation',
+        promptsInitialized: 'Default prompts initialized',
         legacyConfigPromptWarn: 'Current active config is from legacy defaults; slot prompt cannot be updated here',
         systemPromptUpdateSuccess: 'System prompt updated successfully',
         systemPromptUpdateFailed: 'Failed to update system prompt',
@@ -309,6 +311,7 @@ const pageText = computed(() => (
         noAvailableLlmConfig: '未找到可用的 LLM 配置',
         getLlmConfigFailed: '获取LLM配置失败',
         addPromptFirst: '请添加或初始化提示词后才能开始对话',
+        promptsInitialized: '已自动初始化默认提示词',
         legacyConfigPromptWarn: '当前生效配置来自旧版默认配置，无法在此处更新槽位提示词',
         systemPromptUpdateSuccess: '系统提示词更新成功',
         systemPromptUpdateFailed: '更新系统提示词失败',
@@ -2276,7 +2279,7 @@ const checkPromptStatusAfterClose = async () => {
     });
 
     if (response.status === 'success') {
-      const prompts = Array.isArray(response.data) ? response.data : response.data.results || [];
+      const prompts = toArray(response.data);
       hasPrompts.value = prompts.length > 0;
       
       // 如果还是没有提示词，提示用户
@@ -2315,7 +2318,7 @@ const handleUpdateSystemPrompt = async (configId: number, systemPrompt: string) 
   }
 };
 
-// 检查提示词状态
+// 检查提示词状态；若为空则自动初始化内置默认提示词（优化前已有的模板）
 const checkPromptStatus = async () => {
   try {
     const response = await getUserPrompts({
@@ -2324,13 +2327,33 @@ const checkPromptStatus = async () => {
     });
 
     if (response.status === 'success') {
-      const prompts = Array.isArray(response.data) ? response.data : response.data.results || [];
+      let prompts = toArray(response.data);
       hasPrompts.value = prompts.length > 0;
       console.log('📝 提示词状态检查完成:', { hasPrompts: hasPrompts.value, count: prompts.length });
-      
-      // 如果没有提示词，自动弹出管理弹窗
+
+      if (!hasPrompts.value) {
+        console.log('📝 未检测到提示词，自动初始化默认模板...');
+        const initResult = await initializeUserPrompts(false, 'zh');
+        if (initResult.status === 'success') {
+          const after = await getUserPrompts({ is_active: true, page_size: 1 });
+          prompts = toArray(after.data);
+          hasPrompts.value = prompts.length > 0;
+          if (hasPrompts.value) {
+            Message.success(
+              pageText.value.promptsInitialized
+                || `已初始化默认提示词（新建 ${initResult.data?.summary?.created_count ?? 0} 条）`
+            );
+            if (chatHeaderRef.value) {
+              await chatHeaderRef.value.refreshPrompts();
+            }
+          }
+        }
+      }
+
+      // 初始化后仍没有提示词，弹出管理弹窗
       if (!hasPrompts.value) {
         console.log('⚠️ 没有提示词，自动弹出管理弹窗');
+        Message.warning(pageText.value.addPromptFirst);
         isSystemPromptModalVisible.value = true;
       }
     } else {
@@ -2355,7 +2378,7 @@ const handlePromptsUpdated = async () => {
     });
 
     if (response.status === 'success') {
-      const prompts = Array.isArray(response.data) ? response.data : response.data.results || [];
+      const prompts = toArray(response.data);
       hasPrompts.value = prompts.length > 0;
       console.log('📝 提示词状态更新完成:', { hasPrompts: hasPrompts.value, count: prompts.length });
     }
@@ -2372,7 +2395,7 @@ const handlePromptsUpdated = async () => {
       });
 
       if (response.status === 'success') {
-        const allPrompts = Array.isArray(response.data) ? response.data : response.data.results || [];
+        const allPrompts = toArray(response.data);
         const currentPromptExists = allPrompts.some(prompt => prompt.id === selectedPromptId.value);
 
         if (!currentPromptExists) {

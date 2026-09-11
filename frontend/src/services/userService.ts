@@ -1,8 +1,8 @@
 // 用户管理服务
-// 用户管理服务
 import axios from 'axios';
 import { request } from '@/utils/request';
 import { useAuthStore } from '@/store/authStore';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 // 用户数据接口
 export interface User {
@@ -96,20 +96,20 @@ export const getUserList = async (params: PaginationParams): Promise<UserListRes
       }
     });
 
-    if (response.success && Array.isArray(response.data)) {
+    if (response.success) {
+      const { results, count } = normalizeListPayload<User>(response.data);
       return {
         success: true,
-        data: response.data,
+        data: results,
         statusCode: 200,
-        total: response.data.length, // 使用数组长度作为总数
-      };
-    } else {
-      return {
-        success: false,
-        error: response.error || '获取用户列表失败：响应数据格式不正确',
-        statusCode: 500,
+        total: typeof response.total === 'number' ? response.total : count,
       };
     }
+    return {
+      success: false,
+      error: response.error || '获取用户列表失败：响应数据格式不正确',
+      statusCode: 500,
+    };
   } catch (error) {
     let errorMessage = '获取用户列表失败，请稍后再试';
     let statusCode: number | undefined;
