@@ -3,7 +3,7 @@
     <div v-if="!selectedKB" class="page-header">
       <div>
         <h1 class="page-title">{{ pageText.pageTitle }}</h1>
-        <p class="page-subtitle">管理项目文档、分块与向量检索配置</p>
+        <p class="page-subtitle">{{ pageText.pageSubtitle }}</p>
       </div>
       <div class="header-actions">
         <a-button @click="showConfigModal" style="margin-right: 8px">
@@ -157,6 +157,7 @@ const pageText = computed(() => (
   isEnglish.value
     ? {
         pageTitle: 'Knowledge Base',
+        pageSubtitle: 'Manage documents, chunking, and retrieval settings',
         knowledgeBaseConfig: 'Knowledge base config',
         createKnowledgeBase: 'New knowledge base',
         searchPlaceholder: 'Search knowledge bases...',
@@ -189,6 +190,7 @@ const pageText = computed(() => (
       }
     : {
         pageTitle: '知识库管理',
+        pageSubtitle: '管理项目文档、分块与向量检索配置',
         knowledgeBaseConfig: '知识库配置',
         createKnowledgeBase: '新建知识库',
         searchPlaceholder: '搜索知识库...',
@@ -303,7 +305,7 @@ const columns = computed(() => [
   {
     title: pageText.value.actions,
     slotName: 'actions',
-    width: 210,
+    width: isEnglish.value ? 280 : 240,
     align: 'center',
     fixed: 'right',
   },
@@ -513,6 +515,12 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
+.page-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--theme-text-tertiary);
+}
+
 .header-actions {
   display: flex;
   gap: 8px;
@@ -583,7 +591,11 @@ onMounted(async () => {
 }
 
 .knowledge-base-list :deep(.arco-table-td) {
-  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.knowledge-base-list :deep(.arco-table-td .arco-space) {
+  flex-wrap: wrap;
 }
 
 @media (max-width: 900px) {

@@ -1,16 +1,22 @@
 <template>
   <div class="apikey-management">
     <div class="page-header">
-      <div class="search-box">
-        <a-input-search
-          :placeholder="pageText.searchPlaceholder"
-          allow-clear
-          style="width: 300px"
-          @search="onSearch"
-        />
+      <div>
+        <h1 class="page-title">{{ pageText.pageTitle }}</h1>
+        <p class="page-subtitle">{{ pageText.pageSubtitle }}</p>
       </div>
-      <div class="action-buttons">
-        <a-button type="primary" @click="showAddApiKeyModal">{{ pageText.createKey }}</a-button>
+      <div class="header-right">
+        <div class="search-box">
+          <a-input-search
+            :placeholder="pageText.searchPlaceholder"
+            allow-clear
+            style="width: 300px"
+            @search="onSearch"
+          />
+        </div>
+        <div class="action-buttons">
+          <a-button type="primary" @click="showAddApiKeyModal">{{ pageText.createKey }}</a-button>
+        </div>
       </div>
     </div>
 
@@ -174,6 +180,8 @@ const pageText = computed(() => (
     ? {
         searchPlaceholder: 'Search key name',
         createKey: 'Create key',
+        pageTitle: 'API Keys',
+        pageSubtitle: 'Create and manage API keys for external access',
         showOrHide: 'Show/Hide',
         copy: 'Copy',
         neverExpires: 'Never expires',
@@ -219,6 +227,8 @@ const pageText = computed(() => (
     : {
         searchPlaceholder: '搜索Key名称',
         createKey: '创建Key',
+        pageTitle: 'API 密钥',
+        pageSubtitle: '创建与管理对外访问用的 API 密钥',
         showOrHide: '显示/隐藏',
         copy: '复制',
         neverExpires: '永不过期',
@@ -678,8 +688,31 @@ const toggleKeyVisibility = (record: ApiKeyItem) => {
 .page-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 16px;
   margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  margin: 0;
+  font-family: var(--kc-display);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--kc-ink);
+}
+
+.page-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--theme-text-tertiary);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .new-apikey-box {

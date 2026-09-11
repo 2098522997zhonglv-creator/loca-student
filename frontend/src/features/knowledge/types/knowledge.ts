@@ -6,7 +6,14 @@ export type EmbeddingServiceType = 'openai' | 'azure_openai' | 'ollama' | 'xinfe
 /**
  * Reranker 服务类型
  */
-export type RerankerServiceType = 'none' | 'xinference' | 'custom';
+export type RerankerServiceType =
+  | 'none'
+  | 'xinference'
+  | 'openai_compatible'
+  | 'tei'
+  | 'jina'
+  | 'cohere'
+  | 'custom';
 
 /**
  * 嵌入服务选项接口

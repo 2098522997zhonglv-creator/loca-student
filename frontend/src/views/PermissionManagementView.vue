@@ -82,7 +82,7 @@
       <div class="permission-panel">
         <div v-if="!selectedEntity" class="no-selection">
           <div class="empty-state">
-            <i class="arco-icon arco-icon-info-circle"></i>
+            <icon-info-circle />
             <p>{{ pageText.selectEntityNotice }}</p>
           </div>
         </div>
@@ -90,7 +90,8 @@
         <div v-else class="permission-details">
           <div class="details-header">
             <div class="entity-info">
-              <i :class="activeEntityType === 'user' ? 'arco-icon arco-icon-user' : 'arco-icon arco-icon-user-group'"></i>
+              <icon-user v-if="activeEntityType === 'user'" />
+              <icon-user-group v-else />
               <div class="entity-details">
                 <h3>{{ pageText.entityPermissions(activeEntityType === 'user' ? (selectedEntity as User).username : (selectedEntity as Organization).name) }}</h3>
                 <p>{{ activeEntityType === 'user' ? (selectedEntity as User).email : pageText.groupId(selectedEntity.id) }}</p>
@@ -115,6 +116,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
+import { IconInfoCircle, IconUser, IconUserGroup } from '@arco-design/web-vue/es/icon';
 import { getUserList, type User } from '@/services/userService';
 import { getOrganizationList, type Organization } from '@/services/organizationService';
 import PermissionTreeSelector from '@/components/permission/PermissionTreeSelector.vue';
@@ -381,7 +383,7 @@ onMounted(() => {
   transition: all 0.2s ease;
   box-sizing: border-box;
   display: block;
-  width: 230px;
+  width: 100%;
 }
 
 .entity-item:hover {

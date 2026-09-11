@@ -1,8 +1,8 @@
 <template>
   <div class="requirement-management page-shell">
     <div class="page-intro">
-      <h1 class="page-title">需求评审</h1>
-      <p class="page-subtitle">上传需求文档，完成模块拆分与专项评审</p>
+      <h1 class="page-title">{{ pageText.pageTitle }}</h1>
+      <p class="page-subtitle">{{ pageText.pageSubtitle }}</p>
     </div>
     <!-- 搜索和筛选 -->
     <div class="filter-section">
@@ -279,6 +279,8 @@ const { isEnglish } = useAppI18n();
 const pageText = computed(() => (
   isEnglish.value
     ? {
+        pageTitle: 'Requirement Review',
+        pageSubtitle: 'Upload requirement docs, split modules, and run specialized reviews',
         searchPlaceholder: 'Search document title or description',
         documentStatus: 'Document status',
         documentType: 'Document type',
@@ -340,6 +342,8 @@ const pageText = computed(() => (
         unknownSize: 'Unknown size',
       }
     : {
+        pageTitle: '需求评审',
+        pageSubtitle: '上传需求文档，完成模块拆分与专项评审',
         searchPlaceholder: '搜索文档标题或描述',
         documentStatus: '文档状态',
         documentType: '文档类型',
@@ -603,7 +607,7 @@ const columns = computed(() => [
   {
     title: pageText.value.actionsColumn,
     slotName: 'actions',
-    width: 260,
+    width: isEnglish.value ? 360 : 300,
     fixed: 'right',
     align: 'center'
   }
@@ -1058,7 +1062,8 @@ projectStore.$subscribe((_mutation, state) => {
 
 .actions-wrapper {
   display: flex;
-  justify-content: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 </style>

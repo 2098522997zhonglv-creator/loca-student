@@ -111,12 +111,12 @@
             </template>
 
             <template #actions="{ record }">
-              <a-space>
+              <a-space :size="4" wrap class="doc-actions">
                 <a-button
-                type="text"
-                size="mini"
-                @click="viewDocument(record.id)"
-              >
+                  type="text"
+                  size="mini"
+                  @click="viewDocument(record.id)"
+                >
                   {{ text.view }}
                 </a-button>
                 <a-button
@@ -568,7 +568,8 @@ const documentColumns = computed(() => ([
   {
     title: text.value.columnActions,
     slotName: 'actions',
-    width: 80,
+    width: isEnglish.value ? 220 : 180,
+    fixed: 'right',
   },
 ]));
 
@@ -839,6 +840,10 @@ onMounted(() => {
 .status-cell {
   display: flex;
   align-items: center;
+}
+
+.doc-actions {
+  white-space: nowrap;
 }
 
 .query-section {

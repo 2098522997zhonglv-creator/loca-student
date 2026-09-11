@@ -831,12 +831,12 @@ def test_embedding_connection(request):
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
 def test_reranker_connection(request):
-    """测试 Reranker 服务连接"""
-    import requests as http_requests
+    """测试 Reranker 服务连接（支持开源 HTTP / Xinference / TEI / Jina / Cohere）"""
+    from .reranker import SemanticReranker, resolve_reranker_endpoint
 
     config = KnowledgeGlobalConfig.get_config()
     reranker_service = request.data.get("reranker_service")
-    reranker_api_url = request.data.get("reranker_api_url", "").rstrip("/")
+    reranker_api_url = request.data.get("reranker_api_url", "")
     reranker_api_key = request.data.get("reranker_api_key")
     if reranker_api_key is None:
         reranker_api_key = config.reranker_api_key or ""
@@ -847,110 +847,37 @@ def test_reranker_connection(request):
     reranker_model_name = request.data.get("reranker_model_name", "")
 
     logger.info(
-        f"[Reranker测试] 收到请求: service={reranker_service}, url={reranker_api_url}, model={reranker_model_name}"
+        "RERANK test service=%s url=%s model=%s",
+        reranker_service,
+        reranker_api_url,
+        reranker_model_name,
     )
 
     if not reranker_service or reranker_service == "none":
         return Response(
             {"error": "请选择 Reranker 服务"}, status=status.HTTP_400_BAD_REQUEST
         )
-    if not reranker_api_url:
-        return Response(
-            {"error": "请输入 Reranker API 地址"}, status=status.HTTP_400_BAD_REQUEST
-        )
     if not reranker_model_name:
         return Response(
             {"error": "请输入 Reranker 模型名称"}, status=status.HTTP_400_BAD_REQUEST
         )
 
-    test_query = "What is machine learning?"
-    test_documents = [
-        "Machine learning is a subset of AI.",
-        "The weather is nice today.",
-    ]
+    endpoint = resolve_reranker_endpoint(
+        service=reranker_service,
+        api_url=reranker_api_url,
+        model_name=reranker_model_name,
+        api_key=reranker_api_key or None,
+        fallback_base_url=config.api_base_url if config.embedding_service == "xinference" else None,
+    )
+    if not endpoint:
+        return Response(
+            {"error": "请输入有效的 Reranker API 地址"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
     try:
-        if reranker_service == "xinference":
-            test_url = f"{reranker_api_url}/v1/rerank"
-            headers = {"Content-Type": "application/json"}
-            request_body = {
-                "model": reranker_model_name,
-                "query": test_query,
-                "documents": test_documents,
-            }
-        elif reranker_service == "custom":
-            test_url = reranker_api_url
-            headers = {"Content-Type": "application/json"}
-            if reranker_api_key:
-                headers["Authorization"] = f"Bearer {reranker_api_key}"
-            request_body = {
-                "model": reranker_model_name,
-                "query": test_query,
-                "documents": test_documents,
-            }
-        else:
-            return Response(
-                {"error": f"不支持的 Reranker 服务类型: {reranker_service}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        logger.info(f"[Reranker测试] 发送请求: URL={test_url}")
-
-        session = http_requests.Session()
-        session.trust_env = False
-        response = session.post(
-            test_url, json=request_body, headers=headers, timeout=30
-        )
-
-        logger.info(f"[Reranker测试] 响应状态: {response.status_code}")
-
-        if response.ok:
-            data = response.json()
-            # Xinference rerank 返回格式: {"results": [{"index": 0, "relevance_score": 0.9}, ...]}
-            has_results = (
-                data.get("results")
-                and isinstance(data["results"], list)
-                and len(data["results"]) > 0
-            )
-
-            if has_results:
-                logger.info("[Reranker测试] 测试成功")
-                return Response(
-                    {"success": True, "message": "Reranker 服务测试成功！服务运行正常"}
-                )
-            else:
-                logger.warning(f"[Reranker测试] 数据格式异常: {str(data)[:200]}")
-                return Response(
-                    {
-                        "success": False,
-                        "message": "服务响应成功但数据格式异常，请检查配置",
-                    }
-                )
-        else:
-            error_text = response.text[:500]
-            logger.warning(
-                f"[Reranker测试] HTTP错误: {response.status_code} - {error_text}"
-            )
-            return Response(
-                {
-                    "success": False,
-                    "message": f"Reranker 测试失败: HTTP {response.status_code} - {error_text}",
-                }
-            )
-
-    except http_requests.Timeout:
-        logger.warning("[Reranker测试] 请求超时")
-        return Response(
-            {"success": False, "message": "请求超时，请检查服务是否正常运行"}
-        )
-    except http_requests.ConnectionError as e:
-        logger.warning(f"[Reranker测试] 连接失败: {e}")
-        return Response(
-            {
-                "success": False,
-                "message": f"无法连接到 Reranker 服务，请检查URL和网络: {str(e)}",
-            }
-        )
+        result = SemanticReranker(endpoint, timeout=30).test_connection()
+        return Response(result)
     except Exception as e:
-        logger.error(f"[Reranker测试] 未知错误: {e}", exc_info=True)
-        return Response({"success": False, "message": f"Reranker 测试失败: {str(e)}"})
+        logger.warning("RERANK test failed: %s", e)
+        return Response({"success": False, "message": f"Reranker 测试失败: {e}"})

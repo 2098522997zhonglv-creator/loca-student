@@ -951,8 +951,7 @@ class VectorStoreManager:
     # RRF 融合参数
     RRF_K = 60
     # Reranker 配置
-    RERANKER_MODEL = "Qwen3-VL-Reranker-2B"
-    RERANKER_ENABLED = True  # 可通过环境变量控制
+    RERANKER_MODEL = "bge-reranker-v2-m3"
 
     # 类级别的缓存
     _vector_store_cache = {}
@@ -1131,28 +1130,19 @@ class VectorStoreManager:
             model_name=config.model_name or "qwen3-vl-emb-2b",
         )
 
+    def _get_semantic_reranker(self):
+        """Build SemanticReranker from global config, or None if disabled."""
+        from .reranker import SemanticReranker
+
+        return SemanticReranker.from_global_config(self.global_config)
+
     def _get_reranker_config(self) -> tuple:
-        """获取 Reranker 配置 → (url, model, api_key)"""
-        config = self.global_config
-
-        reranker_service = getattr(config, "reranker_service", "none")
-        if reranker_service == "none":
+        """获取 Reranker 配置 → (url, model, api_key)（兼容旧调用）"""
+        client = self._get_semantic_reranker()
+        if not client:
             return None, None, None
-
-        reranker_api_url = getattr(config, "reranker_api_url", None)
-        if not reranker_api_url:
-            if config.embedding_service == "xinference" and config.api_base_url:
-                reranker_api_url = config.api_base_url
-            elif reranker_service == "xinference":
-                reranker_api_url = "http://localhost:9997"
-            else:
-                return None, None, None
-
-        reranker_model = getattr(config, "reranker_model_name", "Qwen3-VL-Reranker-2B")
-        reranker_api_key = getattr(config, "reranker_api_key", None) or None
-
-        base_url = reranker_api_url.rstrip("/")
-        return f"{base_url}/v1/rerank", reranker_model, reranker_api_key
+        endpoint = client.endpoint
+        return endpoint.url, endpoint.model, endpoint.api_key
 
     def _get_reranker_url(self) -> Optional[str]:
         """获取 Reranker 服务地址"""
@@ -1231,71 +1221,45 @@ class VectorStoreManager:
     def _rerank(
         self, query: str, candidates: List[Dict[str, Any]], top_k: int
     ) -> List[Dict[str, Any]]:
-        """使用 Reranker 对候选结果进行精排 + Composite Score"""
-        reranker_url = self._get_reranker_url()
-        reranker_model = self._get_reranker_model()
-        reranker_api_key = self._get_reranker_api_key()
-        if not reranker_url or not candidates:
+        """使用外接语义重排模型精排 + Composite Score"""
+        client = self._get_semantic_reranker()
+        if not client or not candidates:
             return candidates[:top_k]
 
         try:
-            import requests as http_requests
-
-            documents = [
-                c.get("payload", {}).get("page_content", "") for c in candidates
-            ]
+            documents = []
+            for c in candidates:
+                payload = c.get("payload") or {}
+                text = (
+                    payload.get("page_content")
+                    or c.get("content")
+                    or ""
+                )
+                documents.append(text)
             if not any(documents):
                 return candidates[:top_k]
 
-            headers = {"Content-Type": "application/json"}
-            if reranker_api_key:
-                headers["Authorization"] = f"Bearer {reranker_api_key}"
-
-            session = http_requests.Session()
-            session.trust_env = False
-            logger.info(
-                f"🔄 Reranker 请求: URL={reranker_url}, model={reranker_model}, docs={len(documents)}"
-            )
-            response = session.post(
-                reranker_url,
-                json={
-                    "model": reranker_model,
-                    "query": query,
-                    "documents": documents,
-                    "top_n": top_k,
-                },
-                headers=headers,
-                timeout=1200,
-            )
-
-            if not response.ok:
-                logger.warning(
-                    f"⚠️ Reranker 调用失败（极大可能是超时，全局搜索此报错，修改超时时间：timeout）: HTTP {response.status_code}, 降级为 RRF 排序"
-                )
-                return candidates[:top_k]
-
-            results = response.json().get("results", [])
-            if not results:
-                logger.warning("⚠️ Reranker 返回空结果，降级为 RRF 排序")
-                return candidates[:top_k]
-
+            scored = client.rerank_texts(query, documents, top_n=top_k)
             reranked = []
-            for item in results:
-                idx = item.get("index", 0)
-                rerank_score = item.get("relevance_score", 0.0)
+            for idx, rerank_score in scored:
                 if 0 <= idx < len(candidates):
                     candidate = candidates[idx].copy()
-                    rrf_score = candidate.get("score", 0.0)
+                    base_score = float(candidate.get("score", candidate.get("similarity_score", 0.0)) or 0.0)
                     candidate["rerank_score"] = rerank_score
-                    candidate["score"] = self._composite_score(rerank_score, rrf_score)
+                    candidate["score"] = self._composite_score(rerank_score, base_score)
                     reranked.append(candidate)
 
             reranked.sort(key=lambda x: x.get("score", 0), reverse=True)
-            logger.info(f"🎯 Reranker + Composite Score 完成: {len(reranked)} 条结果")
+            logger.info(
+                "RERANK done service=%s model=%s results=%s",
+                client.endpoint.service,
+                client.endpoint.model,
+                len(reranked),
+            )
             return reranked
 
         except Exception as e:
-            logger.warning(f"⚠️ Reranker 调用异常: {e}, 降级为 RRF 排序")
+            logger.warning("RERANK failed, fallback to prior ranking: %s", e)
             return candidates[:top_k]
 
     def _create_custom_api_embeddings(self, config):
@@ -1629,10 +1593,12 @@ class VectorStoreManager:
     def _dense_similarity_search(
         self, query: str, k: int, score_threshold: float
     ) -> List[Dict[str, Any]]:
-        """纯稠密向量检索"""
+        """纯稠密向量检索（可选外接语义重排）"""
         try:
             dense_vector = self.embeddings.embed_query(query)
             collection_name = self._get_collection_name()
+            reranker_enabled = self._get_reranker_url() is not None
+            limit = max(k * 3, 15) if reranker_enabled else k
 
             results = self.qdrant_client.search(
                 collection_name=collection_name,
@@ -1640,11 +1606,27 @@ class VectorStoreManager:
                     name=self.DENSE_VECTOR_NAME,
                     vector=dense_vector,
                 ),
-                limit=k,
+                limit=limit,
                 with_payload=True,
             )
 
             logger.info(f"🔍 稠密检索结果: {len(results)}")
+            if reranker_enabled and results:
+                candidates = [
+                    {
+                        "id": str(point.id),
+                        "payload": point.payload or {},
+                        "score": float(point.score or 0.0),
+                    }
+                    for point in results
+                ]
+                logger.info("启用稠密路径语义重排...")
+                candidates = self._rerank(query, candidates, k)
+                formatted = self._format_fused_results(candidates, score_threshold)
+                if len(formatted) > 1:
+                    formatted = self._mmr_diversify(formatted, k)
+                return formatted
+
             return self._format_search_results(results, score_threshold)
 
         except Exception as e:

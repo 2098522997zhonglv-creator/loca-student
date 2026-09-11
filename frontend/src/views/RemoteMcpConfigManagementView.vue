@@ -12,6 +12,7 @@
         :columns="columns"
         :loading="loading"
         :pagination="pagination"
+        :scroll="{ x: 960 }"
         @page-change="onPageChange"
         @page-size-change="onPageSizeChange"
         row-key="id"
@@ -27,7 +28,7 @@
         </template>
 
         <template #operations="{ record }">
-          <a-space>
+          <a-space wrap :size="[4, 4]">
             <a-button type="text" size="small" @click="showEditForm(record)">
               <template #icon><icon-edit /></template>
               {{ pageText.edit }}
@@ -62,12 +63,8 @@
         </template>
       </a-table>
 
-      <!-- 调试信息 -->
       <div v-if="mcpConfigs.length === 0 && !loading" class="empty-data">
         <p>{{ pageText.noData }}</p>
-      </div>
-      <div v-if="mcpConfigs.length > 0" class="debug-info" style="margin-top: 10px; font-size: 12px; color: var(--theme-text-tertiary);">
-        <p>{{ pageText.currentDataCount(mcpConfigs.length) }}</p>
       </div>
     </a-card>
 
@@ -282,6 +279,8 @@ const columns = computed(() => [
     title: pageText.value.actionsColumn,
     slotName: 'operations',
     align: 'center',
+    width: isEnglish.value ? 380 : 320,
+    fixed: 'right',
   },
 ]);
 

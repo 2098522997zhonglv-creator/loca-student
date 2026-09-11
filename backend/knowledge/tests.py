@@ -107,3 +107,120 @@ class KnowledgeGlobalConfigSecretHandlingTests(TestCase):
         self.assertEqual(self.config.reranker_api_key, "reranker-real-secret")
         self.assertEqual(self.config.chunk_size, 1300)
         self.assertEqual(self.config.chunk_overlap, 160)
+
+
+class SemanticRerankerEndpointTests(TestCase):
+    """外接开源语义重排：URL 解析与响应归一化。"""
+
+    def test_resolve_xinference_and_openai_compatible_urls(self):
+        from .reranker import resolve_reranker_endpoint
+
+        xi = resolve_reranker_endpoint(
+            service="xinference",
+            api_url="http://127.0.0.1:9997",
+            model_name="bge-reranker-v2-m3",
+        )
+        self.assertIsNotNone(xi)
+        self.assertEqual(xi.url, "http://127.0.0.1:9997/v1/rerank")
+        self.assertEqual(xi.service, "xinference")
+
+        full = resolve_reranker_endpoint(
+            service="openai_compatible",
+            api_url="http://host:8001/v1/rerank",
+            model_name="bge-reranker-v2-m3",
+        )
+        self.assertEqual(full.url, "http://host:8001/v1/rerank")
+
+        custom = resolve_reranker_endpoint(
+            service="custom",
+            api_url="http://host:8080",
+            model_name="",
+        )
+        self.assertEqual(custom.service, "openai_compatible")
+        self.assertEqual(custom.model, "bge-reranker-v2-m3")
+        self.assertEqual(custom.url, "http://host:8080/v1/rerank")
+
+    def test_resolve_tei_jina_cohere_urls(self):
+        from .reranker import resolve_reranker_endpoint
+
+        tei = resolve_reranker_endpoint(
+            service="tei",
+            api_url="http://127.0.0.1:8080",
+            model_name="BAAI/bge-reranker-v2-m3",
+        )
+        self.assertEqual(tei.url, "http://127.0.0.1:8080/rerank")
+        self.assertEqual(tei.service, "tei")
+
+        jina = resolve_reranker_endpoint(
+            service="jina",
+            api_url="https://api.jina.ai",
+            model_name="jina-reranker-v2-base-multilingual",
+        )
+        self.assertEqual(jina.url, "https://api.jina.ai/v1/rerank")
+
+        cohere = resolve_reranker_endpoint(
+            service="cohere",
+            api_url="https://api.cohere.com",
+            model_name="rerank-multilingual-v3.0",
+        )
+        self.assertEqual(cohere.url, "https://api.cohere.com/v1/rerank")
+
+    def test_none_and_missing_url(self):
+        from .reranker import resolve_reranker_endpoint
+
+        self.assertIsNone(
+            resolve_reranker_endpoint(service="none", api_url="", model_name="")
+        )
+        self.assertIsNone(
+            resolve_reranker_endpoint(
+                service="openai_compatible", api_url="", model_name="m"
+            )
+        )
+        # xinference 可回退默认本机地址
+        xi = resolve_reranker_endpoint(
+            service="xinference", api_url="", model_name="m"
+        )
+        self.assertEqual(xi.url, "http://localhost:9997/v1/rerank")
+
+    def test_extract_scored_indices_formats(self):
+        from .reranker import _extract_scored_indices
+
+        tei = _extract_scored_indices(
+            [{"index": 1, "score": 0.9}, {"index": 0, "score": 0.2}], 2
+        )
+        self.assertEqual(tei, [(1, 0.9), (0, 0.2)])
+
+        openai_style = _extract_scored_indices(
+            {"results": [{"index": 0, "relevance_score": 0.8}, {"index": 1, "score": 0.1}]},
+            2,
+        )
+        self.assertEqual(openai_style, [(0, 0.8), (1, 0.1)])
+
+        aligned = _extract_scored_indices({"scores": [0.1, 0.7, 0.3]}, 3)
+        self.assertEqual(aligned, [(0, 0.1), (1, 0.7), (2, 0.3)])
+
+    @patch("requests.Session.post")
+    def test_semantic_reranker_posts_tei_body(self, mock_post):
+        from .reranker import RerankerEndpoint, SemanticReranker
+
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {"index": 0, "score": 0.95},
+            {"index": 1, "score": 0.1},
+        ]
+        mock_post.return_value = mock_response
+
+        client = SemanticReranker(
+            RerankerEndpoint(
+                service="tei",
+                url="http://127.0.0.1:8080/rerank",
+                model="BAAI/bge-reranker-v2-m3",
+            )
+        )
+        scored = client.rerank_texts("q", ["doc-a", "doc-b"], top_n=1)
+        self.assertEqual(scored, [(0, 0.95)])
+        _, kwargs = mock_post.call_args
+        self.assertEqual(kwargs["json"]["texts"], ["doc-a", "doc-b"])
+        self.assertNotIn("documents", kwargs["json"])

@@ -95,8 +95,8 @@ const menuGroups = [
     items: [
       { path: '/llm-configs', label: 'LLM 配置' },
       { path: '/remote-mcp-configs', label: 'MCP 配置' },
-      { path: '/skills', label: 'Skills' },
-      { path: '/api-keys', label: 'API Key' },
+      { path: '/skills', label: '技能管理' },
+      { path: '/api-keys', label: 'API 密钥' },
     ],
   },
   {
@@ -274,6 +274,9 @@ async function logout() {
   font-family: inherit;
   cursor: pointer;
   transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .nav-item:hover {

@@ -24,7 +24,7 @@
       @row-click="handleRowClick"
     >
       <template #operations="{ record }">
-        <a-space :size="4">
+        <a-space wrap :size="[4, 4]">
           <a-button type="primary" size="mini" @click="viewOrganizationMembers(record, $event)">{{ pageText.members }}</a-button>
           <a-button type="primary" size="mini" @click="viewOrganizationPermissions(record, $event)">{{ pageText.permissions }}</a-button>
           <a-button type="primary" size="mini" @click="editOrganization(record, $event)">{{ pageText.edit }}</a-button>
@@ -219,7 +219,7 @@ const columns = computed(() => [
   {
     title: pageText.value.actions,
     slotName: 'operations',
-    width: 240,
+    width: 280,
     fixed: 'right',
     align: 'center',
   },

@@ -22,7 +22,11 @@ class KnowledgeGlobalConfig(models.Model):
     RERANKER_SERVICE_CHOICES = [
         ('none', '不启用'),
         ('xinference', 'Xinference'),
-        ('custom', '自定义API'),
+        ('openai_compatible', 'OpenAI 兼容 /v1/rerank'),
+        ('tei', 'TEI / Infinity（开源 HTTP）'),
+        ('jina', 'Jina Reranker'),
+        ('cohere', 'Cohere 兼容'),
+        ('custom', '自定义 API（兼容 OpenAI 风格）'),
     ]
 
     # Embedding 配置
@@ -79,9 +83,9 @@ class KnowledgeGlobalConfig(models.Model):
     reranker_model_name = models.CharField(
         _('Reranker模型名称'),
         max_length=100,
-        default='Qwen3-VL-Reranker-2B',
+        default='bge-reranker-v2-m3',
         blank=True,
-        help_text=_('Reranker模型名称')
+        help_text=_('开源重排模型名，如 bge-reranker-v2-m3、Qwen3-Reranker、jina-reranker-v2')
     )
 
     chunk_size = models.PositiveIntegerField(_('默认分块大小'), default=1000)

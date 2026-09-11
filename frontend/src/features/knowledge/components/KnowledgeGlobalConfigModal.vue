@@ -82,39 +82,34 @@
 
         <a-divider>{{ text.rerankerOptional }}</a-divider>
 
-        <a-row :gutter="16">
-          <a-col :xs="24" :sm="12">
-            <a-form-item field="reranker_service">
-              <template #label>
-                {{ text.rerankerService }}
-                <a-tooltip :content="text.rerankerServiceHint">
-                  <icon-question-circle class="label-tip-icon" />
-                </a-tooltip>
-              </template>
-              <a-select
-                v-model="formData.reranker_service"
-                :placeholder="text.selectRerankerService"
-                @change="handleRerankerServiceChange"
-              >
-                <a-option
-                  v-for="service in rerankerServices"
-                  :key="service.value"
-                  :value="service.value"
-                  :label="service.label"
-                />
-              </a-select>
-            </a-form-item>
-          </a-col>
-          <a-col :xs="24" :sm="12">
-            <a-form-item :label="text.rerankerModel" field="reranker_model_name">
-              <a-input
-                v-model="formData.reranker_model_name"
-                placeholder="bge-reranker-v2-m3"
-                :disabled="formData.reranker_service === 'none'"
-              />
-            </a-form-item>
-          </a-col>
-        </a-row>
+        <a-form-item field="reranker_service">
+          <template #label>
+            {{ text.rerankerService }}
+            <a-tooltip :content="text.rerankerServiceHint">
+              <icon-question-circle class="label-tip-icon" />
+            </a-tooltip>
+          </template>
+          <a-select
+            v-model="formData.reranker_service"
+            :placeholder="text.selectRerankerService"
+            @change="handleRerankerServiceChange"
+          >
+            <a-option
+              v-for="service in rerankerServices"
+              :key="service.value"
+              :value="service.value"
+              :label="service.label"
+            />
+          </a-select>
+        </a-form-item>
+
+        <a-form-item :label="text.rerankerModel" field="reranker_model_name">
+          <a-input
+            v-model="formData.reranker_model_name"
+            placeholder="bge-reranker-v2-m3"
+            :disabled="formData.reranker_service === 'none'"
+          />
+        </a-form-item>
 
         <a-form-item
           v-if="formData.reranker_service !== 'none'"
@@ -253,11 +248,11 @@ const text = computed(() => (
         testConnection: 'Test connection',
         rerankerOptional: 'Reranker (optional)',
         rerankerService: 'Reranker service',
-        rerankerServiceHint: 'Reranker re-ranks retrieval results to improve precision. It can be configured independently.',
+        rerankerServiceHint: 'Re-rank hits with an external open-source model (Xinference / TEI / Infinity / Jina / Cohere-compatible). Independent from embedding.',
         selectRerankerService: 'Select reranker service',
         rerankerModel: 'Reranker model',
         rerankerApiUrl: 'Reranker API URL',
-        rerankerApiUrlPlaceholder: 'http://xinference:9997 (leave empty to reuse embedding URL)',
+        rerankerApiUrlPlaceholder: 'http://host:9997, or full .../v1/rerank / TEI .../rerank',
         rerankerApiKey: 'Reranker API key',
         test: 'Test',
         defaultChunkConfig: 'Default chunk settings',
@@ -267,7 +262,11 @@ const text = computed(() => (
         chunkOverlapHint: 'Overlapped chars between adjacent chunks. Recommended 10-20% of chunk size.',
         lastUpdatedBy: 'Last updated by: ',
         rerankerNone: 'Disabled',
-        rerankerCustom: 'Custom API',
+        rerankerCustom: 'Custom HTTP API',
+        rerankerOpenAI: 'OpenAI-compatible',
+        rerankerTEI: 'TEI / Infinity',
+        rerankerJina: 'Jina',
+        rerankerCohere: 'Cohere-compatible',
         validateEmbeddingService: 'Please select an embedding service',
         validateApiBaseUrl: 'Please enter API base URL',
         validateModelName: 'Please enter model name',
@@ -304,11 +303,11 @@ const text = computed(() => (
         testConnection: '测试连接',
         rerankerOptional: 'Reranker 精排服务（可选）',
         rerankerService: 'Reranker 服务',
-        rerankerServiceHint: 'Reranker用于对检索结果进行精排，可显著提升检索精度。可独立于嵌入服务配置。',
+        rerankerServiceHint: '外接开源语义重排模型对检索结果精排（Xinference / TEI / Infinity / Jina / Cohere 兼容），可独立于嵌入服务配置。',
         selectRerankerService: '请选择Reranker服务',
         rerankerModel: 'Reranker 模型',
         rerankerApiUrl: 'Reranker API地址',
-        rerankerApiUrlPlaceholder: 'http://xinference:9997（不填则使用嵌入服务地址）',
+        rerankerApiUrlPlaceholder: 'http://host:9997，或完整 .../v1/rerank，TEI 填 .../rerank',
         rerankerApiKey: 'Reranker API密钥',
         test: '测试',
         defaultChunkConfig: '默认分块配置',
@@ -318,7 +317,11 @@ const text = computed(() => (
         chunkOverlapHint: '相邻文本块之间的重叠字符数。建议为分块大小的10-20%，可避免跨块信息丢失。',
         lastUpdatedBy: '最后更新：',
         rerankerNone: '不启用',
-        rerankerCustom: '自定义API',
+        rerankerCustom: '自定义 HTTP API',
+        rerankerOpenAI: 'OpenAI 兼容',
+        rerankerTEI: 'TEI / Infinity',
+        rerankerJina: 'Jina',
+        rerankerCohere: 'Cohere 兼容',
         validateEmbeddingService: '请选择嵌入服务',
         validateApiBaseUrl: '请输入API基础URL',
         validateModelName: '请输入模型名称',
@@ -358,7 +361,7 @@ const rerankerApiKeyTouched = ref(false);
 // 窗口宽度响应式
 const windowWidth = ref(window.innerWidth);
 const updateWindowWidth = () => { windowWidth.value = window.innerWidth; };
-const modalWidth = computed(() => windowWidth.value < 600 ? '95%' : 580);
+const modalWidth = computed(() => (windowWidth.value < 768 ? '95%' : 720));
 
 onMounted(() => window.addEventListener('resize', updateWindowWidth));
 onUnmounted(() => window.removeEventListener('resize', updateWindowWidth));
@@ -372,7 +375,7 @@ const formData = reactive<KnowledgeGlobalConfig>({
   reranker_service: 'none',
   reranker_api_url: '',
   reranker_api_key: '',
-  reranker_model_name: 'Qwen3-VL-Reranker-2B',
+  reranker_model_name: 'bge-reranker-v2-m3',
   chunk_size: 1000,
   chunk_overlap: 200,
   updated_at: '',
@@ -386,6 +389,10 @@ const embeddingServices = ref<EmbeddingServiceOption[]>([]);
 const rerankerServices = ref<RerankerServiceOption[]>([
   { value: 'none', label: text.value.rerankerNone },
   { value: 'xinference', label: 'Xinference' },
+  { value: 'openai_compatible', label: text.value.rerankerOpenAI },
+  { value: 'tei', label: text.value.rerankerTEI },
+  { value: 'jina', label: text.value.rerankerJina },
+  { value: 'cohere', label: text.value.rerankerCohere },
   { value: 'custom', label: text.value.rerankerCustom },
 ]);
 
@@ -393,6 +400,10 @@ watch(isEnglish, () => {
   rerankerServices.value = [
     { value: 'none', label: text.value.rerankerNone },
     { value: 'xinference', label: 'Xinference' },
+    { value: 'openai_compatible', label: text.value.rerankerOpenAI },
+    { value: 'tei', label: text.value.rerankerTEI },
+    { value: 'jina', label: text.value.rerankerJina },
+    { value: 'cohere', label: text.value.rerankerCohere },
     { value: 'custom', label: text.value.rerankerCustom },
   ];
 });
@@ -517,18 +528,33 @@ const handleRerankerServiceChange = (value: RerankerServiceType) => {
   switch (value) {
     case 'none':
       formData.reranker_api_url = '';
-      // 保留默认模型名，不清空
       if (!formData.reranker_model_name) {
-        formData.reranker_model_name = 'Qwen3-VL-Reranker-2B';
+        formData.reranker_model_name = 'bge-reranker-v2-m3';
       }
       break;
     case 'xinference':
-      formData.reranker_api_url = '';
-      formData.reranker_model_name = 'Qwen3-VL-Reranker-2B';
+      formData.reranker_api_url = 'http://127.0.0.1:9997';
+      formData.reranker_model_name = 'bge-reranker-v2-m3';
+      break;
+    case 'openai_compatible':
+      formData.reranker_api_url = 'http://127.0.0.1:8001';
+      formData.reranker_model_name = 'bge-reranker-v2-m3';
+      break;
+    case 'tei':
+      formData.reranker_api_url = 'http://127.0.0.1:8080';
+      formData.reranker_model_name = 'BAAI/bge-reranker-v2-m3';
+      break;
+    case 'jina':
+      formData.reranker_api_url = 'https://api.jina.ai';
+      formData.reranker_model_name = 'jina-reranker-v2-base-multilingual';
+      break;
+    case 'cohere':
+      formData.reranker_api_url = 'https://api.cohere.com';
+      formData.reranker_model_name = 'rerank-multilingual-v3.0';
       break;
     case 'custom':
-      formData.reranker_api_url = 'http://your-reranker-service:8080/v1/rerank';
-      formData.reranker_model_name = 'Qwen3-VL-Reranker-2B';
+      formData.reranker_api_url = 'http://127.0.0.1:8080/v1/rerank';
+      formData.reranker_model_name = 'bge-reranker-v2-m3';
       break;
   }
 };

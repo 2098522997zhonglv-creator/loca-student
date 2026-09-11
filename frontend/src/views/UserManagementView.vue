@@ -395,7 +395,7 @@ const columns = computed(() => [
   {
     title: pageText.value.actions,
     slotName: 'operations',
-    width: 180,
+    width: 220,
     fixed: 'right',
     align: 'center',
   },

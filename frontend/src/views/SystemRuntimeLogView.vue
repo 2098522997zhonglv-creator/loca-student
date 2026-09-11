@@ -9,6 +9,10 @@
     </div>
 
     <template v-else>
+      <div class="page-intro">
+        <h1 class="page-title">运行日志</h1>
+        <p class="page-subtitle">查看应用运行时日志文件，支持级别筛选与下载</p>
+      </div>
       <div class="toolbar">
         <a-space wrap>
           <a-select v-model="selectedFile" style="width: 240px" placeholder="日志文件" @change="loadLogs">
@@ -163,11 +167,27 @@ onUnmounted(() => {
 
 <style scoped>
 .runtime-log-page {
-  padding: 16px 20px;
-  height: calc(100vh - 90px);
+  padding: 4px 0 0;
+  min-height: calc(100vh - 112px);
+  height: calc(100vh - 112px);
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+.page-intro {
+  flex-shrink: 0;
+}
+.page-title {
+  margin: 0;
+  font-family: var(--kc-display);
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--kc-ink);
+}
+.page-subtitle {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--theme-text-tertiary);
 }
 .access-denied {
   display: flex;
@@ -185,6 +205,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex-shrink: 0;
 }
 .meta {
   color: #86909c;

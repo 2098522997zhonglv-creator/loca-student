@@ -608,6 +608,7 @@ const getStatusTagColor = (code: number | null) => {
   align-items: flex-start;
   gap: 16px;
   margin-bottom: 20px;
+  flex-wrap: wrap;
 }
 
 .filter-box {
