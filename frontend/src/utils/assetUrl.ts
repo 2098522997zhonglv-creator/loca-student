@@ -3,4 +3,4 @@ export function getPublicAssetUrl(assetPath: string): string {
   return `${import.meta.env.BASE_URL}${normalizedPath}`;
 }
 
-export const brandLogoUrl = getPublicAssetUrl('WHartTest.png');
+export const brandLogoUrl = getPublicAssetUrl('brand-mark.svg');

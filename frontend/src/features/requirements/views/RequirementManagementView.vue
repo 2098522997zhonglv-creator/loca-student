@@ -1,5 +1,9 @@
 <template>
-  <div class="requirement-management">
+  <div class="requirement-management page-shell">
+    <div class="page-intro">
+      <h1 class="page-title">需求评审</h1>
+      <p class="page-subtitle">上传需求文档，完成模块拆分与专项评审</p>
+    </div>
     <!-- 搜索和筛选 -->
     <div class="filter-section">
       <div class="filter-row">

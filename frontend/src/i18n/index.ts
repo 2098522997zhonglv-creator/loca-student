@@ -166,8 +166,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Create an account',
   },
   'register.subtitle': {
-    'zh-CN': '欢迎加入WHartTest',
-    'en-US': 'Welcome to WHartTest',
+    'zh-CN': '欢迎加入本地知识中心',
+    'en-US': 'Welcome to Knowledge Studio',
   },
   'register.submit': {
     'zh-CN': '注册',
@@ -322,8 +322,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Thinking',
   },
   'chat.empty': {
-    'zh-CN': '开始与 WHartTest 的对话吧',
-    'en-US': 'Start a conversation with WHartTest',
+    'zh-CN': '开始与本地知识中心对话',
+    'en-US': 'Start a conversation with Knowledge Studio',
   },
   'chat.releaseToUpload': {
     'zh-CN': '释放以上传图片',
@@ -386,8 +386,8 @@ const APP_MESSAGES: MessageCatalog = {
     'en-US': 'Select a project first',
   },
   'chat.startConversation': {
-    'zh-CN': '开始与 WHartTest 的对话吧',
-    'en-US': 'Start a conversation with WHartTest',
+    'zh-CN': '开始与本地知识中心对话',
+    'en-US': 'Start a conversation with Knowledge Studio',
   },
   'chat.toolScreenshot': {
     'zh-CN': '📷 工具截图',
@@ -461,7 +461,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '还没有账号?': 'No account yet?',
   '立即注册': 'Register now',
   '注册新账户': 'Create an account',
-  '欢迎加入WHartTest': 'Welcome to WHartTest',
+  '欢迎加入WHartTest': 'Welcome to Knowledge Studio',
   '请输入邮箱地址': 'Enter email address',
   '请再次输入密码': 'Confirm password',
   '注册': 'Register',
@@ -721,7 +721,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '系统全局配置修改成功，已即时对全平台应用！': 'System-wide configuration updated successfully and applied immediately across the platform!',
   '修改失败，请重试': 'Update failed. Please try again.',
   '保存过程中发生错误': 'An error occurred while saving.',
-  '如：WHartTest': 'e.g. WHartTest',
+  '如：WHartTest': 'e.g. Knowledge Studio',
   '如：小麦智测自动化平台': 'e.g. WheatTest Automation Platform',
   '展示在浏览器标签页上的网站标题（Document Title）。': 'Shown in the browser tab.',
   '系统主界面左上角 Logo 旁展示的品牌文字名称。': 'Brand name shown next to the logo.',
@@ -792,7 +792,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '工具审批': 'Tool approval',
   '微信接入': 'WeChat access',
   '清除对话': 'Clear chat',
-  '开始与 WHartTest 的对话吧': 'Start a conversation with WHartTest',
+  '开始与 WHartTest 的对话吧': 'Start a conversation with Knowledge Studio',
   '图表预览': 'Diagram preview',
   'HTML 预览': 'HTML preview',
   '工具执行审批': 'Tool execution approval',

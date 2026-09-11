@@ -15,7 +15,7 @@
       <!-- 品牌标识区域 -->
       <div class="brand-section">
         <div class="brand-logo">
-          <img :src="brandLogoUrl" alt="WHartTest Logo" class="logo-icon" />
+          <img :src="brandLogoUrl" alt="本地知识中心 Logo" class="logo-icon" />
         </div>
         <h1 class="brand-title">{{ t('register.title') }}</h1>
         <p class="brand-subtitle">{{ t('register.subtitle') }}</p>

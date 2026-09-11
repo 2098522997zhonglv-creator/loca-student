@@ -1,7 +1,10 @@
 <template>
-  <div class="knowledge-management">
+  <div class="knowledge-management page-shell">
     <div v-if="!selectedKB" class="page-header">
-      <h1 class="page-title">{{ pageText.pageTitle }}</h1>
+      <div>
+        <h1 class="page-title">{{ pageText.pageTitle }}</h1>
+        <p class="page-subtitle">管理项目文档、分块与向量检索配置</p>
+      </div>
       <div class="header-actions">
         <a-button @click="showConfigModal" style="margin-right: 8px">
           <template #icon><icon-settings /></template>
@@ -502,9 +505,11 @@ onMounted(async () => {
 }
 
 .page-title {
-  font-size: 24px;
-  font-weight: bold;
+  font-family: var(--kc-display);
+  font-size: 28px;
+  font-weight: 700;
   margin: 0;
+  color: var(--kc-ink);
   flex-shrink: 0;
 }
 

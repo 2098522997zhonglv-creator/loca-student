@@ -89,12 +89,12 @@ const { isEnglish } = useAppI18n();
 const text = computed(() => (
   isEnglish.value
     ? { 
-        emptyChat: 'Start chatting with WHartTest',
+        emptyChat: 'Start chatting with Knowledge Studio',
         loadMore: 'Load older messages',
         loadingMore: 'Loading...'
       }
     : { 
-        emptyChat: '开始与 WHartTest 的对话吧',
+        emptyChat: '开始与本地知识中心对话',
         loadMore: '查看更早的历史记录',
         loadingMore: '正在加载历史记录...'
       }

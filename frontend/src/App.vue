@@ -24,20 +24,19 @@ onMounted(() => { // 在根组件挂载完成后执行一次初始化回调。
 </script>
 
 <style>
-/* 全局样式可写在这里，也可拆分到独立样式文件（如 src/style.css） */
 #app {
-  font-family: Avenir, Helvetica, Arial, sans-serif; /* 设置应用默认字体栈，优先使用 Avenir 并提供系统回退字体。 */
-  -webkit-font-smoothing: antialiased; /* 在 WebKit 内核浏览器启用抗锯齿字体渲染。 */
-  -moz-osx-font-smoothing: grayscale; /* 在 macOS Firefox 上优化字体平滑显示效果。 */
-  text-align: center; /* 设置默认文本水平居中（具体页面可自行覆盖）。 */
-  color: var(--theme-page-text); /* 设置应用默认文字颜色为当前主题页面文本色。 */
-  min-height: 100vh; /* 保证根容器最小高度覆盖整个可视区域高度。 */
+  font-family: "Sora", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-align: left;
+  color: var(--theme-page-text);
+  min-height: 100vh;
 }
 
-/* 重置部分浏览器默认样式 */
 body, html {
-  margin: 0; /* 清除浏览器默认外边距，避免页面出现白边。 */
-  padding: 0; /* 清除浏览器默认内边距，保证布局起点一致。 */
-  height: 100%; /* 让 html/body 高度撑满视口，配合 #app 高度布局。 */
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--theme-page-bg, #eef4f2);
 }
 </style>

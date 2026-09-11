@@ -7,13 +7,13 @@ const defaultBrandBadgeUrl = getPublicAssetUrl('CE.svg');
 
 export const useSystemConfigStore = defineStore('systemConfig', () => {
   const config = ref<SystemConfig>({
-    title: 'WHartTest',
-    name: 'WHartTest',
-    login_title: 'WHartTest',
-    login_subtitle: '小麦智测自动化平台',
-    login_tags: 'AI 智能生成, RAG 知识库, MCP 工具调用, Skills 技能库, Playwright 自动化, LangGraph',
+    title: '本地知识中心',
+    name: '本地知识中心',
+    login_title: '本地知识中心',
+    login_subtitle: '项目级知识库 · RAG 问答 · 需求评审',
+    login_tags: '知识库, RAG 检索, LLM 对话, 需求评审, MCP, Skills',
     logo_url: '',
-    brand_badge_enabled: true,
+    brand_badge_enabled: false,
     brand_badge_url: defaultBrandBadgeUrl,
     operation_log_retention_days: 7,
   });

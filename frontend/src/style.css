@@ -4,42 +4,48 @@
   --shadow-dark: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
 }
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif; /* Tailwind 将覆盖这个，但保留以防万一 */
+  font-family: "Sora", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   line-height: 1.5;
   font-weight: 400;
 
   color-scheme: light;
-  --theme-bg: #f5f7fa;
-  --theme-page-bg: #f8f9fc;
+  --theme-bg: #eef4f2;
+  --theme-page-bg: #e8f0ed;
   --theme-surface: #ffffff;
-  --theme-surface-soft: #f2f3f5;
-  --theme-page-text: #2c3e50;
-  --theme-text: #2c3e50;
-  --theme-text-secondary: #666666;
-  --theme-text-tertiary: #86909c;
-  --theme-border: #e5e6eb;
+  --theme-surface-soft: #f3f8f6;
+  --theme-page-text: #12201d;
+  --theme-text: #12201d;
+  --theme-text-secondary: #4a635c;
+  --theme-text-tertiary: #6f857e;
+  --theme-border: #d5e3de;
   --theme-card-bg: #ffffff;
-  --theme-card-border: rgba(148, 163, 184, 0.12);
-  --theme-card-shadow: 0 0 0 1px rgba(148, 163, 184, 0.05), 0 18px 36px rgba(2, 6, 23, 0.08);
+  --theme-card-border: rgba(15, 61, 56, 0.08);
+  --theme-card-shadow: 0 18px 40px rgba(15, 61, 56, 0.08);
   --theme-input-bg: #ffffff;
-  --theme-input-border: rgba(148, 163, 184, 0.18);
-  --theme-input-hover: rgba(0, 160, 233, 0.08);
+  --theme-input-border: rgba(15, 61, 56, 0.14);
+  --theme-input-hover: rgba(15, 118, 110, 0.08);
   --theme-input-focus-bg: #ffffff;
   --theme-overlay-bg: #ffffff;
-  --theme-overlay-border: rgba(148, 163, 184, 0.14);
-  --theme-overlay-shadow: 0 20px 40px rgba(15, 23, 42, 0.12);
-  --theme-focus-ring: rgba(0, 160, 233, 0.2);
-  --theme-empty-icon: #c2c7d0;
-  --theme-empty-text: #86909c;
-  --theme-disabled-bg: rgba(148, 163, 184, 0.08);
-  --theme-disabled-text: #94a3b8;
-  --theme-shadow: -4px -4px 10px rgba(0, 0, 0, 0.2), 4px 0 10px rgba(0, 0, 0, 0.2), 0 0 10px rgba(0, 0, 0, 0.15);
+  --theme-overlay-border: rgba(15, 61, 56, 0.12);
+  --theme-overlay-shadow: 0 20px 40px rgba(15, 61, 56, 0.12);
+  --theme-focus-ring: rgba(15, 118, 110, 0.22);
+  --theme-empty-icon: #9bb0a8;
+  --theme-empty-text: #6f857e;
+  --theme-disabled-bg: rgba(15, 61, 56, 0.06);
+  --theme-disabled-text: #8aa098;
+  --theme-shadow: 0 12px 28px rgba(15, 61, 56, 0.12);
   --theme-toggle-bg: #ffffff;
-  --theme-toggle-hover: #f7f9fc;
-  --theme-accent: #00a0e9;
-  --theme-accent-hover: #1aaaeb;
-  --theme-accent-active: #0090d1;
-  --theme-accent-rgb: 0, 160, 233;
+  --theme-toggle-hover: #f3f8f6;
+  --theme-accent: #0f766e;
+  --theme-accent-hover: #0d9488;
+  --theme-accent-active: #0b5f59;
+  --theme-accent-rgb: 15, 118, 110;
+  --kc-ink: #0b1f1a;
+  --kc-forest: #0f3d38;
+  --kc-mint: #7ee0c8;
+  --kc-paper: #eef4f2;
+  --kc-display: "Fraunces", "Songti SC", "Noto Serif SC", serif;
+  --kc-sans: "Sora", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -1564,4 +1570,32 @@ button:focus-visible {
 
 :root[data-theme='black'] .type-info-icon:hover {
   color: #93c5fd !important;
+}
+
+/* Knowledge Center brand accent for Arco components */
+body {
+  --primary-6: #0f766e;
+  --primary-5: #0d9488;
+  --primary-7: #0b5f59;
+  --primary-4: #2dd4bf;
+  --arcoblue-6: #0f766e;
+  --arcoblue-5: #0d9488;
+  --arcoblue-7: #0b5f59;
+}
+
+.page-shell {
+  text-align: left;
+}
+
+.page-shell .page-title {
+  margin: 0 0 6px;
+  font-family: var(--kc-display);
+  font-size: 28px;
+  color: var(--kc-ink);
+}
+
+.page-shell .page-subtitle {
+  margin: 0 0 20px;
+  color: var(--theme-text-secondary);
+  font-size: 14px;
 }
