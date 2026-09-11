@@ -983,7 +983,14 @@ class ChatAPIView(APIView):
         return self.response
 
     async def post(self, request, *args, **kwargs):
-        logger.info(f"ChatAPIView: Received POST request from user {request.user.id}")
+        logger.info(
+            "LLM_CHAT_LEGACY start user_id=%s project_id=%s session_id=%s kb_id=%s msg_len=%s",
+            request.user.id,
+            request.data.get("project_id"),
+            request.data.get("session_id"),
+            request.data.get("knowledge_base_id"),
+            len(request.data.get("message") or ""),
+        )
         user_message_content = request.data.get("message")
         session_id = request.data.get("session_id")
         project_id = request.data.get("project_id")

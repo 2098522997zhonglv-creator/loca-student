@@ -412,11 +412,23 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                 "chunk_size": request.data.get("chunk_size", 2000),
             }
 
-            logger.info(f"开始拆分文档 {document.id}，选项: {split_options}")
+            logger.info(
+                "REQ_SPLIT start user_id=%s doc_id=%s options=%s",
+                request.user.id,
+                document.id,
+                split_options,
+            )
 
             # 使用模块拆分服务
             module_service = RequirementModuleService(user=request.user)
             modules = module_service.process_document_and_split(document, split_options)
+
+            logger.info(
+                "REQ_SPLIT done user_id=%s doc_id=%s module_count=%s",
+                request.user.id,
+                document.id,
+                len(modules) if modules is not None else 0,
+            )
 
             serializer = RequirementModuleSerializer(modules, many=True)
 
@@ -777,6 +789,13 @@ class RequirementDocumentViewSet(BaseModelViewSet):
 
 
             review_type = "direct" if direct_review else "comprehensive"
+            logger.info(
+                "REQ_REVIEW start user_id=%s doc_id=%s review_type=%s options=%s",
+                request.user.id,
+                document.id,
+                review_type,
+                {k: analysis_options.get(k) for k in ("analysis_type", "parallel_processing", "direct_review")},
+            )
             task = execute_requirement_review.delay(
                 str(document.id),
                 analysis_options,

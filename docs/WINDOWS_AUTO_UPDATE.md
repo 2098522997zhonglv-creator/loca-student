@@ -58,8 +58,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File E:\loca_student\scripts\wind
 
 ## 日志
 
+- `E:\loca_student\data\logs\app.log` — 统一运行日志（知识库 / LLM / 系统）；也可在 Web「运行日志」页远程查看  
 - `E:\loca_student\data\logs\auto_update.log` — 拉取/构建/重启记录  
-- `E:\loca_student\data\logs\django.out.log` / `django.err.log` — 服务输出  
+- `E:\loca_student\data\logs\django.out.log` / `django.err.log` — 服务进程 stdout/stderr  
 
 ## 注意
 

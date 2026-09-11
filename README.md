@@ -12,6 +12,7 @@ UI 自动化、接口自动化、测试套件、执行器、任务中心和微�
 - LangGraph 会话：本地 SQLite 文件 `data/chat_history.sqlite3`
 - 向量数据库：嵌入式 Qdrant 目录 `data/qdrant`
 - 文档附件：`data/media`
+- 运行日志：`data/logs/app.log`（按日轮转；页面「运行日志」可远程查看）
 - 异步任务：Celery eager 模式，在 Django 进程内同步执行
 
 不需要 Docker、PostgreSQL、Redis 或独立 Qdrant 服务。
@@ -69,3 +70,11 @@ cp .env.example .env
 - 知识库与需求文档均绑定 Project，并在 API 层校验项目成员。
 - 全局知识库配置仅管理员可修改。
 - LLM API Key、Embedding API Key 等敏感字段存储在本地 SQLite；请限制目录访问权限并避免提交 `.env` 和 `data/`。
+
+## 运行日志
+
+- 文件位置：`data/logs/app.log`（以及按日归档的 `app.log.YYYY-MM-DD`）
+- 覆盖范围：系统启动、知识库处理/检索、LLM Agent 对话、需求拆分与评审、Django 请求错误等
+- 远程查看：登录后侧栏「运行日志」（需管理员或操作日志查看权限）
+- 配置项（`.env`）：`LOG_LEVEL`、`LOG_BACKUP_COUNT`、可选 `LOG_DIR`
+- 与「操作日志」区别：操作日志是 API 审计入库；运行日志是进程日志文件

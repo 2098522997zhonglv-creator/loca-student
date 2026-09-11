@@ -26,6 +26,13 @@ def execute_requirement_review(self, document_id, analysis_options=None, review_
     User = get_user_model()
     
     try:
+        logger.info(
+            "REQ_REVIEW task start document_id=%s review_type=%s user_id=%s",
+            document_id,
+            review_type,
+            user_id,
+        )
+        
         # 获取文档
         document = RequirementDocument.objects.get(id=document_id)
         
@@ -55,7 +62,13 @@ def execute_requirement_review(self, document_id, analysis_options=None, review_
                 analysis_options or {}  # 传递完整的analysis_options
             )
         
-        logger.info(f"文档 {document.title} 评审完成, 报告ID: {review_report.id}")
+        logger.info(
+            "REQ_REVIEW done document_id=%s report_id=%s score=%s issues=%s",
+            document_id,
+            review_report.id,
+            getattr(review_report, "completion_score", None),
+            getattr(review_report, "total_issues", None),
+        )
         
         return {
             'status': 'success',

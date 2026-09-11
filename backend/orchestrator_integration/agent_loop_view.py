@@ -1578,6 +1578,18 @@ class AgentLoopStreamAPIView(View):
             session_id = uuid.uuid4().hex
             logger.info(f"AgentLoopStreamAPI: Generated new session_id: {session_id}")
 
+        msg_preview = (user_message or "")[:80].replace("\n", " ")
+        logger.info(
+            "LLM_CHAT start user_id=%s project_id=%s session_id=%s kb_id=%s stream=%s msg_len=%s preview=%r",
+            user.id,
+            project_id,
+            session_id,
+            knowledge_base_id,
+            stream_mode,
+            len(user_message or ""),
+            msg_preview,
+        )
+
         # 5.1 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
         # 场景：前端先断开 SSE，再调用 stop API，可能导致信号留存到下一次请求
         if clear_stop_signal(session_id):
@@ -1812,7 +1824,10 @@ class AgentLoopStopAPIView(View):
         success = set_stop_signal(session_id)
 
         logger.info(
-            f"AgentLoopStopAPI: Stop signal set for session {session_id} by user {user.id}"
+            "LLM_CHAT stop user_id=%s session_id=%s success=%s",
+            user.id,
+            session_id,
+            success,
         )
 
         return api_success_response(
@@ -2408,7 +2423,11 @@ class AgentLoopResumeAPIView(View):
             )
 
         logger.info(
-            f"AgentLoopResumeAPI: Resume request for session {session_id}, knowledge_base_id={knowledge_base_id}"
+            "LLM_CHAT resume user_id=%s project_id=%s session_id=%s kb_id=%s",
+            user.id,
+            project_id,
+            session_id,
+            knowledge_base_id,
         )
 
         # 3. 返回 SSE 流式响应

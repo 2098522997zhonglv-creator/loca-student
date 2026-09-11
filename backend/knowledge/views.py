@@ -155,18 +155,28 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
     def query(self, request, pk=None):
         """查询知识库"""
         knowledge_base = self.get_object()
+        started = time.time()
 
         # 验证查询参数
         query_serializer = KnowledgeQuerySerializer(
             data=request.data, context={"request": request}
         )
         query_serializer.is_valid(raise_exception=True)
+        query_text = query_serializer.validated_data["query"]
+        logger.info(
+            "KB_QUERY start user_id=%s kb_id=%s project_id=%s query_len=%s preview=%r",
+            request.user.id,
+            knowledge_base.id,
+            getattr(knowledge_base, "project_id", None),
+            len(query_text or ""),
+            (query_text or "")[:80].replace("\n", " "),
+        )
 
         try:
             # 执行查询
             service = KnowledgeBaseService(knowledge_base)
             result = service.query(
-                query_text=query_serializer.validated_data["query"],
+                query_text=query_text,
                 top_k=query_serializer.validated_data.get("top_k", 5),
                 similarity_threshold=query_serializer.validated_data.get(
                     "similarity_threshold", 0.1
@@ -174,12 +184,31 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
                 user=request.user,
             )
 
+            hit_count = 0
+            if isinstance(result, dict):
+                hits = result.get("results") or result.get("chunks") or result.get("documents")
+                if isinstance(hits, list):
+                    hit_count = len(hits)
+            logger.info(
+                "KB_QUERY done user_id=%s kb_id=%s hits=%s elapsed_ms=%s",
+                request.user.id,
+                knowledge_base.id,
+                hit_count,
+                int((time.time() - started) * 1000),
+            )
+
             # 序列化响应
             response_serializer = KnowledgeQueryResponseSerializer(result)
             return Response(response_serializer.data)
 
         except Exception as e:
-            logger.error(f"知识库查询失败: {e}")
+            logger.error(
+                "KB_QUERY failed user_id=%s kb_id=%s error=%s",
+                request.user.id,
+                knowledge_base.id,
+                e,
+                exc_info=True,
+            )
             return Response(
                 {"error": f"查询失败: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -395,6 +424,13 @@ class DocumentViewSet(BaseModelViewSet):
     def perform_create(self, serializer):
         """创建文档时自动设置上传人"""
         document = serializer.save(uploader=self.request.user)
+        logger.info(
+            "KB_DOC upload user_id=%s doc_id=%s kb_id=%s title=%r",
+            self.request.user.id,
+            document.id,
+            document.knowledge_base_id,
+            getattr(document, "title", "")[:80],
+        )
         _dispatch_document_task(document)
 
     @action(detail=True, methods=["get"])

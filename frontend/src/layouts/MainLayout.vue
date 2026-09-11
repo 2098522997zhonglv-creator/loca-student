@@ -39,6 +39,7 @@ const menus = [
   { path: '/organizations', label: '组织管理' }, { path: '/permissions', label: '权限管理' },
   { path: '/api-keys', label: 'API Key' }, { path: '/remote-mcp-configs', label: 'MCP 配置' },
   { path: '/skills', label: 'Skills' }, { path: '/operation-logs', label: '操作日志' },
+  { path: '/system-runtime-logs', label: '运行日志' },
 ]
 const active = computed(() => '/' + route.path.split('/')[1])
 onMounted(async () => {

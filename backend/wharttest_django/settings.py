@@ -123,8 +123,64 @@ LANGGRAPH_CHECKPOINT_SQLITE_PATH = os.environ.get(
     "LANGGRAPH_CHECKPOINT_SQLITE_PATH", str(DATA_DIR / "chat_history.sqlite3")
 )
 DJANGO_BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://127.0.0.1:8000")
+
+# Unified runtime logs under data/logs (same folder used by Windows auto-update scripts).
+LOG_DIR = Path(os.environ.get("LOG_DIR", DATA_DIR / "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOG_BACKUP_COUNT = int(os.environ.get("LOG_BACKUP_COUNT", "14"))
+APP_LOG_FILE = LOG_DIR / "app.log"
+
 LOGGING = {
-    "version": 1, "disable_existing_loggers": False,
-    "handlers": {"console": {"class": "logging.StreamHandler"}},
-    "root": {"handlers": ["console"], "level": os.environ.get("LOG_LEVEL", "INFO")},
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+            "level": LOG_LEVEL,
+        },
+        "file": {
+            "()": "wharttest_django.safe_log_handler.SafeTimedRotatingFileHandler",
+            "filename": str(APP_LOG_FILE),
+            "when": "midnight",
+            "interval": 1,
+            "backupCount": LOG_BACKUP_COUNT,
+            "encoding": "utf-8",
+            "formatter": "standard",
+            "level": LOG_LEVEL,
+        },
+    },
+    "root": {
+        "handlers": ["console", "file"],
+        "level": LOG_LEVEL,
+    },
+    "loggers": {
+        "knowledge": {"handlers": ["console", "file"], "level": LOG_LEVEL, "propagate": False},
+        "langgraph_integration": {"handlers": ["console", "file"], "level": LOG_LEVEL, "propagate": False},
+        "orchestrator_integration": {"handlers": ["console", "file"], "level": LOG_LEVEL, "propagate": False},
+        "requirements": {"handlers": ["console", "file"], "level": LOG_LEVEL, "propagate": False},
+        "operation_logs": {"handlers": ["console", "file"], "level": LOG_LEVEL, "propagate": False},
+        "django.request": {"handlers": ["console", "file"], "level": "WARNING", "propagate": False},
+        "django.server": {"handlers": ["console", "file"], "level": "INFO", "propagate": False},
+    },
 }
+
+# Ensure file handler is active as soon as settings load (before first request).
+import logging.config as _logging_config
+
+_logging_config.dictConfig(LOGGING)
+import logging as _logging
+
+_logging.getLogger("wharttest_django.settings").info(
+    "Runtime logging ready: file=%s level=%s backup_count=%s",
+    APP_LOG_FILE,
+    LOG_LEVEL,
+    LOG_BACKUP_COUNT,
+)

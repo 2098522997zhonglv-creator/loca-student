@@ -36,6 +36,7 @@ const children: RouteRecordRaw[] = [
   { path: 'remote-mcp-configs', name: 'RemoteMcpConfigManagement', component: RemoteMcpConfigManagementView },
   { path: 'skills', name: 'SkillsManagement', component: SkillsManagementView },
   { path: 'operation-logs', name: 'OperationLogs', component: () => import('@/views/OperationLogView.vue') },
+  { path: 'system-runtime-logs', name: 'SystemRuntimeLogs', component: () => import('@/views/SystemRuntimeLogView.vue') },
 ]
 
 const routes: RouteRecordRaw[] = [

@@ -40,8 +40,12 @@ conda activate local-knowledge-center
 
 推送到 GitHub `main` 后，由物理机计划任务自动 `git pull`、按需构建并重启服务。详见 [WINDOWS_AUTO_UPDATE.md](./WINDOWS_AUTO_UPDATE.md)。
 
-## 5. 数据备份
+## 5. 运行日志
 
-停止服务后备份整个 `data/`：其中包含业务 SQLite、LangGraph 会话、嵌入式 Qdrant 索引及上传文件。恢复时复制回同一项目根目录即可。
+统一写入 `data/logs/app.log`（日轮转）。管理员可在 Web 侧栏「运行日志」远程查看、筛选级别、下载文件。自动更新脚本的 `auto_update.log` / `django.*.log` 也在同一目录。
+
+## 6. 数据备份
+
+停止服务后备份整个 `data/`：其中包含业务 SQLite、LangGraph 会话、嵌入式 Qdrant 索引、上传文件与运行日志。恢复时复制回同一项目根目录即可。
 
 嵌入式 Qdrant 适合单 Django 进程。不要同时启动多个操作同一 `data/qdrant` 的进程；需要多进程扩容时应改用独立 Qdrant 服务并设置 `QDRANT_URL`。
