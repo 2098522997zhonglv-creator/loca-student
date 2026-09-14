@@ -1,7 +1,7 @@
 <template>
   <a-layout class="shell">
     <a-layout-header class="header">
-      <div class="brand-block" @click="router.push('/dashboard')">
+      <div class="brand-block" role="link" tabindex="0" @click="router.push('/dashboard')" @keydown.enter="router.push('/dashboard')">
         <img class="brand-mark" :src="brandLogoUrl" alt="" />
         <div class="brand-copy">
           <div class="brand">本地知识中心</div>
@@ -15,7 +15,7 @@
           v-model="selectedProject"
           placeholder="选择项目"
           allow-search
-          :style="{ width: '240px' }"
+          class="project-select"
           @change="changeProject"
         >
           <a-option
@@ -30,16 +30,18 @@
 
       <div class="spacer" />
 
-      <div class="user-chip">
-        <span class="user-dot" />
-        <span class="user-name">{{ auth.user?.username }}</span>
+      <div class="header-actions">
+        <div class="user-chip" :title="auth.user?.username || ''">
+          <span class="user-dot" />
+          <span class="user-name">{{ auth.user?.username }}</span>
+        </div>
+        <a-button class="logout-btn" type="text" @click="logout">退出</a-button>
       </div>
-      <a-button class="logout-btn" type="outline" @click="logout">退出</a-button>
     </a-layout-header>
 
     <a-layout class="body">
-      <a-layout-sider :width="220" class="sider">
-        <nav class="nav">
+      <a-layout-sider :width="212" class="sider">
+        <nav class="nav" aria-label="主导航">
           <section v-for="group in menuGroups" :key="group.title" class="nav-group">
             <div class="nav-title">{{ group.title }}</div>
             <button
@@ -50,14 +52,14 @@
               :class="{ active: active === item.path }"
               @click="navigate(item.path)"
             >
-              <span class="nav-dot" />
-              {{ item.label }}
+              <span class="nav-indicator" aria-hidden="true" />
+              <span class="nav-label">{{ item.label }}</span>
             </button>
           </section>
         </nav>
       </a-layout-sider>
       <a-layout-content class="content">
-        <div class="content-frame">
+        <div class="content-frame" :key="active">
           <router-view />
         </div>
       </a-layout-content>
@@ -66,7 +68,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/store/authStore'
 import { useProjectStore } from '@/store/projectStore'
@@ -113,12 +115,20 @@ const menuGroups = [
 
 const active = computed(() => '/' + route.path.split('/')[1])
 
+watch(
+  () => projectStore.currentProject?.id,
+  (id) => {
+    selectedProject.value = id
+  }
+)
+
 onMounted(async () => {
   await projectStore.fetchProjects()
   selectedProject.value = projectStore.currentProject?.id
 })
 
 function navigate(path: string) {
+  if (route.path === path || route.path.startsWith(path + '/')) return
   router.push(path)
 }
 
@@ -137,35 +147,44 @@ async function logout() {
 .shell {
   min-height: 100vh;
   background:
-    radial-gradient(1200px 480px at 12% -10%, rgba(126, 224, 200, 0.28), transparent 55%),
-    radial-gradient(900px 420px at 90% 0%, rgba(15, 118, 110, 0.12), transparent 50%),
-    linear-gradient(180deg, #eef4f2 0%, #e4eeea 100%);
+    radial-gradient(900px 360px at 0% 0%, rgba(126, 224, 200, 0.18), transparent 55%),
+    linear-gradient(180deg, #f4f7f6 0%, #e9f0ed 100%);
 }
 
 .header {
-  height: 68px;
+  height: 60px;
   display: flex;
   align-items: center;
-  gap: 20px;
-  padding: 0 22px;
-  background: rgba(255, 255, 255, 0.78);
-  border-bottom: 1px solid rgba(15, 61, 56, 0.08);
-  backdrop-filter: blur(12px);
+  gap: 18px;
+  padding: 0 20px;
+  background: rgba(255, 255, 255, 0.88);
+  border-bottom: 1px solid rgba(15, 61, 56, 0.07);
+  backdrop-filter: blur(14px);
+  z-index: 20;
 }
 
 .brand-block {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   cursor: pointer;
-  min-width: 196px;
+  min-width: 176px;
+  border-radius: 10px;
+  padding: 4px 6px 4px 2px;
+  transition: background 0.18s ease;
+}
+
+.brand-block:hover,
+.brand-block:focus-visible {
+  background: rgba(15, 118, 110, 0.06);
+  outline: none;
 }
 
 .brand-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  box-shadow: 0 8px 18px rgba(15, 61, 56, 0.18);
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  box-shadow: 0 4px 12px rgba(15, 61, 56, 0.14);
 }
 
 .brand-copy {
@@ -176,87 +195,122 @@ async function logout() {
 
 .brand {
   font-family: var(--kc-display);
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 700;
   color: var(--kc-forest);
   letter-spacing: 0.01em;
 }
 
 .brand-sub {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--theme-text-tertiary);
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
 }
 
 .project-wrap {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .project-label {
   font-size: 12px;
   color: var(--theme-text-tertiary);
+  white-space: nowrap;
+}
+
+.project-select {
+  width: 220px;
+}
+
+.project-select :deep(.arco-select-view-single) {
+  border-radius: 10px;
+  background: #f7faf9;
+  border-color: transparent;
+}
+
+.project-select :deep(.arco-select-view-single:hover),
+.project-select :deep(.arco-select-view-focus) {
+  background: #fff;
+  border-color: rgba(15, 118, 110, 0.28);
 }
 
 .spacer {
   flex: 1;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .user-chip {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 5px 10px;
   border-radius: 999px;
-  background: rgba(15, 61, 56, 0.06);
+  background: rgba(15, 61, 56, 0.05);
   color: var(--theme-text-secondary);
   font-size: 13px;
+  max-width: 140px;
+}
+
+.user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .user-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
   border-radius: 50%;
   background: #0f766e;
-  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.15);
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
 }
 
 .logout-btn {
-  border-color: rgba(15, 61, 56, 0.18) !important;
   color: var(--kc-forest) !important;
+  border-radius: 8px !important;
+}
+
+.logout-btn:hover {
+  background: rgba(15, 118, 110, 0.08) !important;
 }
 
 .body {
-  min-height: calc(100vh - 68px);
+  min-height: calc(100vh - 60px);
 }
 
 .sider {
   background: rgba(255, 255, 255, 0.72);
-  border-right: 1px solid rgba(15, 61, 56, 0.08);
+  border-right: 1px solid rgba(15, 61, 56, 0.07);
   backdrop-filter: blur(10px);
 }
 
 .nav {
-  padding: 18px 12px 28px;
+  padding: 16px 10px 28px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
 .nav-group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .nav-title {
-  padding: 0 12px 8px;
+  padding: 0 12px 6px;
   font-size: 11px;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #7d948c;
+  color: #8aa098;
 }
 
 .nav-item {
@@ -267,51 +321,75 @@ async function logout() {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  color: #35524a;
+  padding: 9px 12px;
+  border-radius: 10px;
+  color: #3d5a52;
   font-size: 14px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+  transition: background 0.16s ease, color 0.16s ease;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .nav-item:hover {
-  background: rgba(15, 118, 110, 0.08);
+  background: rgba(15, 118, 110, 0.07);
   color: var(--kc-forest);
 }
 
-.nav-item.active {
-  background: linear-gradient(135deg, rgba(15, 61, 56, 0.95), rgba(15, 118, 110, 0.92));
-  color: #edfaf6;
-  box-shadow: 0 10px 22px rgba(15, 61, 56, 0.2);
+.nav-item:focus-visible {
+  outline: 2px solid rgba(15, 118, 110, 0.35);
+  outline-offset: 1px;
 }
 
-.nav-dot {
+.nav-item.active {
+  background: rgba(15, 118, 110, 0.12);
+  color: #0b5f59;
+  font-weight: 600;
+}
+
+.nav-indicator {
   width: 6px;
   height: 6px;
   border-radius: 50%;
   background: currentColor;
-  opacity: 0.55;
+  opacity: 0.35;
+  flex-shrink: 0;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+}
+
+.nav-item.active .nav-indicator {
+  opacity: 1;
+  background: #0f766e;
+  transform: scale(1.15);
+}
+
+.nav-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .content {
-  padding: 22px;
+  padding: 16px 18px 18px;
   min-width: 0;
 }
 
 .content-frame {
-  min-height: calc(100vh - 112px);
-  animation: rise-in 0.45s ease both;
+  min-height: calc(100vh - 92px);
+  height: calc(100vh - 92px);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(15, 61, 56, 0.06);
+  border-radius: 18px;
+  padding: 0;
+  overflow: auto;
+  box-shadow: 0 10px 28px rgba(15, 61, 56, 0.04);
+  animation: rise-in 0.35s ease both;
 }
 
 @keyframes rise-in {
   from {
     opacity: 0;
-    transform: translateY(8px);
+    transform: translateY(6px);
   }
   to {
     opacity: 1;
@@ -324,8 +402,16 @@ async function logout() {
   .project-label {
     display: none;
   }
+  .project-select {
+    width: 160px;
+  }
   .content {
-    padding: 14px;
+    padding: 10px;
+  }
+  .content-frame {
+    border-radius: 14px;
+    min-height: calc(100vh - 80px);
+    height: calc(100vh - 80px);
   }
 }
 </style>

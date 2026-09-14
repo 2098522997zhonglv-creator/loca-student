@@ -2614,8 +2614,9 @@ export default {
 .chat-layout {
   display: flex;
   height: 100%;
-  background-color: #f7f8fa;
-  border-radius: 8px;
+  min-height: calc(100vh - 92px);
+  background: #f7faf9;
+  border-radius: 18px;
   overflow: hidden;
 }
 
@@ -2625,7 +2626,7 @@ export default {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background-color: #f7f8fa;
+  background: #f7faf9;
   overflow: hidden;
   position: relative;
 }

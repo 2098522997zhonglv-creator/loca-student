@@ -262,19 +262,19 @@ defineExpose({
 
 <style scoped>
 .chat-header-container {
-  background-color: #ffffff;
-  border-bottom: 1px solid #e5e6eb;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+  background-color: rgba(255, 255, 255, 0.92);
+  border-bottom: 1px solid rgba(15, 61, 56, 0.07);
+  backdrop-filter: blur(8px);
   z-index: 1;
 }
 
 .chat-header {
-  padding: 16px 20px;
+  padding: 12px 16px;
   display: flex;
   justify-content: flex-end;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px;
 }
 
 .chat-title {
@@ -338,9 +338,9 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 8px;
-  background-color: rgba(0, 0, 0, 0.04);
-  border-radius: 16px;
+  padding: 4px 10px;
+  background-color: rgba(15, 118, 110, 0.06);
+  border-radius: 999px;
   font-size: 12px;
 }
 
@@ -349,7 +349,7 @@ defineExpose({
 }
 
 .toggle-label {
-  color: #4e5969;
+  color: #35524a;
   font-weight: 500;
 }
 
@@ -359,8 +359,8 @@ defineExpose({
 }
 
 .kb-settings-panel {
-  border-top: 1px solid #e5e6eb;
-  background-color: #f7f8fa;
+  border-top: 1px solid rgba(15, 61, 56, 0.07);
+  background-color: #f7faf9;
 }
 
 .prompt-selector {
@@ -371,7 +371,7 @@ defineExpose({
 
 .prompt-label {
   font-size: 13px;
-  color: #4e5969;
+  color: #4a635c;
   white-space: nowrap;
 }
 

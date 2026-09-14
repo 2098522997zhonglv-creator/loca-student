@@ -1585,30 +1585,71 @@ body {
 
 .page-shell {
   text-align: left;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .page-shell .page-title {
   margin: 0 0 6px;
   font-family: var(--kc-display);
-  font-size: 28px;
+  font-size: 26px;
+  font-weight: 700;
   color: var(--kc-ink);
+  letter-spacing: -0.01em;
 }
 
 .page-shell .page-subtitle {
-  margin: 0 0 20px;
+  margin: 0 0 18px;
   color: var(--theme-text-secondary);
-  font-size: 14px;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
-/* 管理页表格：避免列内容互相叠压 */
+/* 管理页表格：干净表头 + 防叠压 */
 body:not([arco-theme='dark']) .arco-table-th,
 body:not([arco-theme='dark']) .arco-table-header {
-  background: #eef4f2 !important;
+  background: #f3f7f5 !important;
   color: #35524a !important;
   font-weight: 600;
+}
+
+body:not([arco-theme='dark']) .arco-table-td {
+  border-color: rgba(15, 61, 56, 0.06) !important;
 }
 
 .arco-table-td .arco-table-cell {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 主按钮与输入更圆润、交互更轻 */
+body:not([arco-theme='dark']) .arco-btn-primary {
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+body:not([arco-theme='dark']) .arco-btn-primary:hover {
+  filter: brightness(1.03);
+}
+
+body:not([arco-theme='dark']) .arco-btn-secondary,
+body:not([arco-theme='dark']) .arco-btn-outline {
+  border-radius: 10px;
+}
+
+body:not([arco-theme='dark']) .arco-input-wrapper,
+body:not([arco-theme='dark']) .arco-select-view-single,
+body:not([arco-theme='dark']) .arco-textarea-wrapper {
+  border-radius: 10px;
+}
+
+body:not([arco-theme='dark']) .arco-modal {
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+body:not([arco-theme='dark']) .arco-pagination-item-active {
+  background: rgba(15, 118, 110, 0.12) !important;
+  color: #0b5f59 !important;
+  border-color: transparent !important;
 }

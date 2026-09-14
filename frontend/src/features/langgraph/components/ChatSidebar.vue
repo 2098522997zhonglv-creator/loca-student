@@ -273,16 +273,16 @@ const formatTime = (date: Date) => {
 
 <style scoped>
 .chat-sidebar {
-  width: 280px;
+  width: 260px;
   background-color: #ffffff;
-  border-right: 1px solid #e5e6eb;
+  border-right: 1px solid rgba(15, 61, 56, 0.07);
   display: flex;
   flex-direction: column;
 }
 
 .sidebar-header {
-  padding: 16px;
-  border-bottom: 1px solid #e5e6eb;
+  padding: 14px;
+  border-bottom: 1px solid rgba(15, 61, 56, 0.07);
 }
 
 .header-row {
@@ -294,31 +294,32 @@ const formatTime = (date: Date) => {
 .chat-history-list {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  padding: 10px;
 }
 
 .empty-history {
   padding: 16px;
-  color: #86909c;
+  color: #6f857e;
   text-align: center;
+  font-size: 13px;
 }
 
 .chat-history-item {
-  padding: 12px;
-  border-radius: 8px;
-  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  margin-bottom: 6px;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  transition: background-color 0.2s;
+  transition: background-color 0.16s ease;
 }
 
 .chat-history-item:hover {
-  background-color: #f2f3f5;
+  background-color: rgba(15, 118, 110, 0.06);
 }
 
 .chat-history-item.active {
-  background-color: #e8f3ff;
+  background-color: rgba(15, 118, 110, 0.12);
 }
 
 .history-item-checkbox {

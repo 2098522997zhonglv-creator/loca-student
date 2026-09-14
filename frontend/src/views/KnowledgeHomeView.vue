@@ -5,7 +5,7 @@
         <p class="eyebrow">Local Knowledge Studio</p>
         <h1>本地知识中心</h1>
         <p class="lead">
-          把项目知识、LLM 对话与需求评审收拢到同一工作台。选好项目，从知识库或问答开始。
+          项目知识、智能问答与需求评审，汇于同一工作台。
         </p>
         <div class="cta-row">
           <a-button type="primary" class="cta-primary" @click="$router.push('/langgraph-chat')">
@@ -17,21 +17,20 @@
         </div>
       </div>
       <div class="hero-visual" aria-hidden="true">
-        <div class="orb orb-a" />
-        <div class="orb orb-b" />
-        <div class="panel">
-          <div class="panel-line" />
-          <div class="panel-line short" />
-          <div class="panel-chips">
-            <span>RAG</span>
-            <span>Review</span>
+        <div class="visual-glow" />
+        <div class="visual-card">
+          <div class="visual-row" />
+          <div class="visual-row short" />
+          <div class="visual-meta">
+            <span>知识检索</span>
+            <span>需求评审</span>
             <span>Agent</span>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="entries">
+    <section class="entries" aria-label="快捷入口">
       <button
         v-for="item in entries"
         :key="item.path"
@@ -42,6 +41,7 @@
         <span class="entry-kicker">{{ item.kicker }}</span>
         <span class="entry-title">{{ item.title }}</span>
         <span class="entry-desc">{{ item.description }}</span>
+        <span class="entry-go" aria-hidden="true">→</span>
       </button>
     </section>
   </div>
@@ -80,23 +80,23 @@ const entries = [
 .home {
   display: flex;
   flex-direction: column;
-  gap: 28px;
+  gap: 22px;
+  padding: 20px;
+  box-sizing: border-box;
 }
 
 .hero {
   position: relative;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 1.2fr 0.8fr;
-  gap: 24px;
-  min-height: min(52vh, 460px);
-  padding: 42px 44px;
-  border-radius: 28px;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 20px;
+  min-height: min(44vh, 380px);
+  padding: 36px 40px;
+  border-radius: 22px;
   background:
-    linear-gradient(135deg, rgba(11, 31, 26, 0.96), rgba(15, 61, 56, 0.92) 48%, rgba(15, 118, 110, 0.88)),
-    radial-gradient(600px 280px at 80% 20%, rgba(126, 224, 200, 0.35), transparent 60%);
+    linear-gradient(135deg, #0b1f1a 0%, #0f3d38 52%, #0f766e 100%);
   color: #eefaf6;
-  box-shadow: 0 24px 48px rgba(15, 61, 56, 0.22);
 }
 
 .hero-copy {
@@ -105,39 +105,39 @@ const entries = [
   display: flex;
   flex-direction: column;
   justify-content: center;
-  max-width: 560px;
-  text-align: left;
+  max-width: 520px;
 }
 
 .eyebrow {
-  margin: 0 0 14px;
-  font-size: 12px;
+  margin: 0 0 12px;
+  font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: rgba(126, 224, 200, 0.9);
+  color: rgba(126, 224, 200, 0.88);
 }
 
 h1 {
   margin: 0;
   font-family: var(--kc-display);
-  font-size: clamp(36px, 5vw, 54px);
+  font-size: clamp(32px, 4.4vw, 48px);
   font-weight: 700;
-  line-height: 1.08;
+  line-height: 1.1;
   letter-spacing: -0.02em;
 }
 
 .lead {
-  margin: 16px 0 0;
-  font-size: 16px;
+  margin: 14px 0 0;
+  font-size: 15px;
   line-height: 1.7;
-  color: rgba(232, 247, 242, 0.82);
+  color: rgba(232, 247, 242, 0.78);
+  max-width: 36em;
 }
 
 .cta-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  margin-top: 28px;
+  gap: 10px;
+  margin-top: 24px;
 }
 
 .cta-primary {
@@ -145,148 +145,173 @@ h1 {
   border-color: #7ee0c8 !important;
   color: #0b1f1a !important;
   font-weight: 600;
+  border-radius: 10px !important;
+  height: 36px !important;
+  transition: transform 0.16s ease, box-shadow 0.16s ease !important;
+}
+
+.cta-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(126, 224, 200, 0.28) !important;
 }
 
 .cta-secondary {
   background: transparent !important;
-  border-color: rgba(232, 247, 242, 0.35) !important;
+  border-color: rgba(232, 247, 242, 0.28) !important;
   color: #e8f7f2 !important;
+  border-radius: 10px !important;
+  height: 36px !important;
+}
+
+.cta-secondary:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(232, 247, 242, 0.45) !important;
 }
 
 .hero-visual {
   position: relative;
-  min-height: 240px;
+  min-height: 200px;
 }
 
-.orb {
+.visual-glow {
   position: absolute;
-  border-radius: 50%;
-  filter: blur(2px);
-  animation: float 7s ease-in-out infinite;
-}
-
-.orb-a {
-  width: 180px;
-  height: 180px;
-  right: 18%;
-  top: 12%;
-  background: rgba(126, 224, 200, 0.28);
-}
-
-.orb-b {
-  width: 110px;
-  height: 110px;
+  width: 220px;
+  height: 220px;
   right: 8%;
-  bottom: 18%;
-  background: rgba(255, 255, 255, 0.12);
-  animation-delay: -2.5s;
+  top: 10%;
+  border-radius: 50%;
+  background: rgba(126, 224, 200, 0.22);
+  filter: blur(8px);
+  animation: glow-pulse 6s ease-in-out infinite;
 }
 
-.panel {
+.visual-card {
   position: absolute;
-  inset: 18% 8% 16% 22%;
-  border-radius: 22px;
-  padding: 28px;
+  inset: 16% 6% 14% 18%;
+  border-radius: 18px;
+  padding: 24px;
   background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(10px);
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  gap: 14px;
-  animation: panel-in 0.7s ease both;
+  gap: 12px;
+  animation: card-in 0.55s ease both;
 }
 
-.panel-line {
-  height: 10px;
+.visual-row {
+  height: 8px;
   border-radius: 999px;
-  background: rgba(232, 247, 242, 0.28);
+  background: rgba(232, 247, 242, 0.22);
 }
 
-.panel-line.short {
-  width: 58%;
+.visual-row.short {
+  width: 54%;
 }
 
-.panel-chips {
+.visual-meta {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  margin-top: 4px;
 }
 
-.panel-chips span {
-  padding: 6px 10px;
-  border-radius: 999px;
+.visual-meta span {
+  padding: 5px 10px;
+  border-radius: 8px;
   font-size: 12px;
-  letter-spacing: 0.04em;
-  background: rgba(126, 224, 200, 0.16);
+  background: rgba(126, 224, 200, 0.14);
   color: #d9fff3;
 }
 
 .entries {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .entry {
   appearance: none;
+  position: relative;
   border: 1px solid rgba(15, 61, 56, 0.08);
-  background: rgba(255, 255, 255, 0.82);
-  border-radius: 20px;
-  padding: 22px 20px;
+  background: #fff;
+  border-radius: 16px;
+  padding: 20px 18px 18px;
   text-align: left;
   cursor: pointer;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  min-height: 168px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  gap: 6px;
+  min-height: 148px;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
   font-family: inherit;
 }
 
-.entry:hover {
-  transform: translateY(-3px);
+.entry:hover,
+.entry:focus-visible {
+  transform: translateY(-2px);
   border-color: rgba(15, 118, 110, 0.28);
-  box-shadow: 0 16px 32px rgba(15, 61, 56, 0.1);
+  box-shadow: 0 12px 28px rgba(15, 61, 56, 0.08);
+  outline: none;
+}
+
+.entry:hover .entry-go,
+.entry:focus-visible .entry-go {
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .entry-kicker {
   font-size: 11px;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #0f766e;
 }
 
 .entry-title {
   font-family: var(--kc-display);
-  font-size: 24px;
+  font-size: 22px;
   color: var(--kc-ink);
 }
 
 .entry-desc {
-  font-size: 14px;
-  line-height: 1.6;
+  font-size: 13px;
+  line-height: 1.55;
   color: var(--theme-text-secondary);
 }
 
-@keyframes float {
+.entry-go {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  font-size: 16px;
+  color: #0f766e;
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+@keyframes glow-pulse {
   0%,
   100% {
-    transform: translateY(0);
+    opacity: 0.7;
+    transform: scale(1);
   }
   50% {
-    transform: translateY(-12px);
+    opacity: 1;
+    transform: scale(1.05);
   }
 }
 
-@keyframes panel-in {
+@keyframes card-in {
   from {
     opacity: 0;
-    transform: translateY(12px) scale(0.98);
+    transform: translateY(10px);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: translateY(0);
   }
 }
 
@@ -299,11 +324,11 @@ h1 {
 @media (max-width: 840px) {
   .hero {
     grid-template-columns: 1fr;
-    padding: 28px 22px;
+    padding: 26px 20px;
     min-height: auto;
   }
   .hero-visual {
-    min-height: 180px;
+    min-height: 150px;
   }
   .entries {
     grid-template-columns: 1fr;

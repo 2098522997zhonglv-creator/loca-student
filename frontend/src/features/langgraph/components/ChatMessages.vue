@@ -280,22 +280,23 @@ defineExpose({
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  color: #86909c;
+  color: #6f857e;
 }
 
 .empty-icon {
-  width: 72px;
-  height: 72px;
+  width: 64px;
+  height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
 .empty-logo {
-  width: 72px;
-  height: 72px;
+  width: 64px;
+  height: 64px;
   object-fit: contain;
-  filter: drop-shadow(0 0 20px rgba(100, 180, 255, 0.18));
+  border-radius: 14px;
+  filter: drop-shadow(0 8px 18px rgba(15, 61, 56, 0.16));
 }
 </style>
