@@ -17,8 +17,24 @@ from wharttest_django.data_variant import (
 
 
 def get_database_type() -> str:
-    """获取数据库类型配置（每次调用时读取，确保环境变量已加载）"""
-    return os.environ.get('DATABASE_TYPE', 'postgres')
+    """获取 LangGraph checkpoint 存储类型；未显式设置时与 Django 默认库一致。"""
+    explicit = (os.environ.get("DATABASE_TYPE") or "").strip().lower()
+    if explicit:
+        return explicit
+    engine = settings.DATABASES["default"]["ENGINE"]
+    if "postgresql" in engine or "postgres" in engine:
+        return "postgres"
+    return "sqlite"
+
+
+def _import_psycopg2():
+    """按需导入 psycopg2；未安装时返回 None，避免 checkpoint 辅助查询拖垮 API。"""
+    try:
+        import psycopg2
+
+        return psycopg2
+    except ImportError:
+        return None
 
 
 def get_db_connection_string() -> str:
@@ -91,7 +107,9 @@ def delete_checkpoints_by_thread_id(thread_id: str) -> int:
     返回删除的记录数
     """
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            return 0
         conn_string = get_db_connection_string()
         try:
             conn = psycopg2.connect(conn_string)
@@ -133,7 +151,9 @@ def delete_checkpoints_batch(thread_ids: list) -> int:
         return 0
     
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            return 0
         conn_string = get_db_connection_string()
         try:
             conn = psycopg2.connect(conn_string)
@@ -173,7 +193,9 @@ def check_history_exists() -> bool:
     检查聊天历史存储是否存在（SQLite 文件或 PostgreSQL 表）
     """
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            return False
         conn_string = get_db_connection_string()
         try:
             conn = psycopg2.connect(conn_string)
@@ -198,7 +220,9 @@ def get_thread_ids_by_prefix(prefix: str) -> list:
     返回 thread_id 列表
     """
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            return []
         conn_string = get_db_connection_string()
         try:
             conn = psycopg2.connect(conn_string)
@@ -318,7 +342,10 @@ def _rollback_by_modifying_blobs(thread_id: str, keep_count: int, original_count
     当没有合适的历史 checkpoint 时使用此方法
     """
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            logger.warning("[rollback] psycopg2 not installed, skipping postgres rollback")
+            return 0
         conn_string = get_db_connection_string()
 
         # 先获取 serde（需要在 checkpointer 上下文中）
@@ -406,7 +433,9 @@ def _rollback_by_modifying_blobs(thread_id: str, keep_count: int, original_count
 def _delete_checkpoints_after(thread_id: str, keep_checkpoint_id: str, logger) -> int:
     """删除指定 checkpoint 之后的所有 checkpoints"""
     if get_database_type() == 'postgres':
-        import psycopg2
+        psycopg2 = _import_psycopg2()
+        if psycopg2 is None:
+            return 0
         conn_string = get_db_connection_string()
 
         try:
