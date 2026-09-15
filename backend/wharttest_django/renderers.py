@@ -155,7 +155,13 @@ class UnifiedResponseRenderer(JSONRenderer):
                     )
                 }
 
-        language = renderer_context.get("request").LANGUAGE_CODE if renderer_context.get("request") else None
+        request = renderer_context.get("request") if renderer_context else None
+        language = None
+        if request is not None:
+            language = getattr(request, "LANGUAGE_CODE", None)
+            if language is None:
+                django_request = getattr(request, "_request", None)
+                language = getattr(django_request, "LANGUAGE_CODE", None)
         unified_response["message"] = translate_app_text(unified_response.get("message", ""), language)
         unified_response["errors"] = translate_error_payload(unified_response.get("errors"), language)
 

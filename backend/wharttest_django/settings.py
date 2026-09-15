@@ -53,11 +53,19 @@ MIDDLEWARE = [
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.locale.LocaleMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "operation_logs.middleware.OperationLogMiddleware",
+]
+
+LANGUAGE_CODE = "zh-Hans"
+USE_I18N = True
+LANGUAGES = [
+    ("zh-Hans", "简体中文"),
+    ("en", "English"),
 ]
 
 ROOT_URLCONF = "wharttest_django.urls"
