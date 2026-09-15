@@ -355,10 +355,11 @@ def create_llm_instance(active_config, temperature=0.7):
                 logger.warning(
                     "Unknown provider '%s', fallback to openai_compatible", provider
                 )
+            # Ollama 等本地服务不校验 Key，但 OpenAI SDK 要求非空字符串
             llm_kwargs = {
                 "model": model_identifier,
                 "temperature": temperature,
-                "api_key": api_key,
+                "api_key": api_key or "ollama",
                 "base_url": base_url,
                 "timeout": request_timeout,  # 单次请求超时
                 "max_retries": max_retries,  # 自动重试次数
