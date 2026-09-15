@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
-import { normalizeListPayload } from '@/utils/responseHelpers';
+import { parseListAxiosData } from '@/utils/responseHelpers';
 
 // 用户详情接口
 export interface UserDetail {
@@ -118,22 +118,24 @@ export const getProjectList = async (params?: PaginationParams): Promise<Project
       },
     });
 
-    // 统一格式：{ status, data: [...] } 或 { status, data: { results, count } }
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<Project>(response.data.data);
+    // 兼容：统一包装 { status, data } 与裸 DRF 分页 { results, count }
+    const parsed = parseListAxiosData<Project>(
+      response.data,
+      '获取项目列表失败：响应数据格式不正确'
+    )
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        total: count,
-        statusCode: response.data.code,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取项目列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        total: parsed.count,
+        statusCode: parsed.code ?? response.status,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error: any) {
     console.error('获取项目列表出错:', error);
     return {
@@ -371,20 +373,22 @@ export const getProjectMembers = async (projectId: number): Promise<{
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results } = normalizeListPayload<ProjectMember>(response.data.data);
+    const parsed = parseListAxiosData<ProjectMember>(
+      response.data,
+      '获取项目成员列表失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取项目成员列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error: any) {
     console.error('获取项目成员列表出错:', error);
     return {

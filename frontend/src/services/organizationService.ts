@@ -2,7 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
-import { normalizeListPayload } from '@/utils/responseHelpers';
+import { parseListAxiosData } from '@/utils/responseHelpers';
 
 // 组织数据接口
 export interface Organization {
@@ -105,22 +105,23 @@ export const getOrganizationList = async (params: PaginationParams): Promise<Org
       },
     });
 
-    // 统一格式：{ status, data: [...] } 或分页 { results, count }
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<Organization>(response.data.data);
+    const parsed = parseListAxiosData<Organization>(
+      response.data,
+      '获取组织列表失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取组织列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取组织列表失败，请稍后再试';
     let statusCode: number | undefined;
@@ -407,21 +408,23 @@ export const getOrganizationUsers = async (organizationId: number, params?: Pagi
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<OrganizationUser>(response.data.data);
+    const parsed = parseListAxiosData<OrganizationUser>(
+      response.data,
+      '获取组织成员列表失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取组织成员列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取组织成员列表失败，请稍后再试';
     let statusCode: number | undefined;

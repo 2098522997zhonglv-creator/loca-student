@@ -2,7 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
-import { normalizeListPayload } from '@/utils/responseHelpers';
+import { parseListAxiosData } from '@/utils/responseHelpers';
 
 // 内容类型数据接口
 export interface ContentType {
@@ -53,21 +53,23 @@ export const getContentTypeList = async (params?: ContentTypeQueryParams): Promi
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<ContentType>(response.data.data);
+    const parsed = parseListAxiosData<ContentType>(
+      response.data,
+      '获取内容类型列表失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: response.data.total || count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取内容类型列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取内容类型列表失败，请稍后再试';
     let statusCode: number | undefined;

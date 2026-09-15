@@ -593,6 +593,9 @@ const fetchProjectList = async () => {
     if (response.success && response.data) {
       projectData.value = response.data;
       pagination.total = response.total || response.data.length;
+    } else if (response.success) {
+      projectData.value = [];
+      pagination.total = 0;
     } else {
       Message.error(response.error || pageText.value.fetchProjectListFailed);
       projectData.value = [];

@@ -104,6 +104,10 @@ REST_FRAMEWORK = {
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "wharttest_django.pagination.StandardPagination",
     "PAGE_SIZE": 20,
+    # 与 WHartTest 一致：统一包装为 { status, code, message, data }
+    "DEFAULT_RENDERER_CLASSES": (
+        "wharttest_django.renderers.UnifiedResponseRenderer",
+    ),
 }
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(hours=8),

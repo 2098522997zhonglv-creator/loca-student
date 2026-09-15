@@ -2,7 +2,7 @@
 import axios from 'axios';
 import { useAuthStore } from '@/store/authStore';
 import { API_BASE_URL } from '@/config/api';
-import { normalizeListPayload } from '@/utils/responseHelpers';
+import { parseListAxiosData } from '@/utils/responseHelpers';
 
 // 权限数据接口
 export interface Permission {
@@ -96,21 +96,23 @@ export const getPermissionList = async (params?: PaginationParams): Promise<Perm
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<Permission>(response.data.data);
+    const parsed = parseListAxiosData<Permission>(
+      response.data,
+      '获取权限列表失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: response.data.total || count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取权限列表失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取权限列表失败，请稍后再试';
     let statusCode: number | undefined;
@@ -234,21 +236,23 @@ export const getUserPermissions = async (userId: number): Promise<PermissionList
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<Permission>(response.data.data);
+    const parsed = parseListAxiosData<Permission>(
+      response.data,
+      '获取用户权限失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取用户权限失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取用户权限失败，请稍后再试';
     let statusCode: number | undefined;
@@ -314,21 +318,23 @@ export const getGroupPermissions = async (groupId: number): Promise<PermissionLi
       },
     });
 
-    if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload<Permission>(response.data.data);
+    const parsed = parseListAxiosData<Permission>(
+      response.data,
+      '获取组织权限失败：响应数据格式不正确'
+    );
+    if (parsed.ok) {
       return {
         success: true,
-        data: results,
-        statusCode: response.data.code,
-        total: count,
-      };
-    } else {
-      return {
-        success: false,
-        error: response.data?.message || '获取组织权限失败：响应数据格式不正确',
-        statusCode: response.data?.code,
+        data: parsed.results,
+        statusCode: parsed.code ?? response.status,
+        total: parsed.count,
       };
     }
+    return {
+      success: false,
+      error: parsed.error,
+      statusCode: parsed.code ?? response.status,
+    };
   } catch (error) {
     let errorMessage = '获取组织权限失败，请稍后再试';
     let statusCode: number | undefined;
