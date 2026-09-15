@@ -90,13 +90,24 @@ class UnifiedResponseRenderer(JSONRenderer):
 
         # 通用包装分支。
         if data is not None:
+            already_unified = isinstance(data, dict) and all(
+                k in data for k in ("status", "code", "message")
+            )
+
             # 错误响应分支。
             if status_code >= 400:
                 unified_response["status"] = "error"
                 unified_response["data"] = None
 
+                # View 已返回统一结构时保留原始 message/errors，避免二次包装。
+                if already_unified:
+                    unified_response["message"] = data.get("message") or "请求处理失败"
+                    unified_response["errors"] = data.get("errors") or {
+                        "detail": data.get("message") or "请求处理失败"
+                    }
+
                 # 标准 detail 错误。
-                if isinstance(data, dict) and "detail" in data:
+                elif isinstance(data, dict) and "detail" in data:
                     unified_response["message"] = data.get("detail", "请求处理失败")
                     unified_response["errors"] = {"detail": data.get("detail")}
 
@@ -114,11 +125,8 @@ class UnifiedResponseRenderer(JSONRenderer):
             else:
                 unified_response["status"] = "success"
 
-
                 # 已是统一结构时做合并。
-                if isinstance(data, dict) and all(
-                    k in data for k in ["status", "code", "message"]
-                ):
+                if already_unified:
                     original_code = unified_response["code"]
                     unified_response.update(data)
                     unified_response["code"] = original_code

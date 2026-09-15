@@ -885,11 +885,11 @@ const loadSessionsFromServer = async () => {
 
       saveSessionsToStorage();
     } else {
-      Message.error(pageText.value.fetchSessionsFailed);
+      Message.error(response.message || pageText.value.fetchSessionsFailed);
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('获取会话列表失败:', error);
-    Message.error(pageText.value.fetchSessionsFailedRetry);
+    Message.error(error?.error || error?.message || pageText.value.fetchSessionsFailedRetry);
   } finally {
     safeStopLoading();
   }

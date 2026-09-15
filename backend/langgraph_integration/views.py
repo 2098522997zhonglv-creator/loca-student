@@ -2940,11 +2940,8 @@ class UserChatSessionsAPIView(APIView):
         if not project_id:
             return Response(
                 {
-                    "status": "error",
-                    "code": status.HTTP_400_BAD_REQUEST,
-                    "message": "project_id query parameter is required.",
-                    "data": {},
-                    "errors": {"project_id": ["This field is required."]},
+                    "detail": "project_id query parameter is required.",
+                    "project_id": ["This field is required."],
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -2954,85 +2951,85 @@ class UserChatSessionsAPIView(APIView):
         if not project:
             return Response(
                 {
-                    "status": "error",
-                    "code": status.HTTP_403_FORBIDDEN,
-                    "message": "You don't have permission to access this project or project doesn't exist.",
-                    "data": {},
-                    "errors": {
-                        "project_id": ["Permission denied or project not found."]
-                    },
+                    "detail": "You don't have permission to access this project or project doesn't exist.",
+                    "project_id": ["Permission denied or project not found."],
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-
-        # 优先从Django ChatSession模型读取会话列表（带标题和时间，无需查sqlite）
-        django_sessions = (
-            ChatSession.objects.filter(user=request.user, project_id=project_id)
-            .order_by("-updated_at")
-            .values("session_id", "title", "updated_at", "created_at")
-        )
-
-        sessions_list = []
-        django_session_ids = set()
-
-        for s in django_sessions:
-            django_session_ids.add(s["session_id"])
-            sessions_list.append(
-                {
-                    "id": s["session_id"],
-                    "title": s["title"] or "新对话",
-                    "updated_at": s["updated_at"].isoformat()
-                    if s["updated_at"]
-                    else None,
-                    "created_at": s["created_at"].isoformat()
-                    if s["created_at"]
-                    else None,
-                }
+        try:
+            # 优先从Django ChatSession模型读取会话列表（带标题和时间，无需查sqlite）
+            django_sessions = (
+                ChatSession.objects.filter(user=request.user, project_id=project_id)
+                .order_by("-updated_at")
+                .values("session_id", "title", "updated_at", "created_at")
             )
 
-        # 回退：检查checkpoints中是否有Django模型没记录的会话
-        if check_history_exists():
-            try:
-                thread_id_prefix = f"{user_id}_{project_id}_"
-                thread_ids = get_thread_ids_by_prefix(thread_id_prefix)
+            sessions_list = []
+            django_session_ids = set()
 
-                for full_thread_id in thread_ids:
-                    if full_thread_id.startswith(thread_id_prefix):
-                        session_id_part = full_thread_id[len(thread_id_prefix) :]
-                        if (
-                            session_id_part
-                            and session_id_part not in django_session_ids
-                        ):
-                            # checkpoints有但Django没有的会话，添加到列表
-                            sessions_list.append(
-                                {
-                                    "id": session_id_part,
-                                    "title": f"会话 {session_id_part[:8]}...",
-                                    "updated_at": None,
-                                    "created_at": None,
-                                }
-                            )
+            for s in django_sessions:
+                django_session_ids.add(s["session_id"])
+                sessions_list.append(
+                    {
+                        "id": s["session_id"],
+                        "title": s["title"] or "新对话",
+                        "updated_at": s["updated_at"].isoformat()
+                        if s["updated_at"]
+                        else None,
+                        "created_at": s["created_at"].isoformat()
+                        if s["created_at"]
+                        else None,
+                    }
+                )
+
+            # 回退：检查checkpoints中是否有Django模型没记录的会话
+            try:
+                if check_history_exists():
+                    thread_id_prefix = f"{user_id}_{project_id}_"
+                    thread_ids = get_thread_ids_by_prefix(thread_id_prefix)
+
+                    for full_thread_id in thread_ids:
+                        if full_thread_id.startswith(thread_id_prefix):
+                            session_id_part = full_thread_id[len(thread_id_prefix) :]
+                            if (
+                                session_id_part
+                                and session_id_part not in django_session_ids
+                            ):
+                                # checkpoints有但Django没有的会话，添加到列表
+                                sessions_list.append(
+                                    {
+                                        "id": session_id_part,
+                                        "title": f"会话 {session_id_part[:8]}...",
+                                        "updated_at": None,
+                                        "created_at": None,
+                                    }
+                                )
             except Exception as e:
                 logger.warning(
                     f"UserChatSessionsAPIView: Failed to check checkpoints for additional sessions: {e}"
                 )
 
-        return Response(
-            {
-                "status": "success",
-                "code": status.HTTP_200_OK,
-                "message": "User chat sessions retrieved successfully.",
-                "data": {
+            # 交由 UnifiedResponseRenderer 统一包装，避免双重 status/data 结构
+            return Response(
+                {
                     "user_id": user_id,
                     "project_id": project_id,
                     "project_name": project.name,
                     "sessions": [s["id"] for s in sessions_list],  # 保持向后兼容
                     "sessions_detail": sessions_list,  # 新增：带详情的会话列表
                 },
-            },
-            status=status.HTTP_200_OK,
-        )
+                status=status.HTTP_200_OK,
+            )
+        except Exception as e:
+            logger.error(
+                f"UserChatSessionsAPIView.get: Failed to list sessions: {e}",
+                exc_info=True,
+            )
+            return Response(
+                {"detail": f"Failed to retrieve chat sessions: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
     def put(self, request, *args, **kwargs):
         """

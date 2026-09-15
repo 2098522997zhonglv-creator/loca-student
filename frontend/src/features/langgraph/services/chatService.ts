@@ -879,7 +879,7 @@ export async function rollbackChatHistory(
  * @param projectId 项目ID
  */
 export async function getChatSessions(projectId: number): Promise<ApiResponse<ChatSessionsResponseData>> {
-  const response = await request<ChatSessionsResponseData>({
+  const response = await request<ChatSessionsResponseData | { data?: ChatSessionsResponseData }>({
     url: `${API_BASE_URL}/sessions/`,
     method: 'GET',
     params: {
@@ -888,20 +888,29 @@ export async function getChatSessions(projectId: number): Promise<ApiResponse<Ch
   });
 
   if (response.success) {
+    // 兼容：渲染器已包一层、或旧接口自带 data 时再取一层
+    const raw = response.data as ChatSessionsResponseData & { data?: ChatSessionsResponseData };
+    const payload =
+      raw && (raw.sessions_detail !== undefined || raw.sessions !== undefined)
+        ? raw
+        : raw?.data && (raw.data.sessions_detail !== undefined || raw.data.sessions !== undefined)
+          ? raw.data
+          : (raw as ChatSessionsResponseData);
+
     return {
       status: 'success',
       code: 200,
       message: response.message || 'success',
-      data: response.data!,
+      data: payload || ({} as ChatSessionsResponseData),
       errors: undefined
     };
   } else {
     return {
       status: 'error',
-      code: 500,
-      message: response.error || 'Failed to get chat sessions',
+      code: (response as { status?: number }).status || 500,
+      message: response.error || response.message || 'Failed to get chat sessions',
       data: {} as ChatSessionsResponseData,
-      errors: { detail: [response.error || 'Unknown error'] }
+      errors: { detail: [response.error || response.message || 'Unknown error'] }
     };
   }
 }
