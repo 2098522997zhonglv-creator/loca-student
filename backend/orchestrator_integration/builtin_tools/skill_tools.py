@@ -10,6 +10,7 @@ import logging
 import subprocess
 import os
 import shutil
+import sys
 import threading
 import json
 import time
@@ -407,6 +408,36 @@ def _resolve_skill_runtime_api_key(user_id: int) -> tuple[str, str]:
     return "", "none"
 
 
+def _prepend_interpreter_to_path(env: dict) -> None:
+    """把当前解释器目录插到子进程 PATH 最前面。
+
+    Skill 脚本以 `python xxx.py` 形式调用，但服务可能由 conda 环境里的
+    python.exe 直接启动（未经 activate），子进程 PATH 里没有解释器目录。
+    Windows 上 `python` 于是命中 Microsoft Store 的 App Execution Alias
+    存根，以退出码 9009 失败；插到最前同时也能盖掉该别名。
+    """
+    interpreter_dir = os.path.dirname(sys.executable)
+    if not interpreter_dir:
+        return
+
+    # Windows/conda 的入口脚本在 Scripts/，venv 与 posix 布局在 bin/
+    candidates = [
+        interpreter_dir,
+        os.path.join(interpreter_dir, "Scripts"),
+        os.path.join(interpreter_dir, "bin"),
+    ]
+    prefix = [path for path in candidates if os.path.isdir(path)]
+    if not prefix:
+        return
+
+    existing = [
+        path
+        for path in (env.get("PATH") or "").split(os.pathsep)
+        if path and path not in prefix
+    ]
+    env["PATH"] = os.pathsep.join(prefix + existing)
+
+
 def _resolve_skill_runtime_backend_url() -> str:
     """Skill 在 backend 进程内执行时，默认回环访问本服务。"""
     configured = (
@@ -498,6 +529,7 @@ def get_skill_tools(
             logger.info(f"[execute_skill_script] 在目录 {skill_dir} 执行: {command}")
 
             env = os.environ.copy()
+            _prepend_interpreter_to_path(env)
             # 1) 运维配置 / 2) 当前用户有效 API Key / 3) 不注入（保留脚本默认）
             backend_url = _resolve_skill_runtime_backend_url()
             api_key, key_source = _resolve_skill_runtime_api_key(current_user_id)
