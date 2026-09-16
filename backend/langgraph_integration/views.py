@@ -284,7 +284,7 @@ logger = logging.getLogger(__name__)  # Initialize logger
 
 
 # --- 辅助函数 ---
-def create_llm_instance(active_config, temperature=0.7):
+def create_llm_instance(active_config, temperature=0.7, streaming=True):
     """
     根据配置创建LLM实例
     支持多供应商：
@@ -295,6 +295,8 @@ def create_llm_instance(active_config, temperature=0.7):
     关键参数说明：
     - timeout: 请求超时时间（秒），防止无限期等待
     - max_retries: 最大重试次数，处理临时网络问题
+    - streaming: 必须为 True，LangGraph 的 stream_mode="messages"
+      只有在模型逐 token 返回时才会产出 token 事件
     """
     model_identifier = active_config.name or "gpt-3.5-turbo"
     provider = (getattr(active_config, "provider", None) or "openai_compatible").strip()
@@ -323,6 +325,8 @@ def create_llm_instance(active_config, temperature=0.7):
                 "temperature": temperature,
                 "timeout": request_timeout,
                 "max_retries": max_retries,
+                "streaming": streaming,
+                "stream_usage": streaming,
             }
             if api_key:
                 llm_kwargs["api_key"] = api_key
@@ -343,6 +347,7 @@ def create_llm_instance(active_config, temperature=0.7):
                 "temperature": temperature,
                 "timeout": request_timeout,
                 "max_retries": max_retries,
+                "streaming": streaming,
             }
             if api_key:
                 llm_kwargs["api_key"] = api_key
@@ -363,16 +368,20 @@ def create_llm_instance(active_config, temperature=0.7):
                 "base_url": base_url,
                 "timeout": request_timeout,  # 单次请求超时
                 "max_retries": max_retries,  # 自动重试次数
+                "streaming": streaming,
+                # 流式下不带该参数时上游不回传 usage，Token 统计会退化为估算
+                "stream_usage": streaming,
             }
             llm = ChatOpenAI(**llm_kwargs)
 
         logger.info(
-            "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%ss, max_retries=%s",
+            "Initialized LLM: provider=%s, model=%s, base_url=%s, timeout=%ss, max_retries=%s, streaming=%s",
             provider,
             model_identifier,
             base_url,
             request_timeout,
             max_retries,
+            streaming,
         )
     except Exception as e:
         logger.error(
@@ -573,7 +582,7 @@ class LLMConfigViewSet(BaseModelViewSet):
         config = self.get_object()
 
         try:
-            llm = create_llm_instance(config, temperature=0.1)
+            llm = create_llm_instance(config, temperature=0.1, streaming=False)
             response = llm.invoke("Hi")
             if getattr(response, "content", None):
                 return Response({"status": "success", "message": "连接测试成功"})
