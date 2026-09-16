@@ -2,10 +2,48 @@
 需求评审异步任务
 """
 import logging
+import threading
+import uuid
+
 from celery import shared_task
+from django.conf import settings
+from django.db import connections
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+
+def dispatch_requirement_review(
+    document_id, analysis_options=None, review_type="comprehensive", user_id=None
+):
+    """派发评审任务，返回任务标识。
+
+    本地部署使用 Celery eager 模式，此时 .delay() 会在 HTTP 请求线程里同步跑完
+    整个评审（可能数分钟），请求一旦中断评审也随之中断。因此 eager 模式下改用
+    后台线程执行，让接口能立即返回。
+    """
+    if not getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
+        return execute_requirement_review.delay(
+            document_id, analysis_options, review_type, user_id=user_id
+        ).id
+
+    task_id = str(uuid.uuid4())
+
+    def _run():
+        try:
+            execute_requirement_review(
+                document_id, analysis_options, review_type, user_id=user_id
+            )
+        except Exception:
+            logger.error("REQ_REVIEW background thread crashed", exc_info=True)
+        finally:
+            # 线程结束时释放数据库连接，避免连接泄漏
+            connections.close_all()
+
+    threading.Thread(
+        target=_run, name=f"requirement-review-{document_id}", daemon=True
+    ).start()
+    return task_id
 
 
 @shared_task(bind=True, name='requirements.execute_requirement_review')
@@ -92,8 +130,15 @@ def execute_requirement_review(self, document_id, analysis_options=None, review_
             document = RequirementDocument.objects.get(id=document_id)
             document.status = 'failed'
             document.save()
-        except:
-            pass
+
+            # 同步把仍在进行中的报告标记为失败，否则前端会一直停在旧进度
+            document.review_reports.filter(status='in_progress').update(
+                status='failed',
+                current_step='评审失败，请重试',
+                updated_at=timezone.now(),
+            )
+        except Exception:
+            logger.warning("REQ_REVIEW failed to mark document/report as failed", exc_info=True)
         
         return {
             'status': 'error',

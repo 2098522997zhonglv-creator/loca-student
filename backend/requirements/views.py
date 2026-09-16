@@ -56,6 +56,7 @@ from .services import (
     RequirementModuleService,
     ModuleOperationService,
     RequirementReviewService,
+    recover_stale_review,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,16 @@ class RequirementDocumentViewSet(BaseModelViewSet):
         elif self.action == "retrieve":
             return RequirementDocumentDetailSerializer
         return RequirementDocumentSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        """返回详情前回收已中断的评审，避免前端一直停在旧进度"""
+        document = self.get_object()
+        try:
+            recover_stale_review(document)
+        except Exception:
+            logger.warning("回收陈旧评审状态失败", exc_info=True)
+        serializer = self.get_serializer(document)
+        return Response(serializer.data)
 
     def perform_create(self, serializer):
         """创建文档时自动设置上传人并提取内容"""
@@ -784,9 +795,7 @@ class RequirementDocumentViewSet(BaseModelViewSet):
             document.save()
 
             # 启动异步评审任务
-            from .tasks import execute_requirement_review
-
-
+            from .tasks import dispatch_requirement_review
 
             review_type = "direct" if direct_review else "comprehensive"
             logger.info(
@@ -796,7 +805,7 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                 review_type,
                 {k: analysis_options.get(k) for k in ("analysis_type", "parallel_processing", "direct_review")},
             )
-            task = execute_requirement_review.delay(
+            task_id = dispatch_requirement_review(
                 str(document.id),
                 analysis_options,
                 review_type,
@@ -807,7 +816,7 @@ class RequirementDocumentViewSet(BaseModelViewSet):
             return Response(
                 {
                     "message": f"评审任务已启动",
-                    "task_id": task.id,
+                    "task_id": task_id,
                     "review_type": "直接评审" if direct_review else "模块评审",
                     "direct_review": direct_review,
                     "status": "reviewing",

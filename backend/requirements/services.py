@@ -1,6 +1,8 @@
 import logging
 import json
+import os
 import re
+from datetime import timedelta
 from string import Template
 from typing import List, Dict, Any, Optional
 from django.conf import settings
@@ -21,22 +23,69 @@ def create_llm_instance(active_config, temperature=0.1):
     """
     model_identifier = active_config.name or "gpt-3.5-turbo"
 
+    # 超时与重试跟随 LLM 配置；safe_llm_invoke 还会再重试，避免单次分析卡住十几分钟
+    request_timeout = getattr(active_config, "request_timeout", None) or 120
+    max_retries = getattr(active_config, "max_retries", None)
+    if max_retries is None:
+        max_retries = 1
+
     llm_kwargs = {
         "model": model_identifier,
         "temperature": temperature,
-        "api_key": active_config.api_key,
+        # 本地 Ollama 等服务不校验 Key，但 OpenAI SDK 要求非空
+        "api_key": (active_config.api_key or "").strip() or "local",
         "base_url": active_config.api_url,
-        "max_retries": 3,
-        "timeout": 120,
+        "max_retries": min(int(max_retries), 2),
+        "timeout": request_timeout,
     }
     llm = ChatOpenAI(**llm_kwargs)
     logger.info(
-        f"Initialized OpenAI-compatible LLM with model: {model_identifier}, base_url: {active_config.api_url}"
+        "Initialized OpenAI-compatible LLM with model: %s, base_url: %s, timeout=%ss, max_retries=%s",
+        model_identifier,
+        active_config.api_url,
+        request_timeout,
+        llm_kwargs["max_retries"],
     )
 
     return llm
 
-    return llm
+
+def recover_stale_review(document: "RequirementDocument") -> bool:
+    """把长时间没有进度更新的评审标记为失败。
+
+    评审在进程内执行，服务重启或请求中断会让报告永远停在 in_progress，
+    前端因此一直显示旧进度（例如 10%）。这里做一次兜底回收。
+    """
+    from django.utils import timezone
+
+    stale_minutes = int(os.environ.get("REQUIREMENT_REVIEW_STALE_MINUTES", "20"))
+    latest_review = document.review_reports.order_by("-review_date").first()
+    if not latest_review or latest_review.status != "in_progress":
+        return False
+
+    last_touch = latest_review.updated_at or latest_review.review_date
+    if not last_touch:
+        return False
+    if timezone.now() - last_touch < timedelta(minutes=stale_minutes):
+        return False
+
+    logger.warning(
+        "评审报告长时间无进度更新，标记为失败: document=%s report=%s progress=%s step=%s",
+        document.id,
+        latest_review.id,
+        latest_review.progress,
+        latest_review.current_step,
+    )
+    latest_review.status = "failed"
+    latest_review.current_step = "评审中断，请重新开始"
+    latest_review.save(update_fields=["status", "current_step", "updated_at"])
+
+    if document.status == "reviewing":
+        document.status = "failed"
+        document.save(update_fields=["status", "updated_at"])
+        document.refresh_from_db()
+
+    return True
 
 
 def safe_llm_invoke(llm, messages, max_retries=3, retry_delay=2):
