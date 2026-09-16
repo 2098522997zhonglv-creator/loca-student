@@ -88,10 +88,13 @@ function Start-KnowledgeCenter {
         return
     }
 
+    # --noreload: restarts are driven solely by Update-And-Restart.ps1, so a
+    # git pull can't kill an in-flight requirement review mid-run.
     $argList = @(
         "backend\manage.py",
         "runserver",
-        "$($script:BindHost):$($script:Port)"
+        "$($script:BindHost):$($script:Port)",
+        "--noreload"
     )
 
     $proc = Start-Process `
