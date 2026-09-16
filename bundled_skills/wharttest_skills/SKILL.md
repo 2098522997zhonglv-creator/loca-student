@@ -1,9 +1,9 @@
 ---
 name: whart-test
-description: WHartTest测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。
+description: 本地知识中心的项目与文件管理工具集。用于查询项目列表，以及项目文件附件的上传、下载、预览、删除、引用查询、file_ids 校验和自动清理设置。当用户需要查询项目信息，或上传/下载/预览/删除项目文件、校验 file_ids、管理文件清理设置时使用。
 ---
 
-# WHartTest 测试管理平台
+# 本地知识中心项目与文件管理
 
 ## 快速开始
 
@@ -18,35 +18,11 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 
 ## 可用操作
 
-### 项目管理
+### 项目查询
 
 | Action | 描述 | 参数 |
 |--------|------|------|
 | `get_projects` | 获取所有项目列表 | 无 |
-| `get_modules` | 获取项目下的模块列表 | `--project_id` |
-| `add_module` | 新增用例模块 | `--project_id`, `--name`, `--parent_id` (可选) |
-
-### 用例管理
-
-| Action | 描述 | 参数 |
-|--------|------|------|
-| `get_levels` | 获取用例等级列表 | 无 |
-| `get_testcases` | 获取模块下的用例列表 | `--project_id`, `--module_id` |
-| `get_testcase_detail` | 获取用例详情 | `--project_id`, `--case_id` |
-| `add_testcase` | 新增测试用例 | `--project_id`, `--module_id`, `--name`, `--level`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type` |
-| `edit_testcase` | 编辑测试用例 | `--project_id`, `--case_id`, `--name`, `--level`, `--module_id`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type`, `--is_optimization` |
-
-### 截图管理
-
-| Action | 描述 | 参数 |
-|--------|------|------|
-| `upload_screenshot` | 上传单张截图 | `--project_id`, `--case_id`, `--file_path`, `--title`, `--description`, `--step_number`, `--page_url` |
-| `upload_screenshots` | 批量上传截图 | `--project_id`, `--case_id`, `--file_paths`(逗号分隔), `--title`, `--description`, `--step_number`, `--page_url` |
-
-**截图路径约定**：自动化技能（如 `playwright-skill`、`browser-use`）生成的截图应优先保存到 `SCREENSHOT_DIR` 环境变量指定的目录。上传时只需传入文件名（无需路径），系统会优先从 `SCREENSHOT_DIR` 查找；若未命中，会再回退到常见临时截图目录做兼容搜索。
-
-**单张上传**：`--file_path "case_11_step1.png"`
-**批量上传**：`--file_paths "step1.png,step2.png,step3.png"`（最多10张，逗号分隔）
 
 ### 文件管理
 
@@ -69,29 +45,9 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 
 **设置布尔值**：`--auto_delete_on_unbind` 与 `--auto_delete_zero_refs` 使用 `true` / `false`。
 
-### 审核状态
+## 能力边界
 
-`--review_status` 可选值：
-- `pending_review` - 待审核（默认）
-- `approved` - 通过
-- `needs_optimization` - 优化
-- `optimization_pending_review` - 优化待审核
-- `unavailable` - 不可用
-
-### 测试类型
-
-`--test_type` 可选值：
-- `smoke` - 冒烟测试
-- `functional` - 功能测试（默认）
-- `boundary` - 边界测试
-- `exception` - 异常测试
-- `permission` - 权限测试
-- `security` - 安全测试
-- `compatibility` - 兼容性测试
-
-`--is_optimization` 标志（布尔型，无需传值）：在 edit_testcase 时带上此标志，会自动将状态设为 `optimization_pending_review`（优化待审核），用于AI优化后的用例提交。**一次调用即可完成编辑+状态更新。**
-- ✅ 正确用法：`python whart_tools.py --action edit_testcase --project_id 1 --case_id 51 ... --is_optimization`
-- ❌ 错误用法：`--is_optimization true`（不要传值）
+本工具只覆盖项目查询与项目文件管理。测试用例、用例模块、用例等级和测试截图相关操作在本系统中没有对应接口，请勿尝试调用。需求文档与评审数据也不在本工具范围内。
 
 ## 使用示例
 
@@ -99,47 +55,15 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 # 获取项目列表
 python whart_tools.py --action get_projects
 
-# 获取项目1的模块
-python whart_tools.py --action get_modules --project_id 1
-
-# 新增用例模块
-python whart_tools.py --action add_module --project_id 1 --name "新功能模块"
-
-# 新增子用例模块
-python whart_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
-
-# 获取用例列表
-python whart_tools.py --action get_testcases --project_id 1 --module_id 5
-
-# 新增用例
-python whart_tools.py --action add_testcase \
-  --project_id 1 \
-  --module_id 5 \
-  --name "登录功能测试" \
-  --level P0 \
-  --precondition "用户已注册" \
-  --steps '[{"step_number":1,"description":"输入用户名","expected_result":"用户名显示"}]' \
-  --notes "冒烟测试"
-
-# 上传单张截图
-python whart_tools.py --action upload_screenshot \
-  --project_id 1 \
-  --case_id 10 \
-  --file_path "step1.png" \
-  --title "登录页面截图" \
-  --step_number 1
-
-# 批量上传截图
-python whart_tools.py --action upload_screenshots \
-  --project_id 1 \
-  --case_id 10 \
-  --file_paths "step1.png,step2.png,step3.png" \
-  --title "登录测试截图"
-
 # 上传项目文件
 python whart_tools.py --action upload_file \
   --project_id 1 \
   --file_path "./需求说明.docx"
+
+# 批量上传项目文件
+python whart_tools.py --action upload_files \
+  --project_id 1 \
+  --file_paths "./a.docx,./b.pdf"
 
 # 查询项目文件
 python whart_tools.py --action list_files \
@@ -147,10 +71,17 @@ python whart_tools.py --action list_files \
   --search "需求" \
   --page_size 20
 
+# 查看文件详情与引用
+python whart_tools.py --action get_file_detail --project_id 1 --file_id 12
+python whart_tools.py --action get_file_references --project_id 1 --file_id 12
+
 # 校验附件 file_ids
 python whart_tools.py --action validate_files \
   --project_id 1 \
   --file_ids "12,13"
+
+# 预览文件（文本直接返回）
+python whart_tools.py --action preview_file --project_id 1 --file_id 12
 
 # 下载项目文件
 python whart_tools.py --action download_file \
@@ -158,11 +89,17 @@ python whart_tools.py --action download_file \
   --file_id 12 \
   --output_dir "./downloads"
 
+# 删除项目文件
+python whart_tools.py --action delete_file --project_id 1 --file_id 12
+
 # 更新文件清理设置
 python whart_tools.py --action update_file_settings \
   --project_id 1 \
   --auto_delete_on_unbind true \
   --auto_delete_zero_refs false
+
+# 立即清理无引用文件
+python whart_tools.py --action cleanup_unreferenced_files --project_id 1
 ```
 
 ## 输出格式
