@@ -266,7 +266,7 @@ import json  # For JSON serialization in streaming
 import asyncio  # For async operations
 
 # Django 流式响应
-from django.http import StreamingHttpResponse
+from wharttest_django.streaming import sse_response
 
 from mcp_tools.models import RemoteMCPConfig  # To load remote MCP server configs
 from langchain_mcp_adapters.client import (
@@ -3572,10 +3572,7 @@ class ChatResumeAPIView(View):
             ):
                 yield chunk
 
-        response = StreamingHttpResponse(
-            async_generator(), content_type="text/event-stream; charset=utf-8"
-        )
-        response["Cache-Control"] = "no-cache"
+        response = sse_response(async_generator)
         response["Access-Control-Allow-Origin"] = "*"
         response["Access-Control-Allow-Headers"] = "Cache-Control"
 

@@ -25,6 +25,8 @@ from urllib.parse import urlparse
 
 import httpx
 from django.http import StreamingHttpResponse, JsonResponse
+
+from wharttest_django.streaming import sse_response
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
@@ -1618,12 +1620,7 @@ class AgentLoopStreamAPIView(View):
                 ):
                     yield chunk
 
-            response = StreamingHttpResponse(
-                async_generator(), content_type="text/event-stream; charset=utf-8"
-            )
-            response["Cache-Control"] = "no-cache"
-            response["X-Accel-Buffering"] = "no"
-            return response
+            return sse_response(async_generator)
         else:
             # 非流式响应 (JSON)
             return await self._handle_non_stream_request(
@@ -2442,9 +2439,4 @@ class AgentLoopResumeAPIView(View):
             ):
                 yield chunk
 
-        response = StreamingHttpResponse(
-            async_generator(), content_type="text/event-stream; charset=utf-8"
-        )
-        response["Cache-Control"] = "no-cache"
-        response["X-Accel-Buffering"] = "no"
-        return response
+        return sse_response(async_generator)
