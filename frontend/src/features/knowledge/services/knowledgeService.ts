@@ -1,4 +1,5 @@
 import { request } from '@/utils/request';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 import type {
   KnowledgeBase,
   CreateKnowledgeBaseRequest,
@@ -295,7 +296,7 @@ export class KnowledgeService {
     });
 
     if (response.success) {
-      return response.data!;
+      return normalizeListPayload<Document>(response.data).results;
     } else {
       throw new Error(response.error || 'Failed to get documents');
     }

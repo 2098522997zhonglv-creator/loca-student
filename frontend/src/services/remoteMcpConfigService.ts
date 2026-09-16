@@ -1,4 +1,5 @@
 import { request } from '@/utils/request';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 
 export interface RemoteMcpConfig {
   id?: number;
@@ -34,7 +35,7 @@ export const fetchRemoteMcpConfigs = async (): Promise<RemoteMcpConfig[]> => {
     });
 
     if (response.success) {
-      return response.data || [];
+      return normalizeListPayload<RemoteMcpConfig>(response.data).results;
     } else {
       throw new Error(response.error || '获取远程MCP配置失败');
     }

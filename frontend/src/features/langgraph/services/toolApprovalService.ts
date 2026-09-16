@@ -1,4 +1,5 @@
 import { request } from '@/utils/request';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 import type { ApiResponse } from '@/features/langgraph/types/api';
 import type {
   UserToolApproval,
@@ -57,7 +58,7 @@ export async function listToolApprovals(): Promise<ApiResponse<UserToolApproval[
       status: 'success',
       code: 200,
       message: response.message || 'success',
-      data: response.data!,
+      data: normalizeListPayload<UserToolApproval>(response.data).results,
       errors: null,
     };
   } else {

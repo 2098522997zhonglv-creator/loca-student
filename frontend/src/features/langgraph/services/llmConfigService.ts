@@ -1,4 +1,5 @@
 import { request } from '@/utils/request';
+import { normalizeListPayload } from '@/utils/responseHelpers';
 import type { ApiResponse } from '@/features/langgraph/types/api';
 import type {
   LlmConfig,
@@ -27,7 +28,8 @@ export async function listLlmConfigs(): Promise<ApiResponse<LlmConfig[]>> {
       status: 'success',
       code: 200,
       message: response.message || 'success',
-      data: response.data!,
+      // 后端开启分页后返回 { count, results }，这里统一成数组
+      data: normalizeListPayload<LlmConfig>(response.data).results,
       errors: null
     };
   } else {
