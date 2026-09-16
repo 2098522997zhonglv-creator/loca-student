@@ -125,8 +125,30 @@ SPECTACULAR_SETTINGS = {"TITLE": "Local Knowledge Center API", "VERSION": "1.0.0
 
 # Celery：评审等长任务跑在独立 worker 进程里，与 Web 进程隔离。
 # 同进程执行会让评审线程和请求处理抢同一个 GIL，拖慢 LLM 读取甚至触发超时。
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+# 默认用文件系统当 broker：无需安装 Redis，worker 仍是独立进程。
+# 需要更低派发延迟或多 worker 时改用 redis://127.0.0.1:6379/0。
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "filesystem://")
+
+if CELERY_BROKER_URL.startswith("filesystem://"):
+    _CELERY_QUEUE_DIR = DATA_DIR / "celery" / "queue"
+    _CELERY_DONE_DIR = DATA_DIR / "celery" / "processed"
+    _CELERY_RESULT_DIR = DATA_DIR / "celery" / "results"
+    for _d in (_CELERY_QUEUE_DIR, _CELERY_DONE_DIR, _CELERY_RESULT_DIR):
+        _d.mkdir(parents=True, exist_ok=True)
+    # data_folder_in 与 out 必须指向同一目录：生产者写入、worker 从这里取。
+    CELERY_BROKER_TRANSPORT_OPTIONS = {
+        "data_folder_in": str(_CELERY_QUEUE_DIR),
+        "data_folder_out": str(_CELERY_QUEUE_DIR),
+        "data_folder_processed": str(_CELERY_DONE_DIR),
+    }
+    _DEFAULT_RESULT_BACKEND = f"file://{_CELERY_RESULT_DIR}"
+else:
+    CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600, "max_retries": 0}
+    _DEFAULT_RESULT_BACKEND = CELERY_BROKER_URL
+
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND", _DEFAULT_RESULT_BACKEND
+)
 
 # 没有可用 broker 时设为 true，任务会退回当前进程执行（功能可用但性能受限）。
 CELERY_TASK_ALWAYS_EAGER = os.environ.get(
@@ -135,8 +157,6 @@ CELERY_TASK_ALWAYS_EAGER = os.environ.get(
 CELERY_TASK_EAGER_PROPAGATES = True
 
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-# 派发时不重试，让 broker 不可用能立刻暴露，由调用方决定是否回退
-CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600, "max_retries": 0}
 
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"

@@ -25,15 +25,11 @@ app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
 # Windows 平台兼容配置。
+# 注意不要在这里覆盖 broker_transport_options：filesystem broker 的队列目录
+# 由 settings 写入该项，整体覆盖会让 worker 找不到队列。
 if platform.system() == "Windows":
-    app.conf.update(
-        # 使用单进程池，避免 Windows 多进程兼容问题。
-        CELERY_WORKER_POOL="solo",
-        # 设置 broker 可见性超时，避免长任务被过早重投。
-        CELERY_BROKER_TRANSPORT_OPTIONS={"visibility_timeout": 3600},
-        # 设置结果后端可见性超时。
-        CELERY_RESULT_BACKEND_TRANSPORT_OPTIONS={"visibility_timeout": 3600},
-    )
+    # Windows 不支持 prefork 池，改用单进程池。
+    app.conf.worker_pool = "solo"
 
 
 @app.task(bind=True, ignore_result=True)
