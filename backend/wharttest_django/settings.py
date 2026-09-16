@@ -131,9 +131,8 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "filesystem://")
 
 if CELERY_BROKER_URL.startswith("filesystem://"):
     _CELERY_QUEUE_DIR = DATA_DIR / "celery" / "queue"
-    _CELERY_RESULT_DIR = DATA_DIR / "celery" / "results"
     _CELERY_CONTROL_DIR = DATA_DIR / "celery" / "control"
-    for _d in (_CELERY_QUEUE_DIR, _CELERY_RESULT_DIR, _CELERY_CONTROL_DIR):
+    for _d in (_CELERY_QUEUE_DIR, _CELERY_CONTROL_DIR):
         _d.mkdir(parents=True, exist_ok=True)
     # data_folder_in 与 out 必须指向同一目录：生产者写入、worker 从这里取。
     # control_folder 存 exchange-queue 绑定表，kombu 默认取相对路径 "control"，
@@ -143,7 +142,10 @@ if CELERY_BROKER_URL.startswith("filesystem://"):
         "data_folder_out": str(_CELERY_QUEUE_DIR),
         "control_folder": str(_CELERY_CONTROL_DIR),
     }
-    _DEFAULT_RESULT_BACKEND = f"file://{_CELERY_RESULT_DIR}"
+    # 不配结果后端：进度落在 ReviewReport，CELERY_TASK_IGNORE_RESULT 也已开启。
+    # 而 file://<Windows 绝对路径> 会被 urlparse 把盘符当主机、后面的路径当端口，
+    # worker 打印启动横幅调 backend.as_uri() 时就崩（Port could not be cast）。
+    _DEFAULT_RESULT_BACKEND = ""
 else:
     CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600, "max_retries": 0}
     _DEFAULT_RESULT_BACKEND = CELERY_BROKER_URL
