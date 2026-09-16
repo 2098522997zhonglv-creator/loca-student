@@ -7,3 +7,5 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .idea/
+# SqliteSaver 在 :memory: 模式下会在工作目录留下的会话文件
+:memory:.ses

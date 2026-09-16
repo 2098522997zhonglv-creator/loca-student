@@ -171,6 +171,30 @@ function Start-ReviewWorker {
     Write-UpdateLog "Started celery worker PID=$($proc.Id)"
 }
 
+function Sync-BundledSkills {
+    Ensure-LogDir
+    $skillsDir = Join-Path $script:RepoRoot "bundled_skills"
+    if (-not (Test-Path $skillsDir)) {
+        Write-UpdateLog "bundled_skills not found, skip skill sync"
+        return
+    }
+
+    Push-Location $script:RepoRoot
+    try {
+        Write-UpdateLog "Syncing bundled skills..."
+        $output = & $script:PythonExe "backend\manage.py" init_skills --skills-dir $skillsDir 2>&1
+        foreach ($line in $output) { Write-UpdateLog "  $line" }
+        # Skill 同步失败不应阻断服务启动，记录后继续。
+        if ($LASTEXITCODE -ne 0) {
+            Write-UpdateLog "init_skills failed (exit=$LASTEXITCODE), continuing"
+        }
+    } catch {
+        Write-UpdateLog "init_skills error: $($_.Exception.Message)"
+    } finally {
+        Pop-Location
+    }
+}
+
 function Invoke-FrontendBuild {
     Push-Location $script:RepoRoot
     try {

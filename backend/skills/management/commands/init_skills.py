@@ -23,6 +23,23 @@ EXCLUDE_PATTERNS = {
 }
 
 
+DOCKER_SKILLS_DIR = '/app/bundled_skills'
+
+
+def _default_skills_dir() -> str:
+    """解析预置 Skills 目录。
+
+    容器部署由 docker-compose 挂载到 /app/bundled_skills；本地部署没有该挂载，
+    回退到仓库根目录下的 bundled_skills。
+    """
+    env_dir = (os.environ.get('BUNDLED_SKILLS_DIR') or '').strip()
+    if env_dir:
+        return env_dir
+    if os.path.isdir(DOCKER_SKILLS_DIR):
+        return DOCKER_SKILLS_DIR
+    return str(settings.BASE_DIR.parent / 'bundled_skills')
+
+
 def _sync_files(src_dir: str, dst_dir: str):
     """将源目录文件同步到目标目录（覆盖更新，不删除目标中的运行时产物）"""
     os.makedirs(dst_dir, exist_ok=True)
@@ -49,12 +66,13 @@ class Command(BaseCommand):
         # 支持通过参数或环境变量指定预置 Skills 目录。
         parser.add_argument(
             '--skills-dir',
-            default=os.environ.get('BUNDLED_SKILLS_DIR', '/app/bundled_skills'),
-            help='预置 Skills 目录路径（默认 /app/bundled_skills）',
+            default=None,
+            help='预置 Skills 目录路径（默认读 BUNDLED_SKILLS_DIR，'
+                 '否则 /app/bundled_skills 或仓库内 bundled_skills）',
         )
 
     def handle(self, *args, **options):
-        skills_dir = options['skills_dir']
+        skills_dir = options['skills_dir'] or _default_skills_dir()
 
         # 条件：目录不存在；动作：告警并退出；结果：部署环境可无 bundled_skills 也不中断启动流程。
         if not os.path.isdir(skills_dir):
@@ -78,7 +96,7 @@ class Command(BaseCommand):
             project = Project.objects.create(
                 name='默认项目',
                 description='系统自动创建的默认项目',
-                owner=admin_user,
+                creator=admin_user,
             )
             self.stdout.write(self.style.SUCCESS(f'创建默认项目: {project.name}'))
 
