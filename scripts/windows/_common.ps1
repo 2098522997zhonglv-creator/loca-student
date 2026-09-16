@@ -172,6 +172,10 @@ function Start-ReviewWorker {
 }
 
 function Sync-BundledSkills {
+    # 每次调用都安全：内部按 commit 打标记，同一版本只同步一次。
+    # 不依赖调用方判断是否有代码变更，避免漏掉"无更新但从未同步"的情况。
+    param([switch]$Force)
+
     Ensure-LogDir
     $skillsDir = Join-Path $script:RepoRoot "bundled_skills"
     if (-not (Test-Path $skillsDir)) {
@@ -179,18 +183,41 @@ function Sync-BundledSkills {
         return
     }
 
+    $stampFile = Join-Path $script:LogDir "skills_synced.commit"
+    $head = ""
+    try {
+        $head = (git -C $script:RepoRoot rev-parse HEAD 2>$null).Trim()
+    } catch {
+        $head = ""
+    }
+
+    if (-not $Force -and $head -and (Test-Path $stampFile)) {
+        $synced = Get-Content $stampFile -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($synced -and $synced.Trim() -eq $head) {
+            return
+        }
+    }
+
     Push-Location $script:RepoRoot
+    # Django 的日志走 stderr，配合 2>&1 会在 $ErrorActionPreference=Stop 下被
+    # 当成 NativeCommandError 抛出，导致成功的命令被判为失败。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
         Write-UpdateLog "Syncing bundled skills..."
         $output = & $script:PythonExe "backend\manage.py" init_skills --skills-dir $skillsDir 2>&1
         foreach ($line in $output) { Write-UpdateLog "  $line" }
-        # Skill 同步失败不应阻断服务启动，记录后继续。
-        if ($LASTEXITCODE -ne 0) {
+        if ($LASTEXITCODE -eq 0) {
+            # 仅成功后记录，失败则下轮自动重试。
+            if ($head) { Set-Content -Path $stampFile -Value $head -Encoding ASCII }
+        } else {
+            # Skill 同步失败不应阻断服务启动，记录后继续。
             Write-UpdateLog "init_skills failed (exit=$LASTEXITCODE), continuing"
         }
     } catch {
         Write-UpdateLog "init_skills error: $($_.Exception.Message)"
     } finally {
+        $ErrorActionPreference = $prevEap
         Pop-Location
     }
 }

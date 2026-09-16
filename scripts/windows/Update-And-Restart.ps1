@@ -54,18 +54,18 @@ if ($needFrontendBuild) {
     Invoke-FrontendBuild
 }
 
+Sync-BundledSkills
+
 if ($changed) {
     Write-UpdateLog "Code changed, restarting Django and worker..."
     Stop-ReviewWorker
     Stop-KnowledgeCenter
-    Sync-BundledSkills
     Start-KnowledgeCenter
     Start-ReviewWorker
 } else {
     $listening = Get-ListenPids -Port $script:Port
     if ($listening.Count -eq 0) {
         Write-UpdateLog "No update, but service down — starting Django..."
-        Sync-BundledSkills
         Start-KnowledgeCenter
     } else {
         Write-UpdateLog "No update, service already running"
