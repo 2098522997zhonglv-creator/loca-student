@@ -338,8 +338,13 @@ def create_llm_instance(active_config, temperature=0.7, streaming=True):
             try:
                 from langchain_qwq import ChatQwen
             except ImportError as e:
+                # 包已安装但导入失败时（典型是 Python < 3.11 缺 typing.Self），
+                # 一律提示"请安装依赖"会把人带偏，所以回传原始原因。
                 raise ImportError(
-                    "Qwen provider requires langchain-qwq. Please install dependencies from requirements.txt."
+                    f"Qwen provider 加载 langchain-qwq 失败: {e}. "
+                    "若依赖已安装，通常是 Python 版本过低（langchain-qwq 需要 "
+                    "3.11+ 的 typing.Self）。接 OpenAI 兼容网关时无需该依赖，"
+                    "把供应商改为「OpenAI 兼容」即可。"
                 ) from e
 
             llm_kwargs = {
