@@ -131,15 +131,17 @@ CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "filesystem://")
 
 if CELERY_BROKER_URL.startswith("filesystem://"):
     _CELERY_QUEUE_DIR = DATA_DIR / "celery" / "queue"
-    _CELERY_DONE_DIR = DATA_DIR / "celery" / "processed"
     _CELERY_RESULT_DIR = DATA_DIR / "celery" / "results"
-    for _d in (_CELERY_QUEUE_DIR, _CELERY_DONE_DIR, _CELERY_RESULT_DIR):
+    _CELERY_CONTROL_DIR = DATA_DIR / "celery" / "control"
+    for _d in (_CELERY_QUEUE_DIR, _CELERY_RESULT_DIR, _CELERY_CONTROL_DIR):
         _d.mkdir(parents=True, exist_ok=True)
     # data_folder_in 与 out 必须指向同一目录：生产者写入、worker 从这里取。
+    # control_folder 存 exchange-queue 绑定表，kombu 默认取相对路径 "control"，
+    # 会随进程工作目录变化；Web 与 worker 的 cwd 不同就会各看一份绑定表而收不到消息。
     CELERY_BROKER_TRANSPORT_OPTIONS = {
         "data_folder_in": str(_CELERY_QUEUE_DIR),
         "data_folder_out": str(_CELERY_QUEUE_DIR),
-        "data_folder_processed": str(_CELERY_DONE_DIR),
+        "control_folder": str(_CELERY_CONTROL_DIR),
     }
     _DEFAULT_RESULT_BACKEND = f"file://{_CELERY_RESULT_DIR}"
 else:
@@ -150,9 +152,11 @@ CELERY_RESULT_BACKEND = os.environ.get(
     "CELERY_RESULT_BACKEND", _DEFAULT_RESULT_BACKEND
 )
 
-# 没有可用 broker 时设为 true，任务会退回当前进程执行（功能可用但性能受限）。
+# 默认在当前进程执行：功能可用但评审会和请求抢 GIL。
+# 改为 false 走独立 worker 前，必须先确认 worker 真的在消费队列——filesystem
+# broker 派发只是写文件、不会失败，worker 不消费时评审会静默卡住直到超时。
 CELERY_TASK_ALWAYS_EAGER = os.environ.get(
-    "CELERY_TASK_ALWAYS_EAGER", "false"
+    "CELERY_TASK_ALWAYS_EAGER", "true"
 ).strip().lower() in ("1", "true", "yes")
 CELERY_TASK_EAGER_PROPAGATES = True
 
