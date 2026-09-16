@@ -29,6 +29,9 @@ $script:PidFile = Join-Path $script:LogDir "django.pid"
 $script:OutLog = Join-Path $script:LogDir "django.out.log"
 $script:ErrLog = Join-Path $script:LogDir "django.err.log"
 $script:UpdateLog = Join-Path $script:LogDir "auto_update.log"
+$script:WorkerPidFile = Join-Path $script:LogDir "celery.pid"
+$script:WorkerOutLog = Join-Path $script:LogDir "celery.out.log"
+$script:WorkerErrLog = Join-Path $script:LogDir "celery.err.log"
 
 function Ensure-LogDir {
     if (-not (Test-Path $script:LogDir)) {
@@ -108,6 +111,64 @@ function Start-KnowledgeCenter {
 
     Set-Content -Path $script:PidFile -Value $proc.Id -Encoding ASCII
     Write-UpdateLog "Started Django PID=$($proc.Id) at http://$($script:BindHost):$($script:Port)/"
+}
+
+function Get-WorkerPid {
+    if (-not (Test-Path $script:WorkerPidFile)) { return $null }
+    $saved = Get-Content $script:WorkerPidFile -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $saved) { return $null }
+    $procId = 0
+    if (-not [int]::TryParse($saved.Trim(), [ref]$procId)) { return $null }
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $null }
+    return $procId
+}
+
+function Stop-ReviewWorker {
+    Ensure-LogDir
+    $procId = Get-WorkerPid
+    if ($procId) {
+        try {
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+            Write-UpdateLog "Stopped celery worker PID=$procId"
+        } catch {
+            Write-UpdateLog "Stop celery worker PID=$procId failed: $($_.Exception.Message)"
+        }
+    }
+    if (Test-Path $script:WorkerPidFile) {
+        Remove-Item $script:WorkerPidFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-ReviewWorker {
+    Ensure-LogDir
+
+    $existing = Get-WorkerPid
+    if ($existing) {
+        Write-UpdateLog "Celery worker already running PID=$existing"
+        return
+    }
+
+    # -P solo：Windows 不支持 prefork。评审内部已用线程池并发，单任务串行即可。
+    $argList = @(
+        "-m", "celery",
+        "-A", "wharttest_django",
+        "worker",
+        "-l", "info",
+        "-P", "solo"
+    )
+
+    $proc = Start-Process `
+        -FilePath $script:PythonExe `
+        -ArgumentList $argList `
+        -WorkingDirectory (Join-Path $script:RepoRoot "backend") `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $script:WorkerOutLog `
+        -RedirectStandardError $script:WorkerErrLog `
+        -PassThru
+
+    Set-Content -Path $script:WorkerPidFile -Value $proc.Id -Encoding ASCII
+    Write-UpdateLog "Started celery worker PID=$($proc.Id)"
 }
 
 function Invoke-FrontendBuild {

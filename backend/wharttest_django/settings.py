@@ -123,11 +123,32 @@ SIMPLE_JWT = {
 }
 SPECTACULAR_SETTINGS = {"TITLE": "Local Knowledge Center API", "VERSION": "1.0.0"}
 
-# No Redis or worker is required in local mode.
-CELERY_TASK_ALWAYS_EAGER = True
+# Celery：评审等长任务跑在独立 worker 进程里，与 Web 进程隔离。
+# 同进程执行会让评审线程和请求处理抢同一个 GIL，拖慢 LLM 读取甚至触发超时。
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://127.0.0.1:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+
+# 没有可用 broker 时设为 true，任务会退回当前进程执行（功能可用但性能受限）。
+CELERY_TASK_ALWAYS_EAGER = os.environ.get(
+    "CELERY_TASK_ALWAYS_EAGER", "false"
+).strip().lower() in ("1", "true", "yes")
 CELERY_TASK_EAGER_PROPAGATES = True
-CELERY_BROKER_URL = "memory://"
-CELERY_RESULT_BACKEND = "cache+memory://"
+
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# 派发时不重试，让 broker 不可用能立刻暴露，由调用方决定是否回退
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 3600, "max_retries": 0}
+
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_ENABLE_UTC = True
+
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 30 * 60
+CELERY_TASK_SOFT_TIME_LIMIT = 25 * 60
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_RESULT_EXPIRES = 3600
 
 FILE_MANAGEMENT_MAX_FILE_SIZE = int(os.environ.get("FILE_MANAGEMENT_MAX_FILE_SIZE", 104857600))
 FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE = int(os.environ.get("FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE", 0))

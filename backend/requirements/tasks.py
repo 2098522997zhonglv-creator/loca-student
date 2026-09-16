@@ -18,15 +18,28 @@ def dispatch_requirement_review(
 ):
     """派发评审任务，返回任务标识。
 
-    本地部署使用 Celery eager 模式，此时 .delay() 会在 HTTP 请求线程里同步跑完
-    整个评审（可能数分钟），请求一旦中断评审也随之中断。因此 eager 模式下改用
-    后台线程执行，让接口能立即返回。
+    优先交给独立的 Celery worker，评审才能脱离 Web 进程的 GIL 竞争。
+    broker 不可用或显式配置了 eager 模式时，退回后台线程执行：功能仍然可用，
+    但评审会和请求处理抢同一个进程的资源。
     """
     if not getattr(settings, "CELERY_TASK_ALWAYS_EAGER", False):
-        return execute_requirement_review.delay(
-            document_id, analysis_options, review_type, user_id=user_id
-        ).id
+        try:
+            return execute_requirement_review.delay(
+                document_id, analysis_options, review_type, user_id=user_id
+            ).id
+        except Exception:
+            logger.warning(
+                "REQ_REVIEW celery broker unavailable (%s), falling back to a "
+                "background thread; review will compete with web requests",
+                getattr(settings, "CELERY_BROKER_URL", "?"),
+                exc_info=True,
+            )
 
+    return _dispatch_in_thread(document_id, analysis_options, review_type, user_id)
+
+
+def _dispatch_in_thread(document_id, analysis_options, review_type, user_id):
+    """在后台线程执行评审，让 HTTP 请求能立即返回。"""
     task_id = str(uuid.uuid4())
 
     def _run():

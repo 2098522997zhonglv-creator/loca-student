@@ -55,9 +55,11 @@ if ($needFrontendBuild) {
 }
 
 if ($changed) {
-    Write-UpdateLog "Code changed, restarting Django..."
+    Write-UpdateLog "Code changed, restarting Django and worker..."
+    Stop-ReviewWorker
     Stop-KnowledgeCenter
     Start-KnowledgeCenter
+    Start-ReviewWorker
 } else {
     $listening = Get-ListenPids -Port $script:Port
     if ($listening.Count -eq 0) {
@@ -66,6 +68,8 @@ if ($changed) {
     } else {
         Write-UpdateLog "No update, service already running"
     }
+    # worker 可能自己挂掉，单独补起
+    Start-ReviewWorker
 }
 
 Write-UpdateLog "==== auto-update done ===="
