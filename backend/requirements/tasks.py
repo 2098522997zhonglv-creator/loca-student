@@ -27,12 +27,13 @@ def dispatch_requirement_review(
             return execute_requirement_review.delay(
                 document_id, analysis_options, review_type, user_id=user_id
             ).id
-        except Exception:
+        except Exception as exc:
+            # 只记一行：broker 不可用是可预期的部署状态，完整堆栈没有诊断价值
             logger.warning(
-                "REQ_REVIEW celery broker unavailable (%s), falling back to a "
+                "REQ_REVIEW celery broker unavailable (%s: %s), falling back to a "
                 "background thread; review will compete with web requests",
                 getattr(settings, "CELERY_BROKER_URL", "?"),
-                exc_info=True,
+                exc,
             )
 
     return _dispatch_in_thread(document_id, analysis_options, review_type, user_id)
