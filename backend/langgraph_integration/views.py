@@ -639,7 +639,24 @@ class LLMConfigViewSet(BaseModelViewSet):
         try:
             resp = http_requests.get(f"{api_url}/models", headers=headers, timeout=10)
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                # 网关返回非 JSON（URL 少了 /v1 时常命中首页或 404 页面）。
+                # 只回传 JSON 解析错误无法定位，带上状态码与响应片段。
+                content_type = resp.headers.get("Content-Type", "未知")
+                preview = (resp.text or "").strip()[:200] or "(空响应)"
+                return Response(
+                    {
+                        "status": "error",
+                        "message": (
+                            f"API 返回的不是 JSON（HTTP {resp.status_code}, "
+                            f"Content-Type: {content_type}）: {preview}"
+                            "。请确认 API URL 是否需要以 /v1 结尾。"
+                        ),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             if data.get("data"):
                 models = [model.get("id") for model in data["data"] if model.get("id")]
