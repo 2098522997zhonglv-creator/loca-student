@@ -95,7 +95,31 @@ def main():
     parser.add_argument("--knowledge_ids", help="文档ID列表(逗号分隔，可选)")
 
     args = parser.parse_args()
-    result = ACTIONS[args.action](args)
+
+    if args.action == "search_knowledge" and not args.knowledge_base_ids:
+        result = {"error": "search_knowledge 需要 --knowledge_base_ids，可先用 list_knowledge_bases 获取"}
+    else:
+        # 统一转成结构化错误：裸 traceback 对调用方（含 LLM）没有价值，
+        # 还会把几十行堆栈灌进上下文。
+        try:
+            result = ACTIONS[args.action](args)
+        except requests.exceptions.ConnectionError:
+            result = {"error": f"无法连接 WeKnora 服务（{BASE_URL}）。"
+                               f"请确认服务已启动，或用 WEKNORA_BASE_URL 指定正确地址。"}
+        except requests.exceptions.Timeout:
+            result = {"error": f"请求 WeKnora 服务超时（{BASE_URL}）"}
+        except requests.exceptions.HTTPError as e:
+            resp = e.response
+            detail = ""
+            if resp is not None:
+                detail = (resp.text or "")[:200]
+            status = resp.status_code if resp is not None else "?"
+            result = {"error": f"WeKnora 返回 HTTP {status}: {detail}"}
+        except requests.exceptions.RequestException as e:
+            result = {"error": f"请求 WeKnora 失败: {e}"}
+        except (KeyError, TypeError, ValueError) as e:
+            result = {"error": f"解析 WeKnora 响应失败: {type(e).__name__}: {e}"}
+
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
     if isinstance(result, dict) and "error" in result:
