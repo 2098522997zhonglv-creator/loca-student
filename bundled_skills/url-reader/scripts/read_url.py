@@ -36,8 +36,16 @@ class FetchResult:
     error: str | None = None
 
 
-def fetch_url(url: str, timeout: int, max_bytes: int) -> FetchResult:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+def fetch_url(
+    url: str,
+    timeout: int,
+    max_bytes: int,
+    extra_headers: dict[str, str] | None = None,
+) -> FetchResult:
+    headers = {"User-Agent": USER_AGENT}
+    if extra_headers:
+        headers.update(extra_headers)
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read(max_bytes + 1)
@@ -362,6 +370,7 @@ def summarize_html(
     max_bytes: int,
     text_chars: int,
     api_discovery: str,
+    extra_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     include_common = api_discovery == "always" or (
         api_discovery == "auto" and page_has_api_hints(text, fetch_result.final_url)
@@ -372,7 +381,12 @@ def summarize_html(
 
     if api_discovery != "never":
         for candidate in discovered[:30]:
-            spec_result = fetch_url(candidate, timeout=timeout, max_bytes=max_bytes)
+            spec_result = fetch_url(
+                candidate,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                extra_headers=extra_headers,
+            )
             spec_text = decode_body(spec_result.body)
             data, _, parse_error = load_structured(spec_text, spec_result.content_type, spec_result.final_url)
             attempt = {
@@ -431,8 +445,17 @@ def looks_binary(content_type: str, body: bytes) -> bool:
     return bool(sample and b"\x00" in sample)
 
 
-def summarize_url(url: str, timeout: int, max_bytes: int, text_chars: int, api_discovery: str) -> dict[str, Any]:
-    result = fetch_url(url, timeout=timeout, max_bytes=max_bytes)
+def summarize_url(
+    url: str,
+    timeout: int,
+    max_bytes: int,
+    text_chars: int,
+    api_discovery: str,
+    extra_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    result = fetch_url(
+        url, timeout=timeout, max_bytes=max_bytes, extra_headers=extra_headers
+    )
     if result.error and not result.body:
         return {
             "document_kind": "error",
@@ -479,6 +502,7 @@ def summarize_url(url: str, timeout: int, max_bytes: int, text_chars: int, api_d
             max_bytes=max_bytes,
             text_chars=text_chars,
             api_discovery=api_discovery,
+            extra_headers=extra_headers,
         )
         if parse_error:
             summary.setdefault("notes", []).append(parse_error)
@@ -495,6 +519,17 @@ def summarize_url(url: str, timeout: int, max_bytes: int, text_chars: int, api_d
     }
 
 
+def parse_headers(raw_headers: list[str] | None) -> dict[str, str]:
+    """Turn repeated NAME:VALUE options into a header dict."""
+    headers: dict[str, str] = {}
+    for item in raw_headers or []:
+        name, separator, value = item.partition(":")
+        if not separator or not name.strip():
+            raise ValueError(f"Invalid header {item!r}, expected NAME:VALUE")
+        headers[name.strip()] = value.strip()
+    return headers
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", help="URL to fetch and summarize")
@@ -508,7 +543,23 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="OpenAPI/Swagger discovery mode for HTML pages",
     )
+    parser.add_argument(
+        "--header",
+        action="append",
+        metavar="NAME:VALUE",
+        help=(
+            "Extra request header, repeatable. Needed for pages behind a login, "
+            'e.g. --header "Cookie: session=..." or '
+            '--header "Authorization: Bearer ..."'
+        ),
+    )
     args = parser.parse_args(argv)
+
+    try:
+        extra_headers = parse_headers(args.header)
+    except ValueError as exc:
+        parser.error(str(exc))
+        return 2
 
     summary = summarize_url(
         args.url,
@@ -516,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         max_bytes=args.max_bytes,
         text_chars=args.text_chars,
         api_discovery=args.api_discovery,
+        extra_headers=extra_headers,
     )
     rendered = json.dumps(summary, ensure_ascii=False, indent=2)
 
