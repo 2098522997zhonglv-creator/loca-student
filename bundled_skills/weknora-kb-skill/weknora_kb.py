@@ -28,7 +28,9 @@ except ImportError:
 
 # ─── WeKnora API 配置 ─────────────────────────────────────
 BASE_URL = os.getenv("WEKNORA_BASE_URL", "http://127.0.0.1:8056/api/v1").rstrip("/")
-API_KEY = os.getenv("WEKNORA_API_KEY", "sk--6q_YbIK88neAU8c4AA_ynFgQ5G2qCYxWmimaiGk-qBw5xSJ")
+# 不内置默认凭据：WeKnora 的 Key 与平台 API Key、LLM 网关 Key 互不通用，
+# 部署时通过 WEKNORA_API_KEY 注入。
+API_KEY = os.getenv("WEKNORA_API_KEY", "")
 
 _http = requests.Session()
 _http.headers.update({"Content-Type": "application/json"})
