@@ -50,15 +50,106 @@ class Command(BaseCommand):
         self.check_langchain_layer(options)
 
         self.stdout.write("\n" + "=" * 60)
-        self.stdout.write("第三步：测试 LangGraph agent 层（定位中间件影响）")
+        self.stdout.write("第三步：测试 ainvoke 路径是否抛出 token 回调")
+        self.stdout.write("=" * 60)
+        self.check_invoke_callbacks(options)
+
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("第四步：测试 LangGraph agent 层（定位中间件影响）")
         self.stdout.write("=" * 60)
         self.check_agent_layer(options)
 
         if not options["skip_local"]:
             self.stdout.write("\n" + "=" * 60)
-            self.stdout.write("第四步：测试本机聊天接口整条链路")
+            self.stdout.write("第五步：测试本机聊天接口整条链路")
             self.stdout.write("=" * 60)
             self.check_local_endpoint(options)
+
+    def check_invoke_callbacks(self, options):
+        """检查 ainvoke 路径下模型是否逐 token 抛回调。
+
+        create_agent 内部固定用 `await model.ainvoke(messages)`，从不用 astream。
+        这条路径要不要走流式由 `_should_stream` 决定，token 则通过回调抛出，
+        LangGraph 的 stream_mode="messages" 正是靠这些回调产出逐字事件。
+        所以这一步和第二步的 astream 是两条不同的代码路径。
+        """
+        import asyncio
+
+        from langchain_core.callbacks import AsyncCallbackHandler
+
+        from langgraph_integration.views import create_llm_instance
+
+        config = LLMConfig.objects.filter(is_active=True).first()
+        llm = create_llm_instance(config, temperature=0.7)
+
+        self.stdout.write(f"模型类           : {type(llm).__name__}")
+        self.stdout.write(f"streaming 属性   : {getattr(llm, 'streaming', None)}")
+        explicitly_set = "streaming" in getattr(llm, "model_fields_set", set())
+        self.stdout.write(f"是否显式设置     : {explicitly_set}")
+        self.stdout.write(
+            f"disable_streaming: {getattr(llm, 'disable_streaming', None)}"
+        )
+
+        try:
+            should_stream = llm._should_stream(async_api=True)
+            self.stdout.write(f"_should_stream   : {should_stream}")
+        except Exception as exc:
+            should_stream = None
+            self.stdout.write(f"_should_stream   : 无法判断（{exc}）")
+
+        class TokenCounter(AsyncCallbackHandler):
+            def __init__(self):
+                self.tokens = 0
+                self.first_at = None
+                self.start = time.monotonic()
+
+            async def on_llm_new_token(self, token, **kwargs):
+                self.tokens += 1
+                if self.first_at is None:
+                    self.first_at = time.monotonic() - self.start
+
+        counter = TokenCounter()
+
+        async def run():
+            return await llm.ainvoke(
+                options["prompt"], config={"callbacks": [counter]}
+            )
+
+        try:
+            asyncio.run(run())
+        except Exception as exc:
+            self.stdout.write(
+                self.style.ERROR(f"调用失败: {type(exc).__name__}: {exc}")
+            )
+            return
+
+        self.stdout.write(f"token 回调次数   : {counter.tokens}")
+        if counter.first_at is not None:
+            self.stdout.write(f"首个回调耗时     : {counter.first_at:.2f}s")
+        self.stdout.write("")
+
+        if counter.tokens > 1:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "判定：ainvoke 路径确实逐 token 抛回调，"
+                    "问题在 LangGraph 把回调转成 messages 事件这一段。"
+                )
+            )
+        elif should_stream is False:
+            self.stdout.write(
+                self.style.ERROR(
+                    "判定：_should_stream 为 False，ainvoke 走了非流式路径，"
+                    "所以 create_agent 拿不到任何 token 回调。"
+                    "对照上面几行属性即可看出是哪个条件没满足。"
+                )
+            )
+        else:
+            self.stdout.write(
+                self.style.ERROR(
+                    "判定：ainvoke 没有抛出逐 token 回调，"
+                    "这正是 create_agent 只产出一个事件的直接原因。"
+                )
+            )
 
     def check_agent_layer(self, options):
         """在进程内用 create_agent + astream 数 token 事件。
