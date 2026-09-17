@@ -47,7 +47,20 @@ class Command(BaseCommand):
 
         self.stdout.write(f"配置: {config.config_name}（{config.provider}）")
         self.stdout.write(f"模型: {config.name}")
-        self.stdout.write(f"地址: {url}\n")
+        self.stdout.write(f"地址: {url}")
+
+        # 前端完全依据这个字段二选一：关闭时走非流式接口，等完整回复再一次性渲染，
+        # 此时后端的 SSE 逐块输出根本不会被用到。
+        self.stdout.write(f"配置项 enable_streaming: {config.enable_streaming}")
+        if not config.enable_streaming:
+            self.stdout.write(
+                self.style.ERROR(
+                    "\n这就是看不到逐字输出的原因：该配置关闭了流式输出，"
+                    "前端会走非流式接口。请在 LLM 配置里打开「启用流式输出」后重试。"
+                )
+            )
+            return
+        self.stdout.write("")
 
         start = time.monotonic()
         first_content_at = None
