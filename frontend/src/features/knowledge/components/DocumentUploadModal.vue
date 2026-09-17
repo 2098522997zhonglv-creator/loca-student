@@ -88,7 +88,7 @@
     </a-form>
 
     <div v-if="uploadProgress > 0 && uploadProgress < 100" class="upload-progress">
-      <a-progress :percent="uploadProgress" />
+      <a-progress :percent="uploadProgressRatio" />
       <div class="progress-text">{{ text.uploadingDocument }}</div>
     </div>
   </a-modal>
@@ -176,6 +176,11 @@ const formRef = ref();
 const fileInputRef = ref<HTMLInputElement>();
 const loading = ref(false);
 const uploadProgress = ref(0);
+
+// a-progress 的 percent 取值是 0 到 1 的小数，而 uploadProgress 用的是百分数
+const uploadProgressRatio = computed(() =>
+  Math.min(Math.max(uploadProgress.value / 100, 0), 1)
+);
 
 // 表单数据
 const formData = reactive({
@@ -345,6 +350,9 @@ const getDocumentType = (uploadType: string, file?: File): DocumentType => {
 };
 
 const handleSubmit = async () => {
+  // 上传失败时也要停掉模拟进度的定时器，否则它会继续把进度涨回来
+  let progressInterval: ReturnType<typeof setInterval> | undefined;
+
   try {
     // Arco Design 的 validate 方法：成功时返回 undefined，失败时抛出错误
     await formRef.value?.validate();
@@ -373,7 +381,7 @@ const handleSubmit = async () => {
     }
 
     // 模拟上传进度
-    const progressInterval = setInterval(() => {
+    progressInterval = setInterval(() => {
       if (uploadProgress.value < 90) {
         uploadProgress.value += Math.random() * 20;
       }
@@ -381,7 +389,6 @@ const handleSubmit = async () => {
 
     await KnowledgeService.uploadDocument(uploadData);
 
-    clearInterval(progressInterval);
     uploadProgress.value = 100;
 
     setTimeout(() => {
@@ -400,6 +407,7 @@ const handleSubmit = async () => {
     }
     uploadProgress.value = 0;
   } finally {
+    clearInterval(progressInterval);
     loading.value = false;
   }
 };
