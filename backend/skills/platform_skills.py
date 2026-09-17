@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 INTERNAL_PLATFORM_SKILL_NAMES = frozenset(
     {
         "whart-test",
+        "requirement-review",
         "api-automation",
         "ui-automation",
     }
