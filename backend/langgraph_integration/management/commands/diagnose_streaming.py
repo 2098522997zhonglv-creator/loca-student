@@ -5,6 +5,7 @@
 """
 
 import json
+import sys
 import time
 
 import httpx
@@ -168,6 +169,14 @@ class Command(BaseCommand):
             get_tool_retry_middleware,
         )
 
+        self.stdout.write(f"Python: {sys.version.split()[0]}")
+        if sys.version_info < (3, 11):
+            self.stdout.write(
+                self.style.WARNING(
+                    "  注意：LangGraph 在 Python 3.11 以下无法传递 contextvars，"
+                    "逐 token 流式会失效。"
+                )
+            )
         for name, version in self._package_versions().items():
             self.stdout.write(f"{name}: {version}")
         self.stdout.write("")
@@ -242,12 +251,25 @@ class Command(BaseCommand):
             return
 
         if bare <= 1:
-            self.stdout.write(
-                self.style.ERROR(
-                    "判定：连不挂中间件都拿不到逐 token 事件，"
-                    "问题出在 langchain/langgraph 版本上，请把上面的版本号发给我。"
+            if sys.version_info < (3, 11):
+                self.stdout.write(
+                    self.style.ERROR(
+                        "判定：这是 Python 版本导致的。asyncio.create_task 的 context "
+                        "参数是 3.11 才有的，LangGraph 在更低版本上会直接丢弃 context"
+                        "（见其源码里的 CONTEXT_NOT_SUPPORTED），于是模型的 token 回调"
+                        "传不到 stream_mode=\"messages\" 的接收端，只能在节点结束时"
+                        "拿到一整条消息。\n"
+                        "解决办法是把运行环境升级到 Python 3.11 及以上，"
+                        "代码层面无法绕过。"
+                    )
                 )
-            )
+            else:
+                self.stdout.write(
+                    self.style.ERROR(
+                        "判定：连不挂中间件都拿不到逐 token 事件，"
+                        "请把上面的版本号发给我。"
+                    )
+                )
             return
 
         broken = [
