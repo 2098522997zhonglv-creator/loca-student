@@ -49,11 +49,147 @@ class Command(BaseCommand):
         self.stdout.write("=" * 60)
         self.check_langchain_layer(options)
 
+        self.stdout.write("\n" + "=" * 60)
+        self.stdout.write("第三步：测试 LangGraph agent 层（定位中间件影响）")
+        self.stdout.write("=" * 60)
+        self.check_agent_layer(options)
+
         if not options["skip_local"]:
             self.stdout.write("\n" + "=" * 60)
-            self.stdout.write("第三步：测试本机聊天接口整条链路")
+            self.stdout.write("第四步：测试本机聊天接口整条链路")
             self.stdout.write("=" * 60)
             self.check_local_endpoint(options)
+
+    def check_agent_layer(self, options):
+        """在进程内用 create_agent + astream 数 token 事件。
+
+        聊天接口正是这样产出逐字内容的。分别测不挂中间件和挂上中间件两种情况：
+        只实现了 wrap_model_call 的中间件会把模型调用包成一次性调用，
+        stream_mode="messages" 就拿不到逐 token 事件。
+        """
+        import asyncio
+
+        from langchain.agents import create_agent
+
+        from langgraph_integration.views import create_llm_instance
+        from orchestrator_integration.middleware_config import (
+            get_model_retry_middleware,
+            get_tool_retry_middleware,
+        )
+
+        for name, version in self._package_versions().items():
+            self.stdout.write(f"{name}: {version}")
+        self.stdout.write("")
+
+        config = LLMConfig.objects.filter(is_active=True).first()
+        llm = create_llm_instance(config, temperature=0.7)
+
+        async def probe(middleware):
+            agent = create_agent(llm, [], middleware=middleware)
+            start = time.monotonic()
+            events = 0
+            first_at = None
+            async for mode, chunk in agent.astream(
+                {"messages": [("user", options["prompt"])]},
+                stream_mode=["messages"],
+            ):
+                if mode != "messages" or not isinstance(chunk, tuple):
+                    continue
+                token = chunk[0]
+                if not getattr(token, "content", ""):
+                    continue
+                events += 1
+                if first_at is None:
+                    first_at = time.monotonic() - start
+            return events, first_at, time.monotonic() - start
+
+        cases = [
+            ("不挂任何中间件", []),
+            ("只挂 ModelRetryMiddleware", [get_model_retry_middleware()]),
+            ("只挂 ToolRetryMiddleware", [get_tool_retry_middleware()]),
+        ]
+
+        # 聊天接口真正用的是这一组，包含按配置启用的上下文压缩、工具审批等
+        try:
+            from orchestrator_integration.middleware_config import (
+                get_middleware_from_config,
+            )
+
+            real = get_middleware_from_config(config, llm)
+            label = "该配置实际使用的全部中间件（" + "、".join(
+                type(mw).__name__ for mw in real
+            ) + "）"
+            cases.append((label, real))
+        except Exception as exc:
+            self.stdout.write(
+                self.style.WARNING(
+                    f"取实际中间件组合失败，跳过该用例: {type(exc).__name__}: {exc}"
+                )
+            )
+
+        results = {}
+        for label, middleware in cases:
+            try:
+                events, first_at, total = asyncio.run(probe(middleware))
+            except Exception as exc:
+                self.stdout.write(
+                    self.style.ERROR(f"[{label}] 调用失败: {type(exc).__name__}: {exc}")
+                )
+                continue
+
+            results[label] = events
+            detail = f"逐字事件 {events} 个"
+            if first_at is not None:
+                detail += f"，首个 {first_at:.2f}s"
+            detail += f"，总耗时 {total:.2f}s"
+            self.stdout.write(f"[{label}] {detail}")
+
+        self.stdout.write("")
+
+        bare = results.get("不挂任何中间件")
+        if bare is None:
+            return
+
+        if bare <= 1:
+            self.stdout.write(
+                self.style.ERROR(
+                    "判定：连不挂中间件都拿不到逐 token 事件，"
+                    "问题出在 langchain/langgraph 版本上，请把上面的版本号发给我。"
+                )
+            )
+            return
+
+        broken = [
+            label
+            for label, events in results.items()
+            if label != "不挂任何中间件" and events <= 1
+        ]
+        if broken:
+            self.stdout.write(
+                self.style.ERROR(
+                    "判定：以下中间件会吃掉逐 token 事件，这就是流式失效的原因："
+                    + "、".join(broken)
+                )
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    "判定：agent 层和这些中间件都能逐 token 输出，"
+                    "断点在聊天接口自身的处理流程里。"
+                )
+            )
+
+    def _package_versions(self):
+        from importlib.metadata import PackageNotFoundError, version
+
+        names = ["langchain", "langchain-core", "langchain-openai", "langgraph"]
+        versions = {}
+        for name in names:
+            try:
+                versions[name] = version(name)
+            except PackageNotFoundError:
+                versions[name] = "未安装"
+        return versions
 
     def check_langchain_layer(self, options):
         """用项目自己的 create_llm_instance 直接 astream。
