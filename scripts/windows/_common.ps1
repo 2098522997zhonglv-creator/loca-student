@@ -32,6 +32,9 @@ $script:UpdateLog = Join-Path $script:LogDir "auto_update.log"
 $script:WorkerPidFile = Join-Path $script:LogDir "celery.pid"
 $script:WorkerOutLog = Join-Path $script:LogDir "celery.out.log"
 $script:WorkerErrLog = Join-Path $script:LogDir "celery.err.log"
+$script:BeatPidFile = Join-Path $script:LogDir "celery-beat.pid"
+$script:BeatOutLog = Join-Path $script:LogDir "celery-beat.out.log"
+$script:BeatErrLog = Join-Path $script:LogDir "celery-beat.err.log"
 
 function Ensure-LogDir {
     if (-not (Test-Path $script:LogDir)) {
@@ -169,6 +172,61 @@ function Start-ReviewWorker {
 
     Set-Content -Path $script:WorkerPidFile -Value $proc.Id -Encoding ASCII
     Write-UpdateLog "Started celery worker PID=$($proc.Id)"
+}
+
+function Get-BeatPid {
+    if (-not (Test-Path $script:BeatPidFile)) { return $null }
+    $raw = (Get-Content $script:BeatPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (-not $raw) { return $null }
+    try { return [int]$raw } catch { return $null }
+}
+
+function Stop-CeleryBeat {
+    Ensure-LogDir
+    $procId = Get-BeatPid
+    if ($procId) {
+        try {
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+            Write-UpdateLog "Stopped celery beat PID=$procId"
+        } catch {
+            Write-UpdateLog "Stop celery beat PID=$procId failed: $($_.Exception.Message)"
+        }
+    }
+    if (Test-Path $script:BeatPidFile) {
+        Remove-Item $script:BeatPidFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-CeleryBeat {
+    Ensure-LogDir
+
+    $existing = Get-BeatPid
+    if ($existing) {
+        $alive = Get-Process -Id $existing -ErrorAction SilentlyContinue
+        if ($alive) {
+            Write-UpdateLog "Celery beat already running PID=$existing"
+            return
+        }
+    }
+
+    $argList = @(
+        "-m", "celery",
+        "-A", "wharttest_django",
+        "beat",
+        "-l", "info"
+    )
+
+    $proc = Start-Process `
+        -FilePath $script:PythonExe `
+        -ArgumentList $argList `
+        -WorkingDirectory (Join-Path $script:RepoRoot "backend") `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $script:BeatOutLog `
+        -RedirectStandardError $script:BeatErrLog `
+        -PassThru
+
+    Set-Content -Path $script:BeatPidFile -Value $proc.Id -Encoding ASCII
+    Write-UpdateLog "Started celery beat PID=$($proc.Id)"
 }
 
 function Sync-BundledSkills {

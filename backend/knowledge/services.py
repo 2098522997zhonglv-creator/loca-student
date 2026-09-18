@@ -305,7 +305,10 @@ class DocumentProcessor:
             logger.info(f"开始加载文档: {document.title} (ID: {document.id})")
             logger.info(f"文档类型: {document.document_type}")
 
-            # 优先级：URL > 文本内容 > 文件
+            # 优先级：钉钉 > URL > 文本内容 > 文件
+            if document.document_type == "dingtalk":
+                logger.info("从钉钉文档加载")
+                return self._load_from_dingtalk(document)
             if document.document_type == "url" and document.url:
                 logger.info(f"从URL加载: {document.url}")
                 return self._load_from_url(document.url)
@@ -334,6 +337,43 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"加载文档失败 {document.id}: {e}")
             raise
+
+    def _load_from_dingtalk(self, document: Document) -> List[LangChainDocument]:
+        """通过钉钉官方 API 拉取在线文档正文。"""
+        from .dingtalk_client import DingTalkClient, DingTalkAPIError
+
+        client = DingTalkClient()
+        doc_key = document.external_id
+        if not doc_key and document.url:
+            try:
+                node = client.get_node_by_url(document.url)
+                doc_key = node.get("nodeId")
+                if doc_key and not document.external_id:
+                    document.external_id = doc_key
+                    document.external_workspace_id = (
+                        node.get("workspaceId") or document.external_workspace_id
+                    )
+                    document.external_url = node.get("url") or document.url
+                    if not document.title and node.get("name"):
+                        document.title = node.get("name")[:200]
+                    document.save(
+                        update_fields=[
+                            "external_id",
+                            "external_workspace_id",
+                            "external_url",
+                            "title",
+                        ]
+                    )
+            except DingTalkAPIError:
+                raise
+        if not doc_key:
+            raise ValueError("钉钉文档缺少 external_id / url，无法加载正文")
+
+        markdown = client.get_document_markdown(doc_key)
+        # 缓存最近正文，便于排错与离线查看
+        Document.objects.filter(pk=document.pk).update(content=markdown)
+        document.content = markdown
+        return self._load_from_content(markdown, document.title or doc_key)
 
     def _load_from_url(self, url: str) -> List[LangChainDocument]:
         """从URL加载文档（含 SSRF 防护）"""

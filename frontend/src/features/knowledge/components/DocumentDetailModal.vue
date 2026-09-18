@@ -389,6 +389,7 @@ const getDocumentTypeText = (type: string) => {
     md: text.value.typeMd,
     html: text.value.typeHtml,
     url: text.value.typeUrl,
+    dingtalk: '钉钉文档',
   };
   return typeMap[type] || type.toUpperCase();
 };

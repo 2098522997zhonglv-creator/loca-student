@@ -1,6 +1,9 @@
 """知识库异步任务"""
 import logging
+from datetime import timedelta
+
 from celery import shared_task
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -39,3 +42,50 @@ def process_document_task(self, document_id):
         except Exception:
             pass
         raise
+
+
+@shared_task(bind=True, name='knowledge.sync_dingtalk_binding')
+def sync_dingtalk_binding_task(self, binding_id, user_id=None):
+    """同步单个钉钉绑定。"""
+    from django.contrib.auth.models import User
+
+    from .dingtalk_sync import sync_binding
+
+    uploader = None
+    if user_id:
+        uploader = User.objects.filter(id=user_id).first()
+    logger.info("DINGTALK sync start binding_id=%s user_id=%s", binding_id, user_id)
+    report = sync_binding(binding_id, uploader=uploader)
+    logger.info("DINGTALK sync done binding_id=%s report=%s", binding_id, report)
+    return report
+
+
+@shared_task(name='knowledge.sync_due_dingtalk_bindings')
+def sync_due_dingtalk_bindings():
+    """扫描到期的钉钉绑定并派发同步任务。"""
+    from .models import DingTalkConfig, DingTalkSyncBinding
+
+    cfg = DingTalkConfig.get_config()
+    if not cfg.enabled:
+        logger.info("DINGTALK tick skipped: config disabled")
+        return {"dispatched": 0, "reason": "disabled"}
+
+    now = timezone.now()
+    dispatched = 0
+    for binding in DingTalkSyncBinding.objects.filter(enabled=True).select_related(
+        "knowledge_base"
+    ):
+        if binding.last_status == "running":
+            # 避免重叠；若卡死超过 2 小时则允许重试
+            if binding.updated_at and now - binding.updated_at < timedelta(hours=2):
+                continue
+        interval = max(int(binding.interval_minutes or 60), 15)
+        if binding.last_synced_at and now - binding.last_synced_at < timedelta(
+            minutes=interval
+        ):
+            continue
+        sync_dingtalk_binding_task.delay(str(binding.id))
+        dispatched += 1
+
+    logger.info("DINGTALK tick dispatched=%s", dispatched)
+    return {"dispatched": dispatched}

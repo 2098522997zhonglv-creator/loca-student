@@ -17,6 +17,8 @@ from .models import (
     DocumentChunk,
     QueryLog,
     KnowledgeGlobalConfig,
+    DingTalkConfig,
+    DingTalkSyncBinding,
 )
 from .serializers import (
     KnowledgeBaseSerializer,
@@ -27,6 +29,8 @@ from .serializers import (
     KnowledgeQuerySerializer,
     KnowledgeQueryResponseSerializer,
     KnowledgeGlobalConfigSerializer,
+    DingTalkConfigSerializer,
+    DingTalkSyncBindingSerializer,
 )
 from .services import KnowledgeBaseService, VectorStoreManager
 import time
@@ -116,6 +120,94 @@ class KnowledgeGlobalConfigView(APIView):
             VectorStoreManager._embeddings_cache.clear()
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DingTalkConfigView(APIView):
+    """钉钉同步全局凭证（单例）。"""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        config = DingTalkConfig.get_config()
+        data = DingTalkConfigSerializer(config).data
+        if data.get("app_secret"):
+            data["app_secret"] = _mask_secret(data["app_secret"])
+        return Response(data)
+
+    def put(self, request):
+        if not request.user.is_superuser:
+            return Response(
+                {"error": "只有管理员可以修改钉钉配置"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        config = DingTalkConfig.get_config()
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        if "app_secret" in data:
+            data["app_secret"] = _restore_masked_secret(
+                data.get("app_secret"), config.app_secret
+            )
+        # 更换 User ID 时清空 unionId / token 缓存
+        if (
+            "operator_user_id" in data
+            and data.get("operator_user_id") != config.operator_user_id
+        ):
+            config.operator_union_id = ""
+            config.access_token = ""
+            config.access_token_expires_at = None
+            config.save(
+                update_fields=[
+                    "operator_union_id",
+                    "access_token",
+                    "access_token_expires_at",
+                    "updated_at",
+                ]
+            )
+        if "app_key" in data and data.get("app_key") != config.app_key:
+            config.access_token = ""
+            config.access_token_expires_at = None
+            config.save(update_fields=["access_token", "access_token_expires_at", "updated_at"])
+
+        serializer = DingTalkConfigSerializer(config, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save(updated_by=request.user)
+            out = serializer.data
+            if out.get("app_secret"):
+                out["app_secret"] = _mask_secret(out["app_secret"])
+            return Response(out)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, IsAdminUser])
+def test_dingtalk_connection(request):
+    """测试钉钉凭证连通性。"""
+    from .dingtalk_client import DingTalkClient, DingTalkAPIError
+
+    config = DingTalkConfig.get_config()
+    data = request.data if isinstance(request.data, dict) else {}
+    # 允许用请求体临时覆盖未保存的字段做测试
+    for field in ("app_key", "app_secret", "operator_user_id", "enabled"):
+        if field in data and data.get(field) not in (None, ""):
+            value = data.get(field)
+            if field == "app_secret":
+                value = _restore_masked_secret(value, config.app_secret)
+            setattr(config, field, value)
+    # 测试时视为启用
+    config.enabled = True
+    try:
+        result = DingTalkClient(config).test_connection()
+        return Response(result)
+    except DingTalkAPIError as e:
+        return Response(
+            {"ok": False, "error": str(e)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    except Exception as e:
+        logger.exception("钉钉连接测试失败")
+        return Response(
+            {"ok": False, "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 class KnowledgeBaseViewSet(BaseModelViewSet):
@@ -220,9 +312,10 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
         knowledge_base = self.get_object()
 
         stats = {
-            "document_count": knowledge_base.documents.count(),
+            "document_count": knowledge_base.documents.filter(is_archived=False).count(),
             "chunk_count": DocumentChunk.objects.filter(
-                document__knowledge_base=knowledge_base
+                document__knowledge_base=knowledge_base,
+                document__is_archived=False,
             ).count(),
             "query_count": knowledge_base.query_logs.count(),
             "document_status_distribution": {},
@@ -240,6 +333,101 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
 
         return Response(stats)
 
+    def _user_can_manage_binding(self, request, knowledge_base) -> bool:
+        if request.user.is_superuser:
+            return True
+        membership = knowledge_base.project.members.filter(user=request.user).first()
+        if not membership:
+            return False
+        role = getattr(membership, "role", None) or ""
+        return role in ("admin", "owner")
+
+    @action(detail=True, methods=["get", "put"], url_path="dingtalk-binding")
+    def dingtalk_binding(self, request, pk=None):
+        """获取或更新钉钉同步绑定。"""
+        knowledge_base = self.get_object()
+        if request.method == "GET":
+            try:
+                binding = knowledge_base.dingtalk_binding
+            except DingTalkSyncBinding.DoesNotExist:
+                return Response(
+                    {
+                        "id": None,
+                        "knowledge_base": str(knowledge_base.id),
+                        "workspace_id": "",
+                        "workspace_name": "",
+                        "root_node_id": "",
+                        "enabled": False,
+                        "interval_minutes": 60,
+                        "last_synced_at": None,
+                        "last_status": "idle",
+                        "last_error": "",
+                        "last_report": {},
+                    }
+                )
+            return Response(DingTalkSyncBindingSerializer(binding).data)
+
+        if not self._user_can_manage_binding(request, knowledge_base):
+            return Response(
+                {"error": "只有项目管理员可以配置钉钉同步绑定"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        workspace_id = (request.data.get("workspace_id") or "").strip()
+        if not workspace_id:
+            return Response(
+                {"error": "workspace_id 不能为空"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        defaults = {
+            "workspace_id": workspace_id,
+            "workspace_name": (request.data.get("workspace_name") or "")[:200],
+            "root_node_id": (request.data.get("root_node_id") or "").strip(),
+            "enabled": bool(request.data.get("enabled", True)),
+            "interval_minutes": int(request.data.get("interval_minutes") or 60),
+        }
+        if defaults["interval_minutes"] < 15:
+            return Response(
+                {"error": "同步间隔不能小于 15 分钟"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        binding, _ = DingTalkSyncBinding.objects.update_or_create(
+            knowledge_base=knowledge_base,
+            defaults=defaults,
+        )
+        return Response(DingTalkSyncBindingSerializer(binding).data)
+
+    @action(detail=True, methods=["post"], url_path="dingtalk-binding/sync")
+    def dingtalk_binding_sync(self, request, pk=None):
+        """立即同步钉钉绑定。"""
+        knowledge_base = self.get_object()
+        if not self._user_can_manage_binding(request, knowledge_base):
+            return Response(
+                {"error": "只有项目管理员可以触发钉钉同步"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        try:
+            binding = knowledge_base.dingtalk_binding
+        except DingTalkSyncBinding.DoesNotExist:
+            return Response(
+                {"error": "请先配置钉钉同步绑定"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .tasks import sync_dingtalk_binding_task
+
+        def _send():
+            try:
+                sync_dingtalk_binding_task.delay(str(binding.id), request.user.id)
+            except Exception as e:
+                logger.warning("Celery 不可用 (%s)，降级为同步执行钉钉同步", e)
+                sync_dingtalk_binding_task(str(binding.id), request.user.id)
+
+        transaction.on_commit(_send)
+        return Response({"message": "钉钉同步已启动", "binding_id": str(binding.id)})
+
     @action(detail=True, methods=["get"])
     def content(self, request, pk=None):
         """查看知识库内容"""
@@ -253,7 +441,7 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
         page_size = int(request.query_params.get("page_size", 20))
 
         # 构建查询
-        documents = knowledge_base.documents.filter(status=status)
+        documents = knowledge_base.documents.filter(status=status, is_archived=False)
 
         if search:
             documents = documents.filter(
@@ -411,15 +599,48 @@ class DocumentViewSet(BaseModelViewSet):
         return DocumentSerializer
 
     def get_queryset(self):
-        """只返回用户有权限访问的文档"""
+        """只返回用户有权限访问的文档；默认隐藏已归档。"""
         user = self.request.user
         if user.is_superuser:
-            return Document.objects.all()
+            qs = Document.objects.all()
+        else:
+            qs = Document.objects.filter(
+                knowledge_base__project__members__user=user
+            ).distinct()
 
-        # 普通用户只能看到自己是成员的项目的文档
-        return Document.objects.filter(
-            knowledge_base__project__members__user=user
-        ).distinct()
+        include_archived = str(
+            self.request.query_params.get("include_archived", "")
+        ).lower() in ("1", "true", "yes")
+        if not include_archived:
+            qs = qs.filter(is_archived=False)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        """创建文档；钉钉类型走去重导入。"""
+        document_type = request.data.get("document_type")
+        if document_type == "dingtalk":
+            from .dingtalk_client import DingTalkAPIError
+            from .dingtalk_sync import import_from_url
+
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            kb = serializer.validated_data["knowledge_base"]
+            url = serializer.validated_data["url"]
+            title = serializer.validated_data.get("title") or ""
+            try:
+                document = import_from_url(
+                    kb, url, title=title, uploader=request.user
+                )
+            except DingTalkAPIError as e:
+                return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                logger.exception("钉钉文档导入失败")
+                return Response(
+                    {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            out = DocumentSerializer(document, context={"request": request})
+            return Response(out.data, status=status.HTTP_201_CREATED)
+        return super().create(request, *args, **kwargs)
 
     def perform_create(self, serializer):
         """创建文档时自动设置上传人"""

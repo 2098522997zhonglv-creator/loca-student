@@ -51,6 +51,64 @@
         </div>
       </div>
 
+      <!-- 钉钉同步绑定 -->
+      <div class="info-section dingtalk-binding">
+        <div class="section-header">
+          <h4>{{ text.dingtalkSync }}</h4>
+          <a-space>
+            <a-button size="small" type="outline" :loading="bindingLoading" @click="loadDingTalkBinding">
+              {{ text.refresh }}
+            </a-button>
+            <a-button size="small" type="outline" :loading="bindingSaving" @click="saveDingTalkBinding">
+              {{ text.saveBinding }}
+            </a-button>
+            <a-button size="small" type="primary" :loading="bindingSyncing" @click="runDingTalkSync">
+              {{ text.syncNow }}
+            </a-button>
+          </a-space>
+        </div>
+        <a-row :gutter="12">
+          <a-col :span="12">
+            <div class="info-item">
+              <span class="label">{{ text.workspaceId }}</span>
+              <a-input v-model="bindingForm.workspace_id" size="small" :placeholder="text.workspaceIdPlaceholder" />
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="info-item">
+              <span class="label">{{ text.workspaceName }}</span>
+              <a-input v-model="bindingForm.workspace_name" size="small" placeholder="可选" />
+            </div>
+          </a-col>
+          <a-col :span="12">
+            <div class="info-item">
+              <span class="label">{{ text.rootNodeId }}</span>
+              <a-input v-model="bindingForm.root_node_id" size="small" :placeholder="text.rootNodeIdPlaceholder" />
+            </div>
+          </a-col>
+          <a-col :span="6">
+            <div class="info-item">
+              <span class="label">{{ text.intervalMinutes }}</span>
+              <a-input-number v-model="bindingForm.interval_minutes" :min="15" :max="10080" size="small" style="width: 100%" />
+            </div>
+          </a-col>
+          <a-col :span="6">
+            <div class="info-item">
+              <span class="label">{{ text.enableSchedule }}</span>
+              <a-switch v-model="bindingForm.enabled" />
+            </div>
+          </a-col>
+        </a-row>
+        <div v-if="bindingForm.last_status" class="binding-status">
+          <a-tag :color="bindingStatusColor">{{ bindingForm.last_status }}</a-tag>
+          <span v-if="bindingForm.last_synced_at" class="muted">
+            {{ text.lastSyncedAt }}: {{ formatDate(bindingForm.last_synced_at) }}
+          </span>
+          <span v-if="syncReportText" class="muted">{{ syncReportText }}</span>
+          <div v-if="bindingForm.last_error" class="error-text">{{ bindingForm.last_error }}</div>
+        </div>
+      </div>
+
       <!-- 统计信息 -->
       <div class="info-section">
         <h4>{{ text.statistics }}</h4>
@@ -261,12 +319,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, onMounted, computed, reactive, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { IconClose, IconUpload, IconExclamationCircle, IconRefresh } from '@arco-design/web-vue/es/icon';
 import { useProjectStore } from '@/store/projectStore';
 import { KnowledgeService } from '../services/knowledgeService';
-import type { KnowledgeBase, Document, QueryResponse } from '../types/knowledge';
+import type { KnowledgeBase, Document, QueryResponse, DingTalkSyncBinding } from '../types/knowledge';
 import DocumentUploadModal from './DocumentUploadModal.vue';
 import DocumentDetailModal from './DocumentDetailModal.vue';
 import { useAppI18n } from '@/composables/useAppI18n';
@@ -348,6 +406,21 @@ const text = computed(() => (
         queryRequired: 'Please enter query text',
         queryFailed: 'Query failed',
         uploadSuccess: 'Document uploaded',
+        dingtalkSync: 'DingTalk sync',
+        saveBinding: 'Save binding',
+        syncNow: 'Sync now',
+        workspaceId: 'Workspace ID',
+        workspaceIdPlaceholder: 'DingTalk workspaceId',
+        workspaceName: 'Workspace name',
+        rootNodeId: 'Root node ID',
+        rootNodeIdPlaceholder: 'Optional; empty = whole workspace',
+        intervalMinutes: 'Interval (min)',
+        enableSchedule: 'Schedule',
+        lastSyncedAt: 'Last sync',
+        bindingSaved: 'DingTalk binding saved',
+        bindingSaveFailed: 'Failed to save binding',
+        syncStarted: 'DingTalk sync started',
+        syncFailed: 'Failed to start sync',
       }
     : {
         basicInfo: '基本信息',
@@ -411,6 +484,21 @@ const text = computed(() => (
         queryRequired: '请输入查询内容',
         queryFailed: '查询失败',
         uploadSuccess: '文档上传成功',
+        dingtalkSync: '钉钉同步',
+        saveBinding: '保存绑定',
+        syncNow: '立即同步',
+        workspaceId: '钉钉知识库 ID',
+        workspaceIdPlaceholder: 'workspaceId（测试连接可看到）',
+        workspaceName: '知识库名称',
+        rootNodeId: '根节点 ID',
+        rootNodeIdPlaceholder: '可选，空=整库',
+        intervalMinutes: '间隔(分钟)',
+        enableSchedule: '定时同步',
+        lastSyncedAt: '上次同步',
+        bindingSaved: '钉钉绑定已保存',
+        bindingSaveFailed: '保存绑定失败',
+        syncStarted: '钉钉同步已启动',
+        syncFailed: '启动同步失败',
       }
 ));
 
@@ -427,6 +515,109 @@ const topK = ref(3);
 const isUploadModalVisible = ref(false);
 const isDocumentDetailVisible = ref(false);
 const selectedDocumentId = ref<string | null>(null);
+const bindingLoading = ref(false);
+const bindingSaving = ref(false);
+const bindingSyncing = ref(false);
+const bindingForm = reactive({
+  workspace_id: '',
+  workspace_name: '',
+  root_node_id: '',
+  enabled: true,
+  interval_minutes: 60,
+  last_status: '',
+  last_synced_at: '' as string | null,
+  last_error: '',
+  last_report: {} as Record<string, unknown>,
+});
+
+const bindingStatusColor = computed(() => {
+  const map: Record<string, string> = {
+    idle: 'gray',
+    running: 'blue',
+    success: 'green',
+    failed: 'red',
+  };
+  return map[bindingForm.last_status] || 'gray';
+});
+
+const syncReportText = computed(() => {
+  const r = bindingForm.last_report || {};
+  if (!Object.keys(r).length) return '';
+  const parts = [
+    r.created != null ? `新增 ${r.created}` : '',
+    r.updated != null ? `更新 ${r.updated}` : '',
+    r.skipped != null ? `跳过 ${r.skipped}` : '',
+    r.archived != null ? `归档 ${r.archived}` : '',
+    r.failed != null ? `失败 ${r.failed}` : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+});
+
+const applyBinding = (binding: DingTalkSyncBinding) => {
+  bindingForm.workspace_id = binding.workspace_id || '';
+  bindingForm.workspace_name = binding.workspace_name || '';
+  bindingForm.root_node_id = binding.root_node_id || '';
+  bindingForm.enabled = binding.enabled !== false;
+  bindingForm.interval_minutes = binding.interval_minutes || 60;
+  bindingForm.last_status = binding.last_status || '';
+  bindingForm.last_synced_at = binding.last_synced_at || null;
+  bindingForm.last_error = binding.last_error || '';
+  bindingForm.last_report = (binding.last_report || {}) as Record<string, unknown>;
+};
+
+const loadDingTalkBinding = async () => {
+  bindingLoading.value = true;
+  try {
+    const binding = await KnowledgeService.getDingTalkBinding(props.knowledgeBase.id);
+    applyBinding(binding);
+  } catch (e: any) {
+    console.warn(e);
+  } finally {
+    bindingLoading.value = false;
+  }
+};
+
+const saveDingTalkBinding = async () => {
+  if (!bindingForm.workspace_id.trim()) {
+    Message.warning(text.value.workspaceIdPlaceholder);
+    return;
+  }
+  bindingSaving.value = true;
+  try {
+    const binding = await KnowledgeService.updateDingTalkBinding(props.knowledgeBase.id, {
+      workspace_id: bindingForm.workspace_id.trim(),
+      workspace_name: bindingForm.workspace_name,
+      root_node_id: bindingForm.root_node_id.trim(),
+      enabled: bindingForm.enabled,
+      interval_minutes: bindingForm.interval_minutes,
+    });
+    applyBinding(binding);
+    Message.success(text.value.bindingSaved);
+  } catch (e: any) {
+    Message.error(e?.message || text.value.bindingSaveFailed);
+  } finally {
+    bindingSaving.value = false;
+  }
+};
+
+const runDingTalkSync = async () => {
+  bindingSyncing.value = true;
+  try {
+    if (!bindingForm.workspace_id.trim()) {
+      await saveDingTalkBinding();
+    }
+    await KnowledgeService.syncDingTalkBinding(props.knowledgeBase.id);
+    Message.success(text.value.syncStarted);
+    setTimeout(() => {
+      loadDingTalkBinding();
+      fetchDocuments();
+    }, 2000);
+  } catch (e: any) {
+    Message.error(e?.message || text.value.syncFailed);
+  } finally {
+    bindingSyncing.value = false;
+  }
+};
 const queryImagePreviewVisible = ref(false);
 const queryPreviewImageUrl = ref('');
 
@@ -574,7 +765,8 @@ const documentColumns = computed(() => ([
 ]));
 
 // 方法
-const formatDate = (dateString: string) => {
+const formatDate = (dateString: string | null | undefined) => {
+  if (!dateString) return '';
   return new Date(dateString).toLocaleString(isEnglish.value ? 'en-US' : 'zh-CN');
 };
 
@@ -713,7 +905,16 @@ const getProjectName = (projectId: number | string) => {
 // 生命周期
 onMounted(() => {
   fetchDocuments();
+  loadDingTalkBinding();
 });
+
+watch(
+  () => props.knowledgeBase.id,
+  () => {
+    fetchDocuments();
+    loadDingTalkBinding();
+  },
+);
 </script>
 
 <style scoped>
@@ -765,6 +966,47 @@ onMounted(() => {
   color: var(--theme-text);
   padding-bottom: 8px;
   border-bottom: 1px solid var(--theme-border);
+}
+
+.dingtalk-binding .section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.dingtalk-binding .section-header h4 {
+  margin: 0;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.dingtalk-binding .info-item {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.dingtalk-binding .label {
+  width: auto;
+}
+
+.binding-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.binding-status .muted {
+  color: var(--theme-text-secondary);
+}
+
+.binding-status .error-text {
+  width: 100%;
+  color: rgb(var(--red-6));
 }
 
 .info-item {

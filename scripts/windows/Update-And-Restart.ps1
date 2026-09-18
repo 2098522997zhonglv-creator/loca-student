@@ -57,11 +57,13 @@ if ($needFrontendBuild) {
 Sync-BundledSkills
 
 if ($changed) {
-    Write-UpdateLog "Code changed, restarting Django and worker..."
+    Write-UpdateLog "Code changed, restarting Django, worker and beat..."
+    Stop-CeleryBeat
     Stop-ReviewWorker
     Stop-KnowledgeCenter
     Start-KnowledgeCenter
     Start-ReviewWorker
+    Start-CeleryBeat
 } else {
     $listening = Get-ListenPids -Port $script:Port
     if ($listening.Count -eq 0) {
@@ -70,8 +72,9 @@ if ($changed) {
     } else {
         Write-UpdateLog "No update, service already running"
     }
-    # worker 可能自己挂掉，单独补起
+    # worker / beat 可能自己挂掉，单独补起
     Start-ReviewWorker
+    Start-CeleryBeat
 }
 
 Write-UpdateLog "==== auto-update done ===="

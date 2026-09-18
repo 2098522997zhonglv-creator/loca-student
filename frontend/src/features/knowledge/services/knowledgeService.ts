@@ -18,6 +18,8 @@ import type {
   SystemStatusResponse,
   EmbeddingServicesResponse,
   KnowledgeGlobalConfig,
+  DingTalkConfig,
+  DingTalkSyncBinding,
 } from '../types/knowledge';
 
 const API_BASE_URL = '/knowledge';
@@ -59,6 +61,92 @@ export class KnowledgeService {
     } else {
       throw new Error(response.error || 'Failed to update global config');
     }
+  }
+
+  // ==================== 钉钉同步配置 ====================
+
+  static async getDingTalkConfig(): Promise<DingTalkConfig> {
+    const response = await request<DingTalkConfig>({
+      url: `${API_BASE_URL}/dingtalk-config/`,
+      method: 'GET',
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'Failed to get DingTalk config');
+  }
+
+  static async updateDingTalkConfig(data: Partial<DingTalkConfig>): Promise<DingTalkConfig> {
+    const response = await request<DingTalkConfig>({
+      url: `${API_BASE_URL}/dingtalk-config/`,
+      method: 'PUT',
+      data,
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'Failed to update DingTalk config');
+  }
+
+  static async testDingTalkConnection(data?: Partial<DingTalkConfig>): Promise<{
+    ok: boolean;
+    error?: string;
+    workspace_count?: number;
+    workspaces?: Array<{ workspace_id?: string; name?: string; root_node_id?: string }>;
+    operator_union_id?: string;
+  }> {
+    const response = await request<{
+      ok: boolean;
+      error?: string;
+      workspace_count?: number;
+      workspaces?: Array<{ workspace_id?: string; name?: string; root_node_id?: string }>;
+      operator_union_id?: string;
+    }>({
+      url: `${API_BASE_URL}/test-dingtalk-connection/`,
+      method: 'POST',
+      data: data || {},
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'DingTalk connection test failed');
+  }
+
+  static async getDingTalkBinding(knowledgeBaseId: string): Promise<DingTalkSyncBinding> {
+    const response = await request<DingTalkSyncBinding>({
+      url: `${API_BASE_URL}/knowledge-bases/${knowledgeBaseId}/dingtalk-binding/`,
+      method: 'GET',
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'Failed to get DingTalk binding');
+  }
+
+  static async updateDingTalkBinding(
+    knowledgeBaseId: string,
+    data: Partial<DingTalkSyncBinding>,
+  ): Promise<DingTalkSyncBinding> {
+    const response = await request<DingTalkSyncBinding>({
+      url: `${API_BASE_URL}/knowledge-bases/${knowledgeBaseId}/dingtalk-binding/`,
+      method: 'PUT',
+      data,
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'Failed to update DingTalk binding');
+  }
+
+  static async syncDingTalkBinding(knowledgeBaseId: string): Promise<{ message: string }> {
+    const response = await request<{ message: string }>({
+      url: `${API_BASE_URL}/knowledge-bases/${knowledgeBaseId}/dingtalk-binding/sync/`,
+      method: 'POST',
+    });
+    if (response.success) {
+      return response.data!;
+    }
+    throw new Error(response.error || 'Failed to start DingTalk sync');
   }
 
   // ==================== 知识库管理 ====================

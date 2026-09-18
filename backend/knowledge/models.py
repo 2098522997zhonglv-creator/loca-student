@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 from projects.models import Project
 import uuid
@@ -159,6 +160,97 @@ class KnowledgeBase(models.Model):
         return f"{self.project.name} - {self.name}"
 
 
+class DingTalkConfig(models.Model):
+    """钉钉开放平台全局凭证（单例）。"""
+
+    enabled = models.BooleanField(_('启用钉钉同步'), default=False)
+    app_key = models.CharField(_('Client ID / AppKey'), max_length=200, blank=True, default='')
+    app_secret = models.CharField(_('Client Secret / AppSecret'), max_length=500, blank=True, default='')
+    operator_user_id = models.CharField(
+        _('操作人 User ID'),
+        max_length=100,
+        blank=True,
+        default='',
+        help_text=_('企业管理后台通讯录中的 User ID，平台会自动解析为 unionId'),
+    )
+    operator_union_id = models.CharField(_('操作人 unionId 缓存'), max_length=100, blank=True, default='')
+    access_token = models.CharField(_('accessToken 缓存'), max_length=500, blank=True, default='')
+    access_token_expires_at = models.DateTimeField(_('accessToken 过期时间'), null=True, blank=True)
+    updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
+    updated_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='updated_dingtalk_configs',
+        verbose_name=_('更新人'),
+    )
+
+    class Meta:
+        verbose_name = _('钉钉同步配置')
+        verbose_name_plural = _('钉钉同步配置')
+
+    def __str__(self):
+        return f"钉钉同步配置 ({'启用' if self.enabled else '禁用'})"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls):
+        config, _ = cls.objects.get_or_create(pk=1)
+        return config
+
+
+class DingTalkSyncBinding(models.Model):
+    """本地知识库与钉钉知识库的同步绑定（一期每个本地库一条）。"""
+
+    STATUS_CHOICES = [
+        ('idle', '空闲'),
+        ('running', '同步中'),
+        ('success', '成功'),
+        ('failed', '失败'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    knowledge_base = models.OneToOneField(
+        KnowledgeBase,
+        on_delete=models.CASCADE,
+        related_name='dingtalk_binding',
+        verbose_name=_('本地知识库'),
+    )
+    workspace_id = models.CharField(_('钉钉知识库 ID'), max_length=100)
+    workspace_name = models.CharField(_('钉钉知识库名称'), max_length=200, blank=True, default='')
+    root_node_id = models.CharField(
+        _('同步根节点 ID'),
+        max_length=100,
+        blank=True,
+        default='',
+        help_text=_('为空时同步整个知识库（使用钉钉返回的 rootNodeId）'),
+    )
+    enabled = models.BooleanField(_('启用定时同步'), default=True)
+    interval_minutes = models.PositiveIntegerField(_('同步间隔(分钟)'), default=60)
+    last_synced_at = models.DateTimeField(_('上次同步时间'), null=True, blank=True)
+    last_status = models.CharField(
+        _('上次同步状态'),
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='idle',
+    )
+    last_error = models.TextField(_('上次错误'), blank=True, default='')
+    last_report = models.JSONField(_('上次同步报告'), default=dict, blank=True)
+    created_at = models.DateTimeField(_('创建时间'), auto_now_add=True)
+    updated_at = models.DateTimeField(_('更新时间'), auto_now=True)
+
+    class Meta:
+        verbose_name = _('钉钉同步绑定')
+        verbose_name_plural = _('钉钉同步绑定')
+
+    def __str__(self):
+        return f"{self.knowledge_base.name} ↔ {self.workspace_name or self.workspace_id}"
+
+
 def document_upload_path(instance, filename):
     """生成文档上传路径"""
     return f'knowledge_bases/{instance.knowledge_base.id}/documents/{filename}'
@@ -184,6 +276,7 @@ class Document(models.Model):
         ('md', 'Markdown'),
         ('html', 'HTML'),
         ('url', '网页链接'),
+        ('dingtalk', '钉钉文档'),
     ]
 
     STATUS_CHOICES = [
@@ -212,8 +305,16 @@ class Document(models.Model):
         blank=True,
         null=True
     )
-    url = models.URLField(_('网页链接'), blank=True, null=True)
+    url = models.URLField(_('网页链接'), blank=True, null=True, max_length=1000)
     content = models.TextField(_('文档内容'), blank=True, null=True)
+
+    # 外部来源（钉钉等）
+    external_id = models.CharField(_('外部文档 ID'), max_length=100, blank=True, null=True, db_index=True)
+    external_workspace_id = models.CharField(_('外部知识库 ID'), max_length=100, blank=True, null=True)
+    external_modified_at = models.DateTimeField(_('外部修改时间'), null=True, blank=True)
+    external_url = models.URLField(_('外部原始链接'), blank=True, null=True, max_length=1000)
+    external_path = models.CharField(_('外部目录路径'), max_length=500, blank=True, null=True)
+    is_archived = models.BooleanField(_('已归档'), default=False, db_index=True)
 
     # 处理状态
     status = models.CharField(
@@ -243,6 +344,13 @@ class Document(models.Model):
         verbose_name = _('文档')
         verbose_name_plural = _('文档')
         ordering = ['-uploaded_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['knowledge_base', 'document_type', 'external_id'],
+                condition=Q(document_type='dingtalk') & Q(external_id__isnull=False),
+                name='uniq_kb_dingtalk_external_id',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.knowledge_base.name} - {self.title}"

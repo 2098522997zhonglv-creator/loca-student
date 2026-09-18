@@ -122,7 +122,7 @@ export interface UpdateKnowledgeBaseRequest extends Partial<CreateKnowledgeBaseR
 /**
  * 文档类型
  */
-export type DocumentType = 'pdf' | 'docx' | 'doc' | 'xlsx' | 'xls' | 'pptx' | 'txt' | 'md' | 'html' | 'url';
+export type DocumentType = 'pdf' | 'docx' | 'doc' | 'xlsx' | 'xls' | 'pptx' | 'txt' | 'md' | 'html' | 'url' | 'dingtalk';
 
 /**
  * 文档处理状态
@@ -152,6 +152,46 @@ export interface Document {
   file_name?: string;
   file_url?: string;
   error_message?: string;
+  external_id?: string;
+  external_workspace_id?: string;
+  external_url?: string;
+  external_path?: string;
+  external_modified_at?: string;
+  is_archived?: boolean;
+}
+
+/**
+ * 钉钉全局配置
+ */
+export interface DingTalkConfig {
+  enabled: boolean;
+  app_key: string;
+  app_secret: string;
+  operator_user_id: string;
+  operator_union_id?: string;
+  updated_at?: string;
+  updated_by?: number;
+  updated_by_name?: string;
+}
+
+/**
+ * 钉钉同步绑定
+ */
+export interface DingTalkSyncBinding {
+  id: string | null;
+  knowledge_base: string;
+  knowledge_base_name?: string;
+  workspace_id: string;
+  workspace_name: string;
+  root_node_id: string;
+  enabled: boolean;
+  interval_minutes: number;
+  last_synced_at?: string | null;
+  last_status?: string;
+  last_error?: string;
+  last_report?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
 }
 
 /**

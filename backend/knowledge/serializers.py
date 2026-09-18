@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth.models import User
-from .models import KnowledgeBase, Document, DocumentChunk, QueryLog, KnowledgeGlobalConfig
+from .models import KnowledgeBase, Document, DocumentChunk, QueryLog, KnowledgeGlobalConfig, DingTalkConfig, DingTalkSyncBinding
 from projects.models import Project
 
 
@@ -47,12 +47,14 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
         }
 
     def get_document_count(self, obj):
-        """获取文档数量"""
-        return obj.documents.count()
+        """获取文档数量（不含已归档）"""
+        return obj.documents.filter(is_archived=False).count()
 
     def get_chunk_count(self, obj):
         """获取分块数量"""
-        return DocumentChunk.objects.filter(document__knowledge_base=obj).count()
+        return DocumentChunk.objects.filter(
+            document__knowledge_base=obj, document__is_archived=False
+        ).count()
 
     def validate_project(self, value):
         """验证项目权限"""
@@ -89,11 +91,15 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             'id', 'knowledge_base', 'knowledge_base_name', 'title',
             'document_type', 'file', 'url', 'content', 'status',
             'error_message', 'file_size', 'page_count', 'word_count',
+            'external_id', 'external_workspace_id', 'external_modified_at',
+            'external_url', 'external_path', 'is_archived',
             'uploader', 'uploader_name', 'uploaded_at', 'processed_at'
         ]
         read_only_fields = [
             'id', 'uploader', 'status', 'error_message',
             'file_size', 'page_count', 'word_count',
+            'external_id', 'external_workspace_id', 'external_modified_at',
+            'external_url', 'external_path', 'is_archived',
             'uploaded_at', 'processed_at'
         ]
 
@@ -112,6 +118,18 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         if document_type == 'url':
             if not url:
                 raise serializers.ValidationError("网页链接类型必须提供URL")
+        elif document_type == 'dingtalk':
+            if not url:
+                raise serializers.ValidationError("钉钉文档类型必须提供文档链接")
+            from .dingtalk_client import is_dingtalk_doc_url
+            if not is_dingtalk_doc_url(url):
+                raise serializers.ValidationError("请提供有效的钉钉文档链接")
+            from .models import DingTalkConfig
+            cfg = DingTalkConfig.get_config()
+            if not cfg.enabled:
+                raise serializers.ValidationError("钉钉同步未启用，请先在「钉钉配置」中启用")
+            if not cfg.app_key or not cfg.app_secret:
+                raise serializers.ValidationError("钉钉 AppKey/AppSecret 未配置")
         elif document_type in text_types:
             if not content and not file:
                 raise serializers.ValidationError("文本类型文档必须提供内容或文件")
@@ -148,17 +166,58 @@ class DocumentSerializer(serializers.ModelSerializer):
             'id', 'knowledge_base', 'knowledge_base_name', 'title',
             'document_type', 'file', 'url', 'content', 'status',
             'error_message', 'file_size', 'page_count', 'word_count',
+            'external_id', 'external_workspace_id', 'external_modified_at',
+            'external_url', 'external_path', 'is_archived',
             'file_extension', 'chunk_count', 'uploader', 'uploader_name',
             'uploaded_at', 'processed_at'
         ]
         read_only_fields = [
             'id', 'uploader', 'file_size', 'page_count', 'word_count',
+            'external_id', 'external_workspace_id', 'external_modified_at',
+            'external_url', 'external_path', 'is_archived',
             'file_extension', 'uploaded_at', 'processed_at'
         ]
 
     def get_chunk_count(self, obj):
         """获取分块数量"""
         return obj.chunks.count()
+
+
+class DingTalkConfigSerializer(serializers.ModelSerializer):
+    updated_by_name = serializers.CharField(source='updated_by.username', read_only=True)
+
+    class Meta:
+        model = DingTalkConfig
+        fields = [
+            'enabled', 'app_key', 'app_secret', 'operator_user_id',
+            'operator_union_id', 'updated_at', 'updated_by', 'updated_by_name',
+        ]
+        read_only_fields = ['operator_union_id', 'updated_at', 'updated_by']
+
+
+class DingTalkSyncBindingSerializer(serializers.ModelSerializer):
+    knowledge_base_name = serializers.CharField(source='knowledge_base.name', read_only=True)
+
+    class Meta:
+        model = DingTalkSyncBinding
+        fields = [
+            'id', 'knowledge_base', 'knowledge_base_name',
+            'workspace_id', 'workspace_name', 'root_node_id',
+            'enabled', 'interval_minutes',
+            'last_synced_at', 'last_status', 'last_error', 'last_report',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'knowledge_base', 'last_synced_at', 'last_status',
+            'last_error', 'last_report', 'created_at', 'updated_at',
+        ]
+
+    def validate_interval_minutes(self, value):
+        if value < 15:
+            raise serializers.ValidationError("同步间隔不能小于 15 分钟")
+        if value > 10080:
+            raise serializers.ValidationError("同步间隔不能大于 7 天")
+        return value
 
 
 class DocumentChunkSerializer(serializers.ModelSerializer):

@@ -4,7 +4,7 @@ from .views import (
     KnowledgeBaseViewSet, DocumentViewSet,
     DocumentChunkViewSet, QueryLogViewSet,
     embedding_services, KnowledgeGlobalConfigView, test_embedding_connection,
-    test_reranker_connection
+    test_reranker_connection, DingTalkConfigView, test_dingtalk_connection
 )
 
 router = DefaultRouter()
@@ -17,6 +17,8 @@ urlpatterns = [
     path('', include(router.urls)),
     path('embedding-services/', embedding_services, name='embedding-services'),
     path('global-config/', KnowledgeGlobalConfigView.as_view(), name='global-config'),
+    path('dingtalk-config/', DingTalkConfigView.as_view(), name='dingtalk-config'),
+    path('test-dingtalk-connection/', test_dingtalk_connection, name='test-dingtalk-connection'),
     path('test-embedding-connection/', test_embedding_connection, name='test-embedding-connection'),
     path('test-reranker-connection/', test_reranker_connection, name='test-reranker-connection'),
 ]

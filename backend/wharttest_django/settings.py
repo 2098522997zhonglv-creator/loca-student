@@ -189,6 +189,13 @@ CELERY_RESULT_EXPIRES = 3600
 # 通道，避免 result backend 不可用时把 HTTP 请求拖上好几秒。
 CELERY_TASK_IGNORE_RESULT = True
 
+CELERY_BEAT_SCHEDULE = {
+    "dingtalk-sync-tick": {
+        "task": "knowledge.sync_due_dingtalk_bindings",
+        "schedule": 900.0,  # 15 minutes
+    },
+}
+
 FILE_MANAGEMENT_MAX_FILE_SIZE = int(os.environ.get("FILE_MANAGEMENT_MAX_FILE_SIZE", 104857600))
 FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE = int(os.environ.get("FILE_MANAGEMENT_LLM_MAX_CHARS_PER_FILE", 0))
 LANGGRAPH_CHECKPOINT_SQLITE_PATH = os.environ.get(

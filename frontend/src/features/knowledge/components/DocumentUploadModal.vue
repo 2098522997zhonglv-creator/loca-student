@@ -18,6 +18,7 @@
           <a-radio value="file">{{ text.fileUpload }}</a-radio>
           <a-radio value="text">{{ text.textContent }}</a-radio>
           <a-radio value="url">{{ text.webLink }}</a-radio>
+          <a-radio value="dingtalk">{{ text.dingtalkDoc }}</a-radio>
         </a-radio-group>
       </a-form-item>
 
@@ -85,6 +86,19 @@
           />
         </a-form-item>
       </template>
+
+      <!-- 钉钉文档 -->
+      <template v-if="formData.uploadType === 'dingtalk'">
+        <a-form-item :label="text.dingtalkLink" field="url">
+          <a-input
+            v-model="formData.url"
+            :placeholder="text.dingtalkLinkPlaceholder"
+          />
+        </a-form-item>
+        <a-alert type="info" style="margin-bottom: 12px">
+          {{ text.dingtalkHint }}
+        </a-alert>
+      </template>
     </a-form>
 
     <div v-if="uploadProgress > 0 && uploadProgress < 100" class="upload-progress">
@@ -122,6 +136,10 @@ const text = computed(() => (
         fileUpload: 'File upload',
         textContent: 'Text content',
         webLink: 'Web link',
+        dingtalkDoc: 'DingTalk doc',
+        dingtalkLink: 'DingTalk link',
+        dingtalkLinkPlaceholder: 'Paste alidocs.dingtalk.com link',
+        dingtalkHint: 'Requires DingTalk sync config (AppKey / AppSecret / operator). Duplicate links update the existing document.',
         documentTitle: 'Document title',
         documentTitlePlaceholder: 'Enter document title',
         selectFile: 'Select file',
@@ -139,6 +157,7 @@ const text = computed(() => (
         validateContentMax: 'Text content must be at most 50000 characters',
         validateUrlRequired: 'Please enter a URL',
         validateUrlInvalid: 'Please enter a valid URL',
+        validateDingTalkRequired: 'Please paste a DingTalk document link',
         unsupportedFileType: (extensions: string[]) => `Unsupported file format. Supported: ${extensions.join(', ')}`,
         formInvalid: 'Please check the form fields',
         uploadFailed: 'Failed to upload document',
@@ -149,6 +168,10 @@ const text = computed(() => (
         fileUpload: '文件上传',
         textContent: '文本内容',
         webLink: '网页链接',
+        dingtalkDoc: '钉钉文档',
+        dingtalkLink: '钉钉文档链接',
+        dingtalkLinkPlaceholder: '粘贴 alidocs.dingtalk.com 文档链接',
+        dingtalkHint: '需先在「钉钉配置」中填写 AppKey / AppSecret / 操作人。同一链接重复导入会更新已有文档。',
         documentTitle: '文档标题',
         documentTitlePlaceholder: '请输入文档标题',
         selectFile: '选择文件',
@@ -166,6 +189,7 @@ const text = computed(() => (
         validateContentMax: '文本内容不能超过50000个字符',
         validateUrlRequired: '请输入网页链接',
         validateUrlInvalid: '请输入有效的网页链接',
+        validateDingTalkRequired: '请粘贴钉钉文档链接',
         unsupportedFileType: (extensions: string[]) => `不支持的文件格式，仅支持：${extensions.join(', ')}`,
         formInvalid: '请检查表单填写是否正确',
         uploadFailed: '上传文档失败',
@@ -184,7 +208,7 @@ const uploadProgressRatio = computed(() =>
 
 // 表单数据
 const formData = reactive({
-  uploadType: 'file' as 'file' | 'text' | 'url',
+  uploadType: 'file' as 'file' | 'text' | 'url' | 'dingtalk',
   title: '',
   file: null as File | null,
   content: '',
@@ -217,11 +241,16 @@ const rules = computed(() => {
         { maxLength: 50000, message: text.value.validateContentMax },
       ],
     };
-  } else if (formData.uploadType === 'url') {
+  } else if (formData.uploadType === 'url' || formData.uploadType === 'dingtalk') {
     return {
       ...baseRules,
       url: [
-        { required: true, message: text.value.validateUrlRequired },
+        {
+          required: true,
+          message: formData.uploadType === 'dingtalk'
+            ? text.value.validateDingTalkRequired
+            : text.value.validateUrlRequired,
+        },
         {
           type: 'url',
           message: text.value.validateUrlInvalid,
@@ -328,6 +357,7 @@ const formatFileSize = (bytes: number): string => {
 const getDocumentType = (uploadType: string, file?: File): DocumentType => {
   if (uploadType === 'text') return 'txt';
   if (uploadType === 'url') return 'url';
+  if (uploadType === 'dingtalk') return 'dingtalk';
 
   if (file) {
     const ext = file.name.split('.').pop()?.toLowerCase();
@@ -376,7 +406,7 @@ const handleSubmit = async () => {
       uploadData.file = formData.file;
     } else if (formData.uploadType === 'text') {
       uploadData.content = formData.content;
-    } else if (formData.uploadType === 'url') {
+    } else if (formData.uploadType === 'url' || formData.uploadType === 'dingtalk') {
       uploadData.url = formData.url;
     }
 

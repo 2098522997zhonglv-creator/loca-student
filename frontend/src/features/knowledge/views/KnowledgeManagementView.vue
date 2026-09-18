@@ -10,6 +10,9 @@
           <template #icon><icon-settings /></template>
           {{ pageText.knowledgeBaseConfig }}
         </a-button>
+        <a-button @click="showDingTalkModal" style="margin-right: 8px">
+          {{ pageText.dingtalkConfig }}
+        </a-button>
         <a-button type="primary" @click="showCreateModal">
           <template #icon><icon-plus /></template>
           {{ pageText.createKnowledgeBase }}
@@ -133,6 +136,12 @@
       @saved="onConfigSaved"
     />
 
+    <DingTalkConfigModal
+      :visible="isDingTalkModalVisible"
+      @cancel="closeDingTalkModal"
+      @submit="onDingTalkSaved"
+    />
+
   </div>
 </template>
 
@@ -149,6 +158,7 @@ import KnowledgeBaseDetail from '../components/KnowledgeBaseDetail.vue';
 import KnowledgeBaseFormModal from '../components/KnowledgeBaseFormModal.vue';
 import KnowledgeBaseStatsModal from '../components/KnowledgeBaseStatsModal.vue';
 import KnowledgeGlobalConfigModal from '../components/KnowledgeGlobalConfigModal.vue';
+import DingTalkConfigModal from '../components/DingTalkConfigModal.vue';
 
 const projectStore = useProjectStore();
 const { isEnglish } = useAppI18n();
@@ -159,6 +169,7 @@ const pageText = computed(() => (
         pageTitle: 'Knowledge Base',
         pageSubtitle: 'Manage documents, chunking, and retrieval settings',
         knowledgeBaseConfig: 'Knowledge base config',
+        dingtalkConfig: 'DingTalk sync',
         createKnowledgeBase: 'New knowledge base',
         searchPlaceholder: 'Search knowledge bases...',
         statusFilterPlaceholder: 'Status',
@@ -192,6 +203,7 @@ const pageText = computed(() => (
         pageTitle: '知识库管理',
         pageSubtitle: '管理项目文档、分块与向量检索配置',
         knowledgeBaseConfig: '知识库配置',
+        dingtalkConfig: '钉钉同步',
         createKnowledgeBase: '新建知识库',
         searchPlaceholder: '搜索知识库...',
         statusFilterPlaceholder: '状态筛选',
@@ -239,6 +251,7 @@ const editingKB = ref<KnowledgeBase | null>(null);
 const isFormModalVisible = ref(false);
 const isStatsModalVisible = ref(false);
 const isConfigModalVisible = ref(false);
+const isDingTalkModalVisible = ref(false);
 const statsKBId = ref('');
 
 // 分页配置
@@ -427,6 +440,18 @@ const showConfigModal = () => {
 
 const closeConfigModal = () => {
   isConfigModalVisible.value = false;
+};
+
+const showDingTalkModal = () => {
+  isDingTalkModalVisible.value = true;
+};
+
+const closeDingTalkModal = () => {
+  isDingTalkModalVisible.value = false;
+};
+
+const onDingTalkSaved = () => {
+  isDingTalkModalVisible.value = false;
 };
 
 const onConfigSaved = () => {
