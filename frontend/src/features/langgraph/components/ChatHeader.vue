@@ -173,6 +173,9 @@ const loadUserPrompts = async () => {
 
     if (promptsResponse.status === 'success' && promptsResponse.data) {
       let allPrompts = toArray<UserPrompt>((promptsResponse.data as any)?.results ?? promptsResponse.data);
+      if (!Array.isArray(allPrompts)) {
+        allPrompts = [];
+      }
 
       // 过滤：只显示 general 类型的提示词
       allPrompts = allPrompts.filter(prompt =>

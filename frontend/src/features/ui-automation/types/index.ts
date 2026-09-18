@@ -382,13 +382,18 @@ export interface ApiResponse<T> {
  * - 一层: res.data = <actual_data>
  * - 两层: res.data = { data: <actual_data> }
  * - 三层: res.data = { data: { data: <actual_data> } }
+ * - 分页: { count, results } → 返回 results
  */
 export function extractResponseData<T>(res: any): T | undefined {
   // 先获取响应拦截器返回的 data
-  let data = res.data
+  let data = res?.data
   // 如果 data 有 data 属性且不是数组，继续解包
   while (data && typeof data === 'object' && !Array.isArray(data) && 'data' in data) {
     data = data.data
+  }
+  // 分页对象优先取 results，避免把 {count,results} 当成列表继续用
+  if (data && typeof data === 'object' && !Array.isArray(data) && Array.isArray((data as any).results)) {
+    return (data as any).results as T
   }
   return data
 }
@@ -398,22 +403,34 @@ export function extractResponseData<T>(res: any): T | undefined {
  * 处理响应拦截器的嵌套包装和分页/数组格式
  */
 export function extractListData<T>(res: any): T[] {
-  // 响应拦截器包装: res.data = { success, data, message }
-  const wrapped = res.data?.data ?? res.data
-  // 分页格式: { count, results } 或直接数组
-  return wrapped?.results ?? (Array.isArray(wrapped) ? wrapped : [])
+  const data = extractResponseData<any>(res)
+  if (Array.isArray(data)) return data as T[]
+  if (data && typeof data === 'object' && Array.isArray(data.results)) {
+    return data.results as T[]
+  }
+  if (data && typeof data === 'object' && Array.isArray(data.items)) {
+    return data.items as T[]
+  }
+  return []
 }
 
 /**
  * 提取 API 响应中的分页信息
  */
 export function extractPaginationData(res: any): { items: any[]; count: number } {
-  const wrapped = res.data?.data ?? res.data
-  if (wrapped?.results) {
-    return { items: wrapped.results, count: wrapped.count ?? 0 }
+  const data = extractResponseData<any>(res)
+  if (Array.isArray(data)) {
+    return { items: data, count: data.length }
   }
-  const items = Array.isArray(wrapped) ? wrapped : []
-  return { items, count: items.length }
+  if (data && typeof data === 'object') {
+    if (Array.isArray(data.results)) {
+      return { items: data.results, count: typeof data.count === 'number' ? data.count : data.results.length }
+    }
+    if (Array.isArray(data.items)) {
+      return { items: data.items, count: typeof data.count === 'number' ? data.count : data.items.length }
+    }
+  }
+  return { items: [], count: 0 }
 }
 
 /** 表单类型定义 */

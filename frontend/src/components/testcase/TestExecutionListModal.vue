@@ -232,9 +232,10 @@ const fetchExecutions = async () => {
 
     if (response.success && response.data) {
       // 筛选状态
+      const list = Array.isArray(response.data) ? response.data : [];
       executionData.value = statusFilter.value
-        ? response.data.filter(item => item.status === statusFilter.value)
-        : response.data;
+        ? list.filter(item => item.status === statusFilter.value)
+        : list;
     } else {
       Message.error(response.error || '获取执行历史失败');
       executionData.value = [];

@@ -371,7 +371,7 @@ const unwrapList = (res: any) => {
   if (Array.isArray(payload?.results)) return { list: payload.results, total: payload.count ?? payload.results.length };
   if (Array.isArray(payload?.data)) return { list: payload.data, total: payload.count ?? payload.data.length };
   if (Array.isArray(payload?.data?.results)) return { list: payload.data.results, total: payload.data.count ?? payload.data.results.length };
-  return { list: [], total: 0 };
+  return { list: [] as FileAsset[], total: 0 };
 };
 
 
@@ -382,7 +382,8 @@ const openReferences = async (record: FileAsset) => {
   referencesLoading.value = true;
   try {
     const payload: any = unwrapObject(await fileService.references(projectStore.currentProjectId, record.id));
-    referenceRows.value = payload.results || payload.data || [];
+    const rows = payload?.results ?? payload?.data ?? payload;
+    referenceRows.value = Array.isArray(rows) ? rows : [];
   } catch (error: any) {
     Message.error(error?.message || (isEnglish.value ? 'Failed to load references' : '加载引用详情失败'));
     referenceRows.value = [];
@@ -406,9 +407,10 @@ const loadFiles = async () => {
       ordering: '-created_at',
     });
     const { list, total } = unwrapList(res);
-    files.value = list;
+    files.value = Array.isArray(list) ? list : [];
     pagination.total = total;
   } catch (error: any) {
+    files.value = [];
     Message.error(error?.message || (isEnglish.value ? 'Failed to load files' : '加载文件失败'));
   } finally {
     loading.value = false;

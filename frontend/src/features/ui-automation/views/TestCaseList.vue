@@ -481,6 +481,7 @@ const formatEnvLabel = (env: UiEnvironmentConfig) => (
 
 const flattenModules = (modules: UiModule[], level = 0, visited = new Set<number>()): UiModule[] => {
   const result: UiModule[] = []
+  if (!Array.isArray(modules)) return result
   for (const mod of modules) {
     if (visited.has(mod.id)) continue
     visited.add(mod.id)
@@ -497,7 +498,7 @@ const fetchModules = async () => {
   try {
     const res = await moduleApi.tree(projectId.value)
     const modules = extractResponseData<UiModule[]>(res) || []
-    moduleOptions.value = flattenModules(modules)
+    moduleOptions.value = flattenModules(Array.isArray(modules) ? modules : [])
   } catch {
     Message.error(pageText.value.fetchModuleListFailed)
   }

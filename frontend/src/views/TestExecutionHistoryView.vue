@@ -337,9 +337,10 @@ const fetchExecutions = async () => {
 
     if (response.success && response.data) {
       // 筛选状态
+      const list = Array.isArray(response.data) ? response.data : [];
       const filteredData = statusFilter.value
-        ? response.data.filter(item => item.status === statusFilter.value)
-        : response.data;
+        ? list.filter(item => item.status === statusFilter.value)
+        : list;
       
       executionData.value = filteredData;
       paginationConfig.total = filteredData.length;

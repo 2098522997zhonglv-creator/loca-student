@@ -264,7 +264,8 @@ const fetchAllUsers = async () => {
     if (response.success && response.data) {
       // 过滤掉已经是组织成员的用户
       const memberIds = membersData.value.map(member => member.id);
-      const filteredUsers = response.data.filter(user => !memberIds.includes(user.id));
+      const users = Array.isArray(response.data) ? response.data : [];
+      const filteredUsers = users.filter(user => !memberIds.includes(user.id));
 
       // 转换为下拉选择框需要的格式
       availableUsers.value = filteredUsers.map(user => ({

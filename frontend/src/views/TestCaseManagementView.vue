@@ -334,10 +334,10 @@ const fetchAllModulesForForm = async () => {
     return;
   }
   try {
-    const response = await getTestCaseModules(currentProjectId.value, {}); // 获取所有模块
+    const response = await getTestCaseModules(currentProjectId.value, { pageSize: 1000 }); // 获取所有模块
     if (response.success && response.data) {
-      allModules.value = response.data;
-      moduleTreeForForm.value = buildModuleTree(response.data);
+      allModules.value = Array.isArray(response.data) ? response.data : [];
+      moduleTreeForForm.value = buildModuleTree(allModules.value);
     } else {
       allModules.value = [];
       moduleTreeForForm.value = [];
@@ -352,6 +352,7 @@ const fetchAllModulesForForm = async () => {
 
 // 构建模块树 (扁平列表转树形) - 这个函数也可以放到 utils 中
 const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = null): TreeNodeData[] => {
+  if (!Array.isArray(modules)) return [];
   return modules
     .filter(module => module.parent === parentId || module.parent_id === parentId)
     .map(module => ({

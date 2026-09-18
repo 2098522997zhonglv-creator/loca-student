@@ -1,6 +1,7 @@
 import axios from 'axios'; // 使用 axios 替代 apiClient
 import { useAuthStore } from '@/store/authStore'; // 导入 authStore 获取 token
 import { API_BASE_URL } from '@/config/api'; // 统一 API 基础地址（开发环境走 Vite 代理 /api，避免直连后端跨域）
+import { normalizeListPayload } from '@/utils/responseHelpers';
 // import type { APIResponse } from './types'; // 暂时在下方定义
 
 // 通用 API 响应类型
@@ -137,12 +138,13 @@ export const getTestCaseModules = async (
       },
     });
 
-    // 处理API响应格式
-    if (response.data.status === 'success' && response.data.data) {
+    // 处理API响应格式（兼容分页 {count,results} 与裸数组）
+    if (response.data.status === 'success' && response.data.data != null) {
+      const { results, count } = normalizeListPayload<TestCaseModule>(response.data.data);
       return {
         success: true,
-        data: response.data.data, // 直接使用 data 字段
-        total: response.data.data.length, // 使用数组长度作为总数
+        data: results,
+        total: count,
         statusCode: response.data.code,
       };
     } else {

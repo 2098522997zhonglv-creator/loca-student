@@ -843,7 +843,7 @@ const loadSessionsFromServer = async () => {
       // 优先使用 sessions_detail（包含标题和时间），避免 N+1 查询
       const sessionsDetail = response.data.sessions_detail;
       
-      if (sessionsDetail && sessionsDetail.length > 0) {
+      if (Array.isArray(sessionsDetail) && sessionsDetail.length > 0) {
         // 直接使用后端返回的会话详情
         const tempSessions: ChatSession[] = sessionsDetail.map(detail => {
           const timeStr = detail.updated_at || detail.created_at;
@@ -2238,7 +2238,7 @@ watch(() => projectStore.currentProjectId, async (newProjectId, oldProjectId) =>
 const loadCurrentLlmConfig = async () => {
   try {
     const response = await listLlmConfigs();
-    if (response.status === 'success' && response.data) {
+    if (response.status === 'success' && Array.isArray(response.data)) {
       const activeConfig = response.data.find(config => config.is_active);
       if (activeConfig) {
         currentLlmConfig.value = activeConfig;

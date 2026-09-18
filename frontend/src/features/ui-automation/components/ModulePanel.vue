@@ -107,23 +107,26 @@ const formData = ref<UiModuleForm>({
 
 // 过滤后的树数据（搜索功能）
 const filteredTreeData = computed(() => {
-  if (!searchKeyword.value.trim()) return treeData.value;
+  const source = Array.isArray(treeData.value) ? treeData.value : [];
+  if (!searchKeyword.value.trim()) return source;
 
   const keyword = searchKeyword.value.toLowerCase();
   const filterTree = (nodes: UiModule[]): UiModule[] => {
+    if (!Array.isArray(nodes)) return [];
     return nodes.reduce((acc, node) => {
       const nodeName = (node.name || '').toLowerCase();
-      const children = node.children ? filterTree(node.children) : [];
+      const children = node.children ? filterTree(node.children as UiModule[]) : [];
       if (nodeName.includes(keyword) || children.length > 0) {
         acc.push({ ...node, children: children.length > 0 ? children : [] });
       }
       return acc;
     }, [] as UiModule[]);
   };
-  return filterTree(treeData.value);
+  return filterTree(source);
 });
 
 const mapTreeData = (modules: UiModule[]): any[] => {
+  if (!Array.isArray(modules)) return []
   return modules.map(module => ({
     ...module,
     key: module.id,

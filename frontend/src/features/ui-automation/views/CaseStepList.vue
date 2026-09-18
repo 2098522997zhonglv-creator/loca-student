@@ -348,10 +348,11 @@ const onPageStepChange = async () => {
 }
 
 const filteredPageStepOptions = computed(() => {
+  const options = Array.isArray(pageStepOptions.value) ? pageStepOptions.value : []
   if (selectedModule.value === undefined || selectedModule.value === null) {
-    return pageStepOptions.value
+    return options
   }
-  return pageStepOptions.value.filter(step => step.module === selectedModule.value)
+  return options.filter(step => step.module === selectedModule.value)
 })
 
 const onModuleChange = () => {

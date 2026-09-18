@@ -783,7 +783,8 @@ const fetchAvailableUsers = async () => {
     if (response.success && response.data) {
       // 过滤掉已经是项目成员的用户
       const memberUserIds = projectMembers.value.map(member => member.user);
-      const filteredUsers = response.data.filter(user => !memberUserIds.includes(user.id));
+      const users = Array.isArray(response.data) ? response.data : [];
+      const filteredUsers = users.filter(user => !memberUserIds.includes(user.id));
 
       // 转换为下拉选择框需要的格式
       availableUsers.value = filteredUsers.map(user => ({

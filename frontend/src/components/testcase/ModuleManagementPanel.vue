@@ -117,9 +117,9 @@ const fetchTestCaseModules = async () => {
   if (!currentProjectId.value) return;
   moduleLoading.value = true;
   try {
-    const response = await getTestCaseModules(currentProjectId.value, { search: moduleSearchKeyword.value }); // 假设API支持search参数
+    const response = await getTestCaseModules(currentProjectId.value, { search: moduleSearchKeyword.value, pageSize: 1000 }); // 假设API支持search参数
     if (response.success && response.data) {
-      testCaseModules.value = response.data;
+      testCaseModules.value = Array.isArray(response.data) ? response.data : [];
     } else {
       Message.error(response.error || '获取模块列表失败');
       testCaseModules.value = [];
@@ -135,6 +135,7 @@ const fetchTestCaseModules = async () => {
 
 // 构建模块树 (扁平列表转树形)
 const buildModuleTree = (modules: TestCaseModule[], parentId: number | null = null): TreeNodeData[] => {
+  if (!Array.isArray(modules)) return [];
   return modules
     .filter(module => module.parent === parentId || module.parent_id === parentId)
     .map(module => ({

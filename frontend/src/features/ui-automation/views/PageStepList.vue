@@ -253,7 +253,8 @@ const formRef = ref()
 // 根据表单选择的模块过滤页面选项
 const filteredPageOptions = computed(() => {
   if (!formData.module) return []
-  return pageOptions.value.filter((p) => p.module === formData.module)
+  const options = Array.isArray(pageOptions.value) ? pageOptions.value : []
+  return options.filter((p) => p.module === formData.module)
 })
 
 const filters = reactive({ page: undefined as number | undefined, module: undefined as number | undefined, search: '' })

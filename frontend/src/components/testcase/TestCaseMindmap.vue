@@ -1887,11 +1887,13 @@ const buildMindmapTree = (expandStates?: Record<string, boolean>): any => {
   const projName = props.projectName || mindmapDefaultName.value;
   const themeCfg = themeColorMap[activeTheme.value] || themeColorMap.classic;
   const isDarkOrBlackGold = activeTheme.value === 'dark' || activeTheme.value === 'blackGold';
+  const modules = Array.isArray(props.modules) ? props.modules : [];
+  const allTestCases = Array.isArray(props.testCases) ? props.testCases : [];
   
   // 递归处理模块
   const buildModuleNode = (mod: TestCaseModule): any => {
     // 过滤出该模块下的用例
-    const cases = props.testCases.filter(c => c.module_id === mod.id);
+    const cases = allTestCases.filter(c => c.module_id === mod.id);
     
     // 子用例节点
     const caseNodes = cases.map(tc => {
@@ -1985,7 +1987,7 @@ const buildMindmapTree = (expandStates?: Record<string, boolean>): any => {
     });
 
     // 子模块节点
-    const subModules = props.modules.filter(m => m.parent === mod.id || m.parent_id === mod.id);
+    const subModules = modules.filter(m => m.parent === mod.id || m.parent_id === mod.id);
     const subModuleNodes = subModules.map(buildModuleNode);
     const moduleUid = `module-${mod.id}`;
 
@@ -2012,18 +2014,18 @@ const buildMindmapTree = (expandStates?: Record<string, boolean>): any => {
   let topModules: TestCaseModule[] = [];
 
   if (props.selectedModuleId) {
-    const selectedMod = props.modules.find(m => m.id === props.selectedModuleId);
+    const selectedMod = modules.find(m => m.id === props.selectedModuleId);
     if (selectedMod) {
       rootText = selectedMod.name;
-      topModules = props.modules.filter(m => m.parent === props.selectedModuleId || m.parent_id === props.selectedModuleId);
+      topModules = modules.filter(m => m.parent === props.selectedModuleId || m.parent_id === props.selectedModuleId);
     }
   } else {
     // 项目根节点下的顶级模块
-    topModules = props.modules.filter(m => !m.parent && !m.parent_id);
+    topModules = modules.filter(m => !m.parent && !m.parent_id);
   }
 
   // 顶级用例（属于当前展示根节点、且不属于任何更深子模块的用例）
-  const topCases = props.testCases.filter(c => {
+  const topCases = allTestCases.filter(c => {
     if (props.selectedModuleId) {
       return c.module_id === props.selectedModuleId;
     }
