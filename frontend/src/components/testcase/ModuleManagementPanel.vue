@@ -155,10 +155,11 @@ const moduleTreeData = computed(() => {
 
 // 用于 TreeSelect 的模块树数据 (排除当前编辑的模块及其子模块，防止循环引用)
 const moduleTreeForSelect = computed(() => {
+  const modules = Array.isArray(testCaseModules.value) ? testCaseModules.value : [];
   if (isEditingModule.value && moduleForm.id) {
-    const filterOutIds = getAllChildModuleIds(testCaseModules.value, moduleForm.id);
+    const filterOutIds = getAllChildModuleIds(modules, moduleForm.id);
     filterOutIds.add(moduleForm.id); // Also filter out the module itself
-    const filteredModules = testCaseModules.value.filter(m => !filterOutIds.has(m.id));
+    const filteredModules = modules.filter(m => !filterOutIds.has(m.id));
     return buildModuleTree(filteredModules);
   }
   return moduleTreeData.value;
@@ -167,6 +168,7 @@ const moduleTreeForSelect = computed(() => {
 // 获取一个模块及其所有子模块的ID
 const getAllChildModuleIds = (modules: TestCaseModule[], parentId: number): Set<number> => {
   const childrenIds = new Set<number>();
+  if (!Array.isArray(modules)) return childrenIds;
   const findChildren = (currentParentId: number) => {
     modules.forEach(module => {
       if (module.parent === currentParentId || module.parent_id === currentParentId) {
@@ -303,7 +305,8 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
       break;
     case 'edit':
       if (selectedModuleKey.value) {
-        const moduleToEdit = testCaseModules.value.find(m => m.id === selectedModuleKey.value);
+        const modules = Array.isArray(testCaseModules.value) ? testCaseModules.value : [];
+        const moduleToEdit = modules.find(m => m.id === selectedModuleKey.value);
         if (moduleToEdit) {
           isEditingModule.value = true;
           moduleForm.id = moduleToEdit.id;
@@ -317,9 +320,10 @@ const handleModuleAction = async (action: string | number | Record<string, any> 
       break;
     case 'delete':
       if (selectedModuleKey.value) {
-        const moduleToDelete = testCaseModules.value.find(m => m.id === selectedModuleKey.value);
+        const modules = Array.isArray(testCaseModules.value) ? testCaseModules.value : [];
+        const moduleToDelete = modules.find(m => m.id === selectedModuleKey.value);
         if (moduleToDelete) {
-          const children = testCaseModules.value.filter(m => m.parent === selectedModuleKey.value || m.parent_id === selectedModuleKey.value);
+          const children = modules.filter(m => m.parent === selectedModuleKey.value || m.parent_id === selectedModuleKey.value);
           if (children.length > 0) {
             Message.error('该模块下有子模块，请先删除子模块');
             return;

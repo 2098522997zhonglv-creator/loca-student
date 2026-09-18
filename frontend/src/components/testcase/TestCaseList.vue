@@ -582,8 +582,9 @@ const fetchTestCases = async () => {
       ordering: selectedOrdering.value || undefined,
     });
     if (response.success && response.data) {
-      testCaseData.value = response.data;
-      paginationConfig.total = response.total || response.data.length;
+      const list = Array.isArray(response.data) ? response.data : [];
+      testCaseData.value = list;
+      paginationConfig.total = response.total || list.length;
       // 清空之前页面的选中状态
       selectedTestCaseIds.value = [];
     } else {

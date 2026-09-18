@@ -804,7 +804,8 @@ const fetchTestCasesForMindmap = async (silent = false) => {
         return;
       }
 
-      allCases.push(...response.data);
+      const pageCases = Array.isArray(response.data) ? response.data : [];
+      allCases.push(...pageCases);
       total = response.total ?? allCases.length;
       page += 1;
     } while (allCases.length < total);
