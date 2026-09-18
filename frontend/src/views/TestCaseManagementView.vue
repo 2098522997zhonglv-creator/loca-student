@@ -61,6 +61,7 @@
           @copy-case="handleMindmapCopyCase"
           @copy-module="handleMindmapCopyModule"
           @copy-step="handleMindmapCopyStep"
+          @generate-test-cases="showGenerateCasesModal"
           ref="testCaseMindmapRef"
         />
 
@@ -116,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, computed, watch, onMounted, inject } from 'vue';
+import { h, ref, computed, watch, onMounted, onActivated, inject } from 'vue';
 import { useRouter } from 'vue-router';
 import { useProjectStore } from '@/store/projectStore';
 import { useAppI18n } from '@/composables/useAppI18n';
@@ -207,14 +208,15 @@ const taskText = computed(() => (
         invalidProjectId: 'No valid project ID',
         missingProjectId: 'Missing valid project ID',
         generationStarted: 'Generation started',
-        generationStartedContent: 'Case generation task has started processing in the background.',
+        generationStartedContent: 'Redirecting to Knowledge Q&A to view generation progress.',
         titleGenerationStarted: 'Title generation started',
-        titleGenerationStartedContent: 'Case title generation task has started processing in the background.',
+        titleGenerationStartedContent: 'Redirecting to Knowledge Q&A to view title generation progress.',
         completionStarted: 'Completion started',
-        completionStartedContent: 'Case completion task has started processing in the background.',
+        completionStartedContent: 'Redirecting to Knowledge Q&A to view completion progress.',
         knowledgeGenerationStarted: 'Knowledge generation started',
-        knowledgeGenerationStartedContent: 'Knowledge-based case generation task has started processing in the background.',
-        viewGenerationProgress: 'Click to view generation progress',
+        knowledgeGenerationStartedContent: 'Redirecting to Knowledge Q&A to view knowledge generation progress.',
+        viewGenerationProgress: 'Open Knowledge Q&A',
+        generationFailed: 'Case generation failed',
         executionStarted: 'Execution started',
         executionStartedContent: 'Case execution task has started processing in the background.',
         executionStartedWithGenerationContent: 'Case execution task has started processing in the background. UI automation case generation will continue after execution is completed.',
@@ -229,14 +231,15 @@ const taskText = computed(() => (
         invalidProjectId: '没有有效的项目ID',
         missingProjectId: '缺少有效的项目ID',
         generationStarted: '生成已开始',
-        generationStartedContent: '用例生成任务已在后台开始处理。',
+        generationStartedContent: '已跳转至知识问答查看生成过程。',
         titleGenerationStarted: '标题生成已开始',
-        titleGenerationStartedContent: '用例标题生成任务已在后台开始处理。',
+        titleGenerationStartedContent: '已跳转至知识问答查看标题生成过程。',
         completionStarted: '补全已开始',
-        completionStartedContent: '用例补全任务已在后台开始处理。',
+        completionStartedContent: '已跳转至知识问答查看补全过程。',
         knowledgeGenerationStarted: '知识生成已开始',
-        knowledgeGenerationStartedContent: '用例知识生成任务已在后台开始处理。',
-        viewGenerationProgress: '点此查看生成过程',
+        knowledgeGenerationStartedContent: '已跳转至知识问答查看知识生成过程。',
+        viewGenerationProgress: '打开知识问答',
+        generationFailed: '用例生成失败',
         executionStarted: '执行已开始',
         executionStartedContent: '测试用例执行任务已在后台开始处理。',
         executionStartedWithGenerationContent: '测试用例执行任务已在后台开始处理，执行完成后将继续生成 UI 自动化用例。',
@@ -270,13 +273,19 @@ const testCaseListRef = ref<InstanceType<typeof TestCaseList> | null>(null);
 const allModules = ref<TestCaseModule[]>([]);
 const moduleTreeForForm = ref<TreeNodeData[]>([]); // 用于表单的模块树
 
+const GEN_REFRESH_KEY = 'testcase_gen_pending_refresh';
+
 const startAutomationTask = (
   requestData: ChatRequest,
   notificationTitle: string,
   notificationContent: string,
   notificationIdPrefix: string,
-  footerLinkText: string
+  footerLinkText: string,
+  options?: { autoNavigateToChat?: boolean; markListRefresh?: boolean }
 ) => {
+  const autoNavigateToChat = options?.autoNavigateToChat === true;
+  const markListRefresh = options?.markListRefresh === true;
+
   sendChatMessageStream(
     requestData,
     (sessionId) => {
@@ -295,6 +304,16 @@ const startAutomationTask = (
         topK: 5 // 默认值
       };
       localStorage.setItem('langgraph_knowledge_settings', JSON.stringify(knowledgeSettings));
+
+      if (markListRefresh) {
+        sessionStorage.setItem(GEN_REFRESH_KEY, '1');
+      }
+
+      if (autoNavigateToChat) {
+        Message.success(`${notificationTitle}：${notificationContent}`);
+        router.push({ name: 'LangGraphChat' });
+        return;
+      }
 
       const notificationReturn = Notification.info({
         title: notificationTitle,
@@ -323,8 +342,24 @@ const startAutomationTask = (
         duration: 10000,
         id: `${notificationIdPrefix}-${sessionId}`,
       });
+    },
+    {
+      onError: (error) => {
+        Message.error(error.message || taskText.value.generationFailed);
+      },
     }
   );
+};
+
+const refreshAfterGenerationIfNeeded = async () => {
+  if (sessionStorage.getItem(GEN_REFRESH_KEY) !== '1') return;
+  sessionStorage.removeItem(GEN_REFRESH_KEY);
+  await Promise.all([
+    Promise.resolve(testCaseListRef.value?.refreshTestCases?.()),
+    fetchTestCasesForMindmap(true),
+    fetchAllModulesForForm(),
+    Promise.resolve(modulePanelRef.value?.refreshModules?.()),
+  ]);
 };
 
 const fetchAllModulesForForm = async () => {
@@ -637,7 +672,8 @@ ${formData.selectedModules.length > 0 ? formData.selectedModules.map((mod, idx) 
     notificationTitle,
     notificationContent,
     notificationIdPrefix,
-    taskText.value.viewGenerationProgress
+    taskText.value.viewGenerationProgress,
+    { autoNavigateToChat: true, markListRefresh: true }
   );
 };
 
@@ -1429,6 +1465,11 @@ onMounted(() => {
   if (currentProjectId.value) {
     fetchAllModulesForForm();
   }
+  void refreshAfterGenerationIfNeeded();
+});
+
+onActivated(() => {
+  void refreshAfterGenerationIfNeeded();
 });
 
 </script>

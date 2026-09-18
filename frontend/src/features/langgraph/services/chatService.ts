@@ -380,8 +380,14 @@ async function refreshAccessToken(): Promise<string | null> {
 export async function sendChatMessageStream(
   data: ChatRequest,
   onStart: (sessionId: string) => void, // 简化回调，只保留 onStart
-  signal?: AbortSignal
+  signalOrOptions?: AbortSignal | { signal?: AbortSignal; onError?: (error: Error) => void },
 ): Promise<void> {
+  const options = signalOrOptions instanceof AbortSignal || signalOrOptions == null
+    ? { signal: signalOrOptions as AbortSignal | undefined }
+    : signalOrOptions;
+  const signal = options.signal;
+  const onError = options.onError;
+
   const authStore = useAuthStore();
   let token = authStore.getAccessToken;
   let streamSessionId: string | null = data.session_id || null;
@@ -409,6 +415,10 @@ export async function sendChatMessageStream(
     if (sessionId && activeStreams.value[sessionId]) {
       activeStreams.value[sessionId].error = error.message || '流式请求失败';
       activeStreams.value[sessionId].isComplete = true;
+    }
+    if (onError) {
+      const err = error instanceof Error ? error : new Error(error?.message || '流式请求失败');
+      onError(err);
     }
   };
 

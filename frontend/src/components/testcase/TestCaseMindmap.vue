@@ -57,10 +57,15 @@
       </div>
 
       <div class="toolbar-right">
-        <div class="tip-text">
-          <icon-info-circle-fill class="tip-icon" />
-          <span><b>{{ tl('操作提示：') }}</b>{{ tl('单击选中 | 双击重命名 | 叶子节点右侧 + 可直接新增 | 左键框选节点 | 右键拖动画布/右键点按打开菜单 | 拖动调整模块') }}</span>
-        </div>
+        <a-space>
+          <a-button type="primary" :disabled="loading" @click="emit('generate-test-cases')">
+            {{ tl('生成用例') }}
+          </a-button>
+          <div class="tip-text">
+            <icon-info-circle-fill class="tip-icon" />
+            <span><b>{{ tl('操作提示：') }}</b>{{ tl('单击选中 | 双击重命名 | 叶子节点右侧 + 可直接新增 | 左键框选节点 | 右键拖动画布/右键点按打开菜单 | 拖动调整模块') }}</span>
+          </div>
+        </a-space>
       </div>
     </div>
 
@@ -457,6 +462,7 @@ const emit = defineEmits<{
   (e: 'copy-module', moduleId: number, targetParentId: number | null): void;
   (e: 'copy-step', sourceCaseId: number, stepNumber: number, targetCaseId: number): void;
   (e: 'delete-nodes', items: { type: string; rawId: number; extraId?: number }[]): void;
+  (e: 'generate-test-cases'): void;
 }>();
 
 const mindMapContainerRef = ref<HTMLDivElement | null>(null);

@@ -23,6 +23,7 @@
           </a-radio-group>
         </div>
       </div>
+      <div v-if="modeHint" class="mode-hint">{{ modeHint }}</div>
 
       <!-- 测试类型选择（所有模式通用） -->
       <div class="form-row test-type-row">
@@ -293,6 +294,8 @@ const modulesLoading = ref(false);
 const testCaseData = ref<TestCase[]>([]);
 const moduleList = ref<TestCaseModule[]>([]);
 const selectedTestCaseIds = ref<number[]>([]);
+/** 跨页勾选缓存：翻页后仍保留完整用例摘要，供提交提示词使用 */
+const selectedTestCaseById = ref<Record<number, TestCase>>({});
 const searchKeyword = ref('');
 const selectedModule = ref<number | undefined>(undefined);
 const selectedLevel = ref<string>('');
@@ -452,6 +455,23 @@ const formState = reactive({
   testTypes: ['functional'] as string[],
 });
 
+const modeHint = computed(() => {
+  const hints: Record<string, string> = isEnglish.value
+    ? {
+        full: 'Generate full cases (title + steps) from requirement modules.',
+        title_only: 'Generate case titles only; no steps.',
+        kb_complete: 'Complete selected cases using the knowledge base.',
+        kb_generate: 'Generate cases from requirements with knowledge-base context.',
+      }
+    : {
+        full: '根据需求模块生成完整用例（标题+步骤）。',
+        title_only: '仅生成用例标题，不生成步骤。',
+        kb_complete: '基于知识库补全已选用例内容。',
+        kb_generate: '结合需求与知识库生成用例。',
+      };
+  return hints[formState.generateMode] || '';
+});
+
 const currentProjectName = computed(() => projectStore.currentProject?.name || pageText.value.unnamedProject);
 
 // 是否显示需求文档相关字段
@@ -498,10 +518,13 @@ const isCurrentPageIndeterminate = computed(() => {
 });
 
 const handleCancel = () => {
+  isLoading.value = false;
   emit('update:visible', false);
 };
 
 const handleOk = () => {
+  if (isLoading.value) return;
+
   // 验证测试类型
   if (!formState.testTypes || formState.testTypes.length === 0) {
     Message.error(pageText.value.testTypeRequired);
@@ -548,13 +571,16 @@ const handleOk = () => {
   }
 
   const selectedReqModules = requirementModules.value.filter(m => formState.requirementModuleIds.includes(m.id));
-  const selectedTestCases = testCaseData.value.filter(tc => selectedTestCaseIds.value.includes(tc.id));
+  const selectedTestCases = selectedTestCaseIds.value
+    .map((id) => selectedTestCaseById.value[id])
+    .filter((tc): tc is TestCase => Boolean(tc));
 
+  isLoading.value = true;
   emit('submit', {
     ...formState,
     selectedModules: selectedReqModules,
-    selectedTestCaseIds: selectedTestCaseIds.value,
-    selectedTestCases: selectedTestCases,
+    selectedTestCaseIds: [...selectedTestCaseIds.value],
+    selectedTestCases,
   });
 };
 
@@ -562,6 +588,7 @@ const handleOk = () => {
 const handleModeChange = () => {
   // 清空用例选择
   selectedTestCaseIds.value = [];
+  selectedTestCaseById.value = {};
   // 如果切换到需要用例选择的模式，加载用例
   if (showTestCaseSelector.value) {
     fetchTestCases();
@@ -630,7 +657,13 @@ const fetchPrompts = async () => {
     // 获取 "general" 类型的提示词
     const response = await getUserPrompts({ prompt_type: 'general' });
     if (response.status === 'success') {
-       prompts.value = toArray<UserPrompt>((response.data as UserPromptListResponseData)?.results ?? response.data);
+      prompts.value = toArray<UserPrompt>((response.data as UserPromptListResponseData)?.results ?? response.data);
+      if (!formState.promptId && prompts.value.length > 0) {
+        const preferred = prompts.value.find((p) =>
+          (p.name || '').includes('智能用例生成') || (p.name || '').toLowerCase().includes('smart test case')
+        );
+        formState.promptId = preferred?.id ?? prompts.value[0].id;
+      }
     } else {
       Message.error(response.message || pageText.value.loadPromptsFailed);
       prompts.value = [];
@@ -676,8 +709,17 @@ const fetchTestCases = async () => {
     });
 
     if (response.success && response.data) {
-      testCaseData.value = response.data;
-      paginationConfig.total = response.total || response.data.length;
+      const list = Array.isArray(response.data) ? response.data : [];
+      testCaseData.value = list;
+      paginationConfig.total = response.total || list.length;
+      // 同步刷新已选缓存中的当前页行数据
+      if (Object.keys(selectedTestCaseById.value).length > 0) {
+        const nextMap = { ...selectedTestCaseById.value };
+        list.forEach((item) => {
+          if (nextMap[item.id]) nextMap[item.id] = item;
+        });
+        selectedTestCaseById.value = nextMap;
+      }
     } else {
       Message.error(response.error || pageText.value.loadTestCasesFailed);
       testCaseData.value = [];
@@ -718,24 +760,39 @@ const handleCheckboxChange = (id: number, checked: boolean) => {
     if (!selectedTestCaseIds.value.includes(id)) {
       selectedTestCaseIds.value.push(id);
     }
+    const row = testCaseData.value.find((tc) => tc.id === id);
+    if (row) {
+      selectedTestCaseById.value = { ...selectedTestCaseById.value, [id]: row };
+    }
   } else {
     const index = selectedTestCaseIds.value.indexOf(id);
     if (index > -1) {
       selectedTestCaseIds.value.splice(index, 1);
     }
+    const next = { ...selectedTestCaseById.value };
+    delete next[id];
+    selectedTestCaseById.value = next;
   }
 };
 
 const handleSelectCurrentPage = (checked: boolean) => {
   if (checked) {
+    const nextMap = { ...selectedTestCaseById.value };
     testCaseData.value.forEach((item) => {
       if (!selectedTestCaseIds.value.includes(item.id)) {
         selectedTestCaseIds.value.push(item.id);
       }
+      nextMap[item.id] = item;
     });
+    selectedTestCaseById.value = nextMap;
   } else {
     const currentPageIds = testCaseData.value.map((item) => item.id);
     selectedTestCaseIds.value = selectedTestCaseIds.value.filter((id) => !currentPageIds.includes(id));
+    const nextMap = { ...selectedTestCaseById.value };
+    currentPageIds.forEach((id) => {
+      delete nextMap[id];
+    });
+    selectedTestCaseById.value = nextMap;
   }
 };
 
@@ -768,6 +825,7 @@ const onPageSizeChange = (pageSize: number) => {
 watch(() => props.visible, (newVal) => {
   if (newVal) {
     // 每次打开弹窗时重置表单
+    isLoading.value = false;
     formState.generateMode = 'full';
     formState.requirementDocumentId = null;
     formState.requirementModuleIds = [];
@@ -782,6 +840,7 @@ watch(() => props.visible, (newVal) => {
     knowledgeBases.value = [];
     // 重置用例选择状态
     selectedTestCaseIds.value = [];
+    selectedTestCaseById.value = {};
     searchKeyword.value = '';
     selectedModule.value = undefined;
     selectedLevel.value = '';
@@ -792,6 +851,8 @@ watch(() => props.visible, (newVal) => {
     fetchRequirementDocuments();
     fetchPrompts();
     fetchKnowledgeBases();
+  } else {
+    isLoading.value = false;
   }
 });
 
@@ -802,9 +863,16 @@ watch(() => props.visible, (newVal) => {
   display: flex;
   align-items: center;
   gap: 48px;
-  margin-bottom: 16px;
+  margin-bottom: 8px;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--color-border-2);
+}
+
+.mode-hint {
+  margin: -4px 0 16px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .header-item {
