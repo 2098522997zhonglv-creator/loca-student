@@ -27,6 +27,7 @@ Write-UpdateLog "After pull HEAD=$after changed=$changed"
 
 $needFrontendBuild = $false
 $needPipInstall = $false
+$needMigrate = $false
 
 if ($changed) {
     $diffFiles = git diff --name-only "$before" "$after"
@@ -35,6 +36,9 @@ if ($changed) {
     }
     if ($diffFiles | Select-String -Pattern '^(requirements\.txt|backend/requirements\.txt|environment\.yml)') {
         $needPipInstall = $true
+    }
+    if ($diffFiles | Select-String -Pattern '^backend/.*/migrations/') {
+        $needMigrate = $true
     }
     # First-time or missing dist after pull of frontend changes
     if (-not (Test-Path (Join-Path $script:RepoRoot "frontend\dist\index.html"))) {
@@ -48,6 +52,17 @@ if ($needPipInstall) {
     Write-UpdateLog "Installing Python requirements..."
     & $script:PythonExe -m pip install -r (Join-Path $script:RepoRoot "requirements.txt")
     if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+}
+
+if ($needMigrate) {
+    Write-UpdateLog "Running Django migrations..."
+    Push-Location (Join-Path $script:RepoRoot "backend")
+    try {
+        & $script:PythonExe manage.py migrate --noinput
+        if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
+    } finally {
+        Pop-Location
+    }
 }
 
 if ($needFrontendBuild) {
