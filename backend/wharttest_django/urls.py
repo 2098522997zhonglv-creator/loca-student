@@ -58,8 +58,23 @@ urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
 
 # After `npm run build`, Django's local server can serve the SPA as one process.
 if (settings.FRONTEND_DIST / "index.html").exists():
-    from django.views.generic import TemplateView
+    from django.http import FileResponse, Http404
     from django.views.static import serve
+
+    def spa_index(_request):
+        """Always serve the latest Vite index.html and forbid caching it.
+
+        Asset filenames are content-hashed; stale cached index.html points at
+        deleted chunks and causes 404 / MIME errors after every rebuild.
+        """
+        index_path = settings.FRONTEND_DIST / "index.html"
+        if not index_path.is_file():
+            raise Http404("frontend dist/index.html missing")
+        response = FileResponse(index_path.open("rb"), content_type="text/html; charset=utf-8")
+        response["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response["Pragma"] = "no-cache"
+        response["Expires"] = "0"
+        return response
 
     urlpatterns += [
         re_path(r"^assets/(?P<path>.*)$", serve, {"document_root": settings.FRONTEND_DIST / "assets"}),
@@ -71,7 +86,7 @@ if (settings.FRONTEND_DIST / "index.html").exists():
         ),
         re_path(
             r"^(?!api/|admin/|media/|static/|assets/).*$",
-            TemplateView.as_view(template_name="index.html"),
+            spa_index,
             name="spa-fallback",
         ),
     ]
