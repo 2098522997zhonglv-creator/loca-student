@@ -14,8 +14,10 @@
 | 对话附件 | `file_management` | 文件管理和附件选择器 |
 | 外部工具扩展 | `mcp_tools`, `skills`, `api_keys` | MCP、Skills、API Key |
 | 审计 | `operation_logs` | 操作日志 |
+| 用例管理、套件、执行、思维导图 | `testcases`, `testcase_templates` | 用例管理（含脑图）/套件/执行历史/模板 |
+| UI 自动化（页面/步骤/执行记录） | `ui_automation` | UI自动化（WebSocket 需 Daphne） |
 
-测试用例、接口自动化、UI 自动化、执行器、定时任务和微信插件不属于本项目运行边界。
+接口自动化、定时任务中心和微信插件仍不属于本项目运行边界。UI 自动化的远程浏览器执行依赖独立 Actuator 客户端。
 
 ## 数据层级
 

@@ -30,6 +30,8 @@
     "marked": "^15.0.12",
     "monaco-editor": "^0.55.1",
     "pinia": "^3.0.2",
+    "simple-mind-map": "^0.14.0-fix.2",
+    "@svgdotjs/svg.js": "^3.2.4",
     "vue": "^3.5.13",
     "vue-router": "^4.5.1"
   },

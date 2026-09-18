@@ -91,26 +91,26 @@ function Start-KnowledgeCenter {
         return
     }
 
-    # --noreload: restarts are driven solely by Update-And-Restart.ps1, so a
-    # git pull can't kill an in-flight requirement review mid-run.
+    # UI 自动化需要 WebSocket，必须用 ASGI（daphne）。
+    # 工作目录切到 backend，保证 Django settings / asgi 模块可导入。
     $argList = @(
-        "backend\manage.py",
-        "runserver",
-        "$($script:BindHost):$($script:Port)",
-        "--noreload"
+        "-m", "daphne",
+        "-b", $script:BindHost,
+        "-p", "$($script:Port)",
+        "wharttest_django.asgi:application"
     )
 
     $proc = Start-Process `
         -FilePath $script:PythonExe `
         -ArgumentList $argList `
-        -WorkingDirectory $script:RepoRoot `
+        -WorkingDirectory (Join-Path $script:RepoRoot "backend") `
         -WindowStyle Hidden `
         -RedirectStandardOutput $script:OutLog `
         -RedirectStandardError $script:ErrLog `
         -PassThru
 
     Set-Content -Path $script:PidFile -Value $proc.Id -Encoding ASCII
-    Write-UpdateLog "Started Django PID=$($proc.Id) at http://$($script:BindHost):$($script:Port)/"
+    Write-UpdateLog "Started Daphne PID=$($proc.Id) at http://$($script:BindHost):$($script:Port)/"
 }
 
 function Get-WorkerPid {

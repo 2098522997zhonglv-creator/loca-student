@@ -39,13 +39,18 @@ if DEBUG:
             CSRF_TRUSTED_ORIGINS.append(origin)
 
 INSTALLED_APPS = [
+    "daphne",
     "django.contrib.admin", "django.contrib.auth", "django.contrib.contenttypes",
     "django.contrib.sessions", "django.contrib.messages", "django.contrib.staticfiles",
     "rest_framework", "rest_framework_simplejwt", "django_filters", "corsheaders",
+    "channels",
     "drf_spectacular", "accounts.apps.AccountsConfig", "projects", "api_keys",
     "prompts", "file_management.apps.FileManagementConfig",
     "knowledge.apps.KnowledgeConfig", "requirements", "mcp_tools.apps.McpToolsConfig",
     "skills", "langgraph_integration", "orchestrator_integration", "operation_logs",
+    "testcases",
+    "testcase_templates",
+    "ui_automation",
 ]
 
 MIDDLEWARE = [
@@ -81,6 +86,12 @@ TEMPLATES = [{
 WSGI_APPLICATION = "wharttest_django.wsgi.application"
 ASGI_APPLICATION = "wharttest_django.asgi.application"
 
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer",
+    }
+}
+
 DATABASES = {"default": {
     "ENGINE": "django.db.backends.sqlite3",
     "NAME": Path(os.environ.get("DATABASE_PATH", DATA_DIR / "knowledge_center.sqlite3")),
@@ -88,9 +99,7 @@ DATABASES = {"default": {
 }}
 
 AUTH_PASSWORD_VALIDATORS = []
-LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = os.environ.get("TIME_ZONE", "Asia/Shanghai")
-USE_I18N = True
 USE_TZ = True
 STATIC_URL = "/static/"
 STATIC_ROOT = DATA_DIR / "static"

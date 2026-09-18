@@ -18,6 +18,11 @@ import FileManagementView from '@/features/file-management/views/FileManagementV
 import ApiKeyManagementView from '@/views/ApiKeyManagementView.vue'
 import RemoteMcpConfigManagementView from '@/views/RemoteMcpConfigManagementView.vue'
 import SkillsManagementView from '@/features/skills/views/SkillsManagementView.vue'
+import TestCaseManagementView from '@/views/TestCaseManagementView.vue'
+import TestSuiteManagementView from '@/views/TestSuiteManagementView.vue'
+import TestExecutionHistoryView from '@/views/TestExecutionHistoryView.vue'
+import TemplateManagementView from '@/features/testcase-templates/views/TemplateManagementView.vue'
+import UiAutomationView from '@/features/ui-automation/views/UiAutomationView.vue'
 
 const children: RouteRecordRaw[] = [
   { path: 'dashboard', name: 'Dashboard', component: KnowledgeHomeView },
@@ -28,6 +33,16 @@ const children: RouteRecordRaw[] = [
   { path: 'knowledge-management', name: 'KnowledgeManagement', component: KnowledgeManagementView },
   { path: 'langgraph-chat', name: 'LangGraphChat', component: LangGraphChatView },
   { path: 'file-management', name: 'FileManagement', component: FileManagementView },
+  { path: 'testcases', name: 'TestCaseManagement', component: TestCaseManagementView },
+  { path: 'test-suites', name: 'TestSuiteManagement', component: TestSuiteManagementView },
+  { path: 'test-executions', name: 'TestExecutionHistory', component: TestExecutionHistoryView },
+  { path: 'testcase-templates', name: 'TemplateManagement', component: TemplateManagementView },
+  { path: 'ui-automation', name: 'UiAutomation', component: UiAutomationView },
+  {
+    path: 'ui-automation/trace/:id',
+    name: 'UiAutomationTraceDetail',
+    component: () => import('@/features/ui-automation/views/TraceDetail.vue'),
+  },
   { path: 'users', name: 'UserManagement', component: UserManagementView },
   { path: 'organizations', name: 'OrganizationManagement', component: OrganizationManagementView },
   { path: 'permissions', name: 'PermissionManagement', component: PermissionManagementView },

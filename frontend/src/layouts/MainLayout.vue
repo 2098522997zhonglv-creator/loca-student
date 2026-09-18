@@ -28,6 +28,13 @@
         </a-select>
       </div>
 
+      <div v-if="isTestCaseManagementPage" class="view-switch">
+        <a-radio-group v-model="testCaseActiveView" type="button" size="small">
+          <a-radio value="list">列表视图</a-radio>
+          <a-radio value="mindmap">思维导图</a-radio>
+        </a-radio-group>
+      </div>
+
       <div class="spacer" />
 
       <div class="header-actions">
@@ -68,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/store/authStore'
 import { useProjectStore } from '@/store/projectStore'
@@ -80,6 +87,10 @@ const auth = useAuthStore()
 const projectStore = useProjectStore()
 const selectedProject = ref<number | undefined>(projectStore.currentProject?.id)
 
+const testCaseActiveView = ref<'list' | 'mindmap'>('list')
+provide('testCaseActiveView', testCaseActiveView)
+const isTestCaseManagementPage = computed(() => route.name === 'TestCaseManagement')
+
 const menuGroups = [
   {
     title: '工作台',
@@ -88,6 +99,11 @@ const menuGroups = [
       { path: '/projects', label: '项目管理' },
       { path: '/knowledge-management', label: '知识库' },
       { path: '/requirements', label: '需求评审' },
+      { path: '/testcases', label: '用例管理' },
+      { path: '/test-suites', label: '测试套件' },
+      { path: '/test-executions', label: '执行历史' },
+      { path: '/testcase-templates', label: '用例模板' },
+      { path: '/ui-automation', label: 'UI自动化' },
       { path: '/langgraph-chat', label: '知识问答' },
       { path: '/file-management', label: '文件管理' },
     ],
@@ -212,6 +228,10 @@ async function logout() {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.view-switch {
+  margin-left: 8px;
 }
 
 .project-label {

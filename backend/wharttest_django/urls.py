@@ -13,10 +13,24 @@ from accounts.views import MyTokenObtainPairView
 from file_management.views import FileAssetViewSet
 from projects.views import ProjectViewSet
 from skills.views import SkillViewSet
+from testcases.views import (
+    TestCaseViewSet,
+    TestCaseModuleViewSet,
+    TestSuiteViewSet,
+    TestExecutionViewSet,
+)
 
 router = DefaultRouter()
 router.register(r"projects", ProjectViewSet, basename="project")
 project_router = NestedSimpleRouter(router, r"projects", lookup="project")
+project_router.register(r"testcases", TestCaseViewSet, basename="project-testcases")
+project_router.register(
+    r"testcase-modules", TestCaseModuleViewSet, basename="project-testcase-modules"
+)
+project_router.register(r"test-suites", TestSuiteViewSet, basename="project-test-suites")
+project_router.register(
+    r"test-executions", TestExecutionViewSet, basename="project-test-executions"
+)
 project_router.register(r"skills", SkillViewSet, basename="project-skills")
 project_router.register(r"files", FileAssetViewSet, basename="project-files")
 
@@ -28,6 +42,8 @@ urlpatterns = [
     path("api/", include(router.urls)),
     path("api/", include(project_router.urls)),
     path("api/", include("api_keys.urls")),
+    path("api/", include("testcase_templates.urls")),
+    path("api/ui-automation/", include("ui_automation.urls")),
     path("api/knowledge/", include("knowledge.urls")),
     path("api/requirements/", include("requirements.urls")),
     path("api/prompts/", include("prompts.urls")),
