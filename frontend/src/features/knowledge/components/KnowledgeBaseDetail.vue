@@ -1,54 +1,44 @@
 <template>
   <div class="knowledge-base-detail">
     <div class="detail-header">
-      <h3>{{ knowledgeBase.name }}</h3>
+      <div class="header-main">
+        <h3>{{ knowledgeBase.name }}</h3>
+        <div class="header-stats">
+          <span class="stat-pill">
+            <strong>{{ documents.length || knowledgeBase.document_count }}</strong>
+            {{ text.documentCount }}
+          </span>
+          <span class="stat-pill">
+            <strong>{{ knowledgeBase.chunk_count }}</strong>
+            {{ text.chunkCount }}
+          </span>
+          <a-tag size="small" :color="knowledgeBase.is_active ? 'green' : 'red'">
+            {{ knowledgeBase.is_active ? text.enabled : text.disabled }}
+          </a-tag>
+        </div>
+      </div>
       <a-button type="text" @click="$emit('close')">
         <template #icon><icon-close /></template>
       </a-button>
     </div>
 
     <div class="detail-content">
-      <!-- 基本信息和配置信息 - 两列布局 -->
-      <div class="info-grid">
-        <!-- 基本信息 -->
-        <div class="info-section">
-          <h4>{{ text.basicInfo }}</h4>
-          <div class="info-item">
-            <span class="label">{{ text.description }}</span>
-            <span class="value">{{ knowledgeBase.description || text.noDescription }}</span>
-          </div>
-          <div class="info-item">
-            <span class="label">{{ text.project }}</span>
-            <span class="value">{{ getProjectName(knowledgeBase.project) }}</span>
-          </div>
-          <div class="info-item">
-            <span class="label">{{ text.status }}</span>
-            <a-tag :color="knowledgeBase.is_active ? 'green' : 'red'">
-              {{ knowledgeBase.is_active ? text.enabled : text.disabled }}
-            </a-tag>
-          </div>
-          <div class="info-item">
-            <span class="label">{{ text.creator }}</span>
-            <span class="value">{{ knowledgeBase.creator_name || text.unknown }}</span>
-          </div>
-          <div class="info-item">
-            <span class="label">{{ text.createdAt }}</span>
-            <span class="value">{{ formatDate(knowledgeBase.created_at) }}</span>
-          </div>
-        </div>
-
-        <!-- 配置信息 -->
-        <div class="info-section">
-          <h4>{{ text.configInfo }}</h4>
-          <div class="info-item">
-            <span class="label">{{ text.chunkSize }}</span>
-            <span class="value">{{ knowledgeBase.chunk_size }}</span>
-          </div>
-          <div class="info-item">
-            <span class="label">{{ text.chunkOverlap }}</span>
-            <span class="value">{{ knowledgeBase.chunk_overlap }}</span>
-          </div>
-        </div>
+      <div class="meta-bar">
+        <span class="meta-item">
+          <em>{{ text.project }}</em>{{ getProjectName(knowledgeBase.project) }}
+        </span>
+        <span class="meta-item">
+          <em>{{ text.creator }}</em>{{ knowledgeBase.creator_name || text.unknown }}
+        </span>
+        <span class="meta-item">
+          <em>{{ text.chunkSize }}</em>{{ knowledgeBase.chunk_size }}
+        </span>
+        <span class="meta-item">
+          <em>{{ text.chunkOverlap }}</em>{{ knowledgeBase.chunk_overlap }}
+        </span>
+        <span v-if="knowledgeBase.description" class="meta-item meta-desc">
+          <em>{{ text.description }}</em>{{ knowledgeBase.description }}
+        </span>
       </div>
 
       <!-- 钉钉同步绑定 -->
@@ -56,51 +46,47 @@
         <div class="section-header">
           <h4>{{ text.dingtalkSync }}</h4>
           <a-space>
-            <a-button size="small" type="outline" :loading="bindingLoading" @click="loadDingTalkBinding">
+            <a-button size="mini" type="outline" :loading="bindingLoading" @click="loadDingTalkBinding">
               {{ text.refresh }}
             </a-button>
-            <a-button size="small" type="outline" :loading="bindingSaving" @click="saveDingTalkBinding">
+            <a-button size="mini" type="outline" :loading="bindingSaving" @click="saveDingTalkBinding">
               {{ text.saveBinding }}
             </a-button>
-            <a-button size="small" type="primary" :loading="bindingSyncing" @click="runDingTalkSync">
+            <a-button size="mini" type="primary" :loading="bindingSyncing" @click="runDingTalkSync">
               {{ text.syncNow }}
             </a-button>
           </a-space>
         </div>
-        <a-row :gutter="12">
-          <a-col :span="12">
+        <a-row :gutter="8">
+          <a-col :span="8">
             <div class="info-item">
               <span class="label">{{ text.workspaceId }}</span>
-              <a-input v-model="bindingForm.workspace_id" size="small" :placeholder="text.workspaceIdPlaceholder" />
+              <a-input v-model="bindingForm.workspace_id" size="mini" :placeholder="text.workspaceIdPlaceholder" />
             </div>
           </a-col>
-          <a-col :span="12">
+          <a-col :span="8">
             <div class="info-item">
               <span class="label">{{ text.workspaceName }}</span>
-              <a-input v-model="bindingForm.workspace_name" size="small" placeholder="可选" />
+              <a-input v-model="bindingForm.workspace_name" size="mini" placeholder="可选" />
             </div>
           </a-col>
-          <a-col :span="12">
+          <a-col :span="8">
             <div class="info-item">
               <span class="label">{{ text.rootNodeId }}</span>
-              <a-input v-model="bindingForm.root_node_id" size="small" :placeholder="text.rootNodeIdPlaceholder" />
+              <a-input v-model="bindingForm.root_node_id" size="mini" :placeholder="text.rootNodeIdPlaceholder" />
             </div>
           </a-col>
-          <a-col :span="6">
-            <div class="info-item">
+          <a-col :span="8">
+            <div class="info-item inline-row">
               <span class="label">{{ text.intervalMinutes }}</span>
-              <a-input-number v-model="bindingForm.interval_minutes" :min="15" :max="10080" size="small" style="width: 100%" />
-            </div>
-          </a-col>
-          <a-col :span="6">
-            <div class="info-item">
-              <span class="label">{{ text.enableSchedule }}</span>
-              <a-switch v-model="bindingForm.enabled" />
+              <a-input-number v-model="bindingForm.interval_minutes" :min="15" :max="10080" size="mini" style="width: 110px" />
+              <span class="label tight">{{ text.enableSchedule }}</span>
+              <a-switch v-model="bindingForm.enabled" size="small" />
             </div>
           </a-col>
         </a-row>
         <div v-if="bindingForm.last_status" class="binding-status">
-          <a-tag :color="bindingStatusColor">{{ bindingForm.last_status }}</a-tag>
+          <a-tag size="small" :color="bindingStatusColor">{{ bindingForm.last_status }}</a-tag>
           <span v-if="bindingForm.last_synced_at" class="muted">
             {{ text.lastSyncedAt }}: {{ formatDate(bindingForm.last_synced_at) }}
           </span>
@@ -109,31 +95,16 @@
         </div>
       </div>
 
-      <!-- 统计信息 -->
-      <div class="info-section">
-        <h4>{{ text.statistics }}</h4>
-        <div class="stats-grid">
-          <div class="stat-item">
-            <div class="stat-value">{{ knowledgeBase.document_count }}</div>
-            <div class="stat-label">{{ text.documentCount }}</div>
-          </div>
-          <div class="stat-item">
-            <div class="stat-value">{{ knowledgeBase.chunk_count }}</div>
-            <div class="stat-label">{{ text.chunkCount }}</div>
-          </div>
-        </div>
-      </div>
-
       <!-- 文档管理 -->
       <div class="documents-section">
         <div class="section-header">
           <h4>{{ text.documentManagement }}</h4>
           <a-space>
-            <a-button type="outline" size="small" @click="fetchDocuments" :loading="documentsLoading">
+            <a-button type="outline" size="mini" @click="fetchDocuments" :loading="documentsLoading">
               <template #icon><icon-refresh /></template>
               {{ text.refresh }}
             </a-button>
-            <a-button type="primary" size="small" @click="showUploadModal">
+            <a-button type="primary" size="mini" @click="showUploadModal">
               <template #icon><icon-upload /></template>
               {{ text.uploadDocument }}
             </a-button>
@@ -159,7 +130,7 @@
 
             <template #status="{ record }">
               <div class="status-cell">
-                <a-tag :color="getStatusColor(record.status)">
+                <a-tag size="small" :color="getStatusColor(record.status)">
                   {{ getStatusText(record.status) }}
                 </a-tag>
                 <a-tooltip v-if="record.status === 'failed' && record.error_message" :content="formatDocumentErrorMessage(record.error_message)">
@@ -203,14 +174,23 @@
       <div class="query-section">
         <h4>{{ text.queryTest }}</h4>
         <div class="query-form">
-          <a-textarea
-            v-model="queryText"
-            :placeholder="text.queryPlaceholder"
-            :rows="3"
-            style="margin-bottom: 12px"
-          />
+          <div class="query-row">
+            <a-textarea
+              v-model="queryText"
+              :placeholder="text.queryPlaceholder"
+              :auto-size="{ minRows: 2, maxRows: 4 }"
+              class="query-input"
+            />
+            <a-button
+              type="primary"
+              :loading="queryLoading"
+              @click="testQuery"
+              class="query-submit"
+            >
+              {{ text.runQueryTest }}
+            </a-button>
+          </div>
 
-          <!-- 查询参数设置 -->
           <div class="query-settings">
             <div class="setting-item">
               <label>{{ text.similarityThreshold }}</label>
@@ -232,20 +212,11 @@
                 :min="1"
                 :max="20"
                 :step="1"
-                size="small"
-                style="width: 80px;"
+                size="mini"
+                style="width: 72px;"
               />
             </div>
           </div>
-
-          <a-button
-            type="primary"
-            :loading="queryLoading"
-            @click="testQuery"
-            style="width: 100%"
-          >
-            {{ text.runQueryTest }}
-          </a-button>
         </div>
 
         <div v-if="queryResult" class="query-result">
@@ -285,7 +256,6 @@
               </div>
             </div>
 
-            <!-- 图片预览 -->
             <a-modal v-model:visible="queryImagePreviewVisible" :footer="false" :width="800" :title="text.imagePreview">
               <img :src="queryPreviewImageUrl" style="width: 100%;" />
             </a-modal>
@@ -922,82 +892,144 @@ watch(
   height: 100%;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 
 .detail-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding-bottom: 16px;
+  gap: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--theme-border);
-  margin-bottom: 20px;
+  margin-bottom: 12px;
+}
+
+.header-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  min-width: 0;
 }
 
 .detail-header h3 {
   margin: 0;
-  font-size: 18px;
-  font-weight: bold;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.header-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.stat-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--theme-surface-soft) 80%, white 20%);
+  border: 1px solid var(--theme-border);
+  font-size: 12px;
+  color: var(--theme-text-secondary);
+}
+
+.stat-pill strong {
+  font-size: 14px;
+  color: #00a0e9;
 }
 
 .detail-content {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-bottom: 8px;
 }
 
-.info-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 32px;
-  margin-bottom: 24px;
+.meta-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--theme-surface-soft) 72%, white 28%);
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--theme-text);
+}
+
+.meta-item em {
+  font-style: normal;
+  color: var(--theme-text-secondary);
+  margin-right: 4px;
+}
+
+.meta-desc {
+  flex: 1 1 100%;
 }
 
 .info-section {
-  margin-bottom: 24px;
-  padding: 20px;
+  margin: 0;
+  padding: 10px 12px;
   background: color-mix(in srgb, var(--theme-surface-soft) 72%, white 28%);
-  border-radius: 8px;
+  border-radius: 6px;
   border: 1px solid var(--theme-border);
 }
 
-.info-section h4 {
-  margin: 0 0 16px 0;
-  font-size: 15px;
-  font-weight: bold;
+.info-section h4,
+.section-header h4,
+.query-section h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
   color: var(--theme-text);
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--theme-border);
 }
 
 .dingtalk-binding .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
-}
-
-.dingtalk-binding .section-header h4 {
-  margin: 0;
-  border-bottom: none;
-  padding-bottom: 0;
+  margin-bottom: 8px;
+  gap: 8px;
 }
 
 .dingtalk-binding .info-item {
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.dingtalk-binding .info-item.inline-row {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .dingtalk-binding .label {
   width: auto;
+  font-size: 12px;
+}
+
+.dingtalk-binding .label.tight {
+  margin-left: 4px;
 }
 
 .binding-status {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px 8px;
   align-items: center;
-  margin-top: 8px;
-  font-size: 13px;
+  margin-top: 4px;
+  font-size: 12px;
 }
 
 .binding-status .muted {
@@ -1011,72 +1043,33 @@ watch(
 
 .info-item {
   display: flex;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   align-items: center;
 }
 
 .label {
   width: 90px;
   color: var(--theme-text-secondary);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   flex-shrink: 0;
-  text-align: left;
 }
 
-.value {
-  flex: 1;
-  font-size: 13px;
-  color: var(--theme-text);
-  text-align: left;
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-
-.stat-item {
-  text-align: center;
-  padding: 12px;
-  background: color-mix(in srgb, var(--theme-surface-soft) 72%, white 28%);
-  border-radius: 6px;
-}
-
-.stat-value {
-  font-size: 24px;
-  font-weight: bold;
-  color: #00a0e9;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: var(--theme-text-secondary);
-  margin-top: 4px;
-}
-
-.documents-section {
-  margin-bottom: 24px;
+.documents-section,
+.query-section {
+  margin: 0;
 }
 
 .section-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
-}
-
-.section-header h4 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: bold;
-  color: var(--theme-text);
+  margin-bottom: 8px;
+  gap: 8px;
 }
 
 .documents-list {
-  max-height: 200px;
-  overflow-y: auto;
+  max-height: none;
 }
 
 .status-cell {
@@ -1088,22 +1081,34 @@ watch(
   white-space: nowrap;
 }
 
-.query-section {
-  margin-bottom: 24px;
+.query-section h4 {
+  margin-bottom: 8px;
 }
 
-.query-section h4 {
-  margin: 0 0 12px 0;
-  font-size: 14px;
-  font-weight: bold;
-  color: var(--theme-text);
+.query-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 8px;
+}
+
+.query-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.query-submit {
+  flex-shrink: 0;
+  align-self: stretch;
+  min-width: 88px;
 }
 
 .query-settings {
   display: flex;
-  gap: 24px;
-  margin-bottom: 12px;
-  padding: 12px;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin-bottom: 0;
+  padding: 8px 10px;
   background: color-mix(in srgb, var(--theme-surface-soft) 72%, white 28%);
   border-radius: 6px;
   border: 1px solid var(--theme-border);
@@ -1119,31 +1124,30 @@ watch(
   font-size: 12px;
   color: var(--theme-text-secondary);
   white-space: nowrap;
-  min-width: 80px;
 }
 
 .value-display {
   font-size: 12px;
   color: var(--theme-text);
   font-weight: 500;
-  min-width: 30px;
+  min-width: 28px;
 }
 
 .query-result {
-  margin-top: 16px;
-  padding: 12px;
+  margin-top: 10px;
+  padding: 10px;
   background: color-mix(in srgb, var(--theme-surface-soft) 72%, white 28%);
   border-radius: 6px;
 }
 
 .query-result h5 {
-  margin: 0 0 12px 0;
+  margin: 0 0 8px 0;
   font-size: 12px;
   font-weight: bold;
 }
 
 .query-info {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .query-info p {
@@ -1153,7 +1157,7 @@ watch(
 }
 
 .answer {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .answer-content {
@@ -1172,11 +1176,11 @@ watch(
 }
 
 .sources {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
 }
 
 .source-item {
-  margin: 8px 0;
+  margin: 6px 0;
   padding: 8px;
   background: var(--theme-surface);
   border-radius: 4px;
@@ -1199,11 +1203,6 @@ watch(
   max-height: 250px;
   border-radius: 4px;
   cursor: pointer;
-  transition: opacity 0.2s;
-}
-
-.source-image img:hover {
-  opacity: 0.85;
 }
 
 .source-image .image-label {
@@ -1236,18 +1235,28 @@ watch(
 .timing {
   font-size: 10px;
   color: var(--theme-text-tertiary);
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 .document-title-link {
   color: #00a0e9;
   cursor: pointer;
   text-decoration: none;
-  transition: color 0.2s;
 }
 
 .document-title-link:hover {
   color: #0e42d2;
   text-decoration: underline;
+}
+
+@media (max-width: 720px) {
+  .query-row {
+    flex-direction: column;
+  }
+
+  .query-submit {
+    width: 100%;
+    min-height: 36px;
+  }
 }
 </style>
