@@ -1677,7 +1677,7 @@ class VectorStoreManager:
 
         completed_docs = list(
             self.knowledge_base.documents.filter(status="completed").order_by(
-                "created_at"
+                "uploaded_at"
             )
         )
         if not completed_docs:
