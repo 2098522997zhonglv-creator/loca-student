@@ -1451,30 +1451,13 @@ class VectorStoreManager:
                 )
             }
 
-        # 确保集合存在
-        try:
-            if not self.qdrant_client.collection_exists(collection_name):
-                self.qdrant_client.create_collection(
-                    collection_name=collection_name,
-                    vectors_config=vectors_config,
-                    sparse_vectors_config=sparse_vectors_config,
-                )
-                mode = "稀疏+稠密混合" if sparse_vectors_config else "纯稠密"
-                logger.info(
-                    f"✅ 创建 Qdrant 集合: {collection_name}, 维度: {vector_size}, 模式: {mode}"
-                )
-            else:
-                # 检查是否需要更新稀疏配置
-                if sparse_vectors_config:
-                    try:
-                        self.qdrant_client.update_collection(
-                            collection_name=collection_name,
-                            sparse_vectors_config=sparse_vectors_config,
-                        )
-                    except Exception as e:
-                        logger.debug(f"跳过稀疏配置更新: {e}")
-        except Exception as e:
-            logger.warning(f"检查/创建集合时出错: {e}")
+        # 确保集合存在（创建失败必须抛出，避免后续 search 报 not found）
+        self._ensure_qdrant_collection(
+            collection_name=collection_name,
+            vectors_config=vectors_config,
+            sparse_vectors_config=sparse_vectors_config,
+            vector_size=vector_size,
+        )
 
         # 使用 LangChain 的 QdrantVectorStore（用于兼容性，实际混合查询直接用 client）
         qdrant_store = QdrantVectorStore(
@@ -1485,6 +1468,69 @@ class VectorStoreManager:
         )
 
         return qdrant_store
+
+    def _ensure_qdrant_collection(
+        self,
+        collection_name: str = None,
+        vectors_config=None,
+        sparse_vectors_config=None,
+        vector_size: int = None,
+    ) -> None:
+        """确保 Qdrant 集合存在；不存在则创建，创建后二次校验。"""
+        collection_name = collection_name or self._get_collection_name()
+
+        if vectors_config is None or vector_size is None:
+            test_embedding = self.embeddings.embed_query("测试")
+            vector_size = len(test_embedding)
+            vectors_config = {
+                self.DENSE_VECTOR_NAME: VectorParams(
+                    size=vector_size, distance=Distance.COSINE
+                )
+            }
+            if sparse_vectors_config is None and self.sparse_encoder:
+                sparse_vectors_config = {
+                    self.SPARSE_VECTOR_NAME: SparseVectorParams(
+                        index=SparseIndexParams(on_disk=False)
+                    )
+                }
+
+        try:
+            exists = bool(self.qdrant_client.collection_exists(collection_name))
+        except Exception as e:
+            logger.warning(f"collection_exists 检查失败，尝试直接创建: {e}")
+            exists = False
+
+        if not exists:
+            self.qdrant_client.create_collection(
+                collection_name=collection_name,
+                vectors_config=vectors_config,
+                sparse_vectors_config=sparse_vectors_config,
+            )
+            mode = "稀疏+稠密混合" if sparse_vectors_config else "纯稠密"
+            logger.info(
+                f"✅ 创建 Qdrant 集合: {collection_name}, 维度: {vector_size}, 模式: {mode}"
+            )
+        elif sparse_vectors_config:
+            try:
+                self.qdrant_client.update_collection(
+                    collection_name=collection_name,
+                    sparse_vectors_config=sparse_vectors_config,
+                )
+            except Exception as e:
+                logger.debug(f"跳过稀疏配置更新: {e}")
+
+        # 二次校验：避免 create 成功但实际不可见
+        try:
+            still_missing = not bool(
+                self.qdrant_client.collection_exists(collection_name)
+            )
+        except Exception:
+            # 部分旧客户端无 collection_exists，用 get_collection 兜底
+            self.qdrant_client.get_collection(collection_name)
+            still_missing = False
+
+        if still_missing:
+            raise RuntimeError(f"Qdrant 集合创建后仍不存在: {collection_name}")
 
     def add_documents(
         self, documents: List[LangChainDocument], document_obj: Document
@@ -1612,6 +1658,56 @@ class VectorStoreManager:
         DocumentChunk.objects.bulk_create(chunk_objects)
 
 
+    def _ensure_collection_for_search(self) -> None:
+        """检索前确保集合存在；集合丢失但库内有已完成文档时自动重建索引。"""
+        collection_name = self._get_collection_name()
+        existed = False
+        try:
+            existed = bool(self.qdrant_client.collection_exists(collection_name))
+        except Exception as e:
+            logger.warning(f"检查 Qdrant 集合失败: {e}")
+            existed = False
+
+        # 显式确保集合（不依赖可能被吞掉的副作用）
+        self._ensure_qdrant_collection()
+        _ = self.vector_store
+
+        if existed:
+            return
+
+        completed_docs = list(
+            self.knowledge_base.documents.filter(status="completed").order_by(
+                "created_at"
+            )
+        )
+        if not completed_docs:
+            logger.info(
+                f"集合 {collection_name} 不存在且无已完成文档，已创建空集合供检索"
+            )
+            return
+
+        logger.warning(
+            "Qdrant 集合缺失但存在 %s 个已完成文档，开始自动重建: %s",
+            len(completed_docs),
+            collection_name,
+        )
+        service = KnowledgeBaseService(self.knowledge_base)
+        for doc in completed_docs:
+            try:
+                ok = service.process_document(doc)
+                if not ok:
+                    logger.error(
+                        "自动重建文档失败 doc_id=%s title=%r",
+                        doc.id,
+                        doc.title,
+                    )
+            except Exception as e:
+                logger.error(
+                    "自动重建文档异常 doc_id=%s: %s",
+                    doc.id,
+                    e,
+                )
+
     def similarity_search(
         self, query: str, k: int = 5, score_threshold: float = 0.1
     ) -> List[Dict[str, Any]]:
@@ -1621,6 +1717,8 @@ class VectorStoreManager:
         logger.info(f"   📝 查询: '{query}'")
         logger.info(f"   🤖 使用嵌入模型: {embedding_type}")
         logger.info(f"   🎯 返回数量: {k}, 相似度阈值: {score_threshold}")
+
+        self._ensure_collection_for_search()
 
         # 根据是否有稀疏编码器选择检索方式
         if self.sparse_encoder:
@@ -1896,12 +1994,16 @@ class VectorStoreManager:
             vector_ids = [chunk.vector_id for chunk in chunks if chunk.vector_id]
 
             if vector_ids:
-                # Qdrant 删除
                 collection_name = self._get_collection_name()
-                self.qdrant_client.delete(
-                    collection_name=collection_name, points_selector=vector_ids
-                )
-                logger.info(f"✅ 已从 Qdrant 删除 {len(vector_ids)} 个向量")
+                if self.qdrant_client.collection_exists(collection_name):
+                    self.qdrant_client.delete(
+                        collection_name=collection_name, points_selector=vector_ids
+                    )
+                    logger.info(f"✅ 已从 Qdrant 删除 {len(vector_ids)} 个向量")
+                else:
+                    logger.warning(
+                        f"删除向量时集合不存在，跳过 Qdrant 删除: {collection_name}"
+                    )
 
             chunks.delete()
         except Exception as e:

@@ -543,11 +543,17 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
             return f"知识库搜索失败: {str(e)}"
         except Exception as e:
             logger.error(f"知识库工具调用失败: {e}")
-            # 如果是 Collection 不存在的错误,清理缓存
-            if "does not exist" in str(e) or "Collection" in str(e):
+            err = str(e)
+            # Collection 不存在：清理缓存并给出可操作提示
+            if "does not exist" in err or "not found" in err.lower() or "Collection" in err:
                 from .services import VectorStoreManager
                 VectorStoreManager.clear_cache(knowledge_base_id)
-            return f"知识库搜索失败: {str(e)}"
+                return (
+                    "知识库向量索引暂不可用（集合缺失或未重建）。"
+                    "请在知识库中重新处理文档，或执行："
+                    f"python manage.py fix_knowledge_base --kb-id {knowledge_base_id}"
+                )
+            return f"知识库搜索失败: {err}"
 
     # 设置工具的名称和描述
     knowledge_search.name = "knowledge_search"
