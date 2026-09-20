@@ -48,22 +48,24 @@
 
     <a-layout class="body">
       <a-layout-sider :width="212" class="sider">
-        <nav class="nav" aria-label="主导航">
-          <section v-for="group in menuGroups" :key="group.title" class="nav-group">
-            <div class="nav-title">{{ group.title }}</div>
-            <button
-              v-for="item in group.items"
-              :key="item.path"
-              type="button"
-              class="nav-item"
-              :class="{ active: active === item.path }"
-              @click="navigate(item.path)"
-            >
-              <span class="nav-indicator" aria-hidden="true" />
-              <span class="nav-label">{{ item.label }}</span>
-            </button>
-          </section>
-        </nav>
+        <div class="sider-scroll">
+          <nav class="nav" aria-label="主导航">
+            <section v-for="group in menuGroups" :key="group.title" class="nav-group">
+              <div class="nav-title">{{ group.title }}</div>
+              <button
+                v-for="item in group.items"
+                :key="item.path"
+                type="button"
+                class="nav-item"
+                :class="{ active: active === item.path }"
+                @click="navigate(item.path)"
+              >
+                <span class="nav-indicator" aria-hidden="true" />
+                <span class="nav-label">{{ item.label }}</span>
+              </button>
+            </section>
+          </nav>
+        </div>
       </a-layout-sider>
       <a-layout-content class="content">
         <div class="content-frame" :key="active">
@@ -173,7 +175,7 @@ async function logout() {
 
 .header {
   height: 60px;
-  flex-shrink: 0;
+  flex: 0 0 60px;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -308,9 +310,10 @@ async function logout() {
 }
 
 .body {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
-  height: auto;
+  height: calc(100vh - 60px);
+  max-height: calc(100vh - 60px);
   overflow: hidden;
 }
 
@@ -320,13 +323,22 @@ async function logout() {
   backdrop-filter: blur(10px);
   height: 100% !important;
   max-height: 100%;
-  overflow: hidden;
+  overflow: hidden !important;
+  align-self: stretch;
 }
 
 .sider :deep(.arco-layout-sider-children) {
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+.sider-scroll {
   height: 100%;
+  max-height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 .nav {
@@ -409,16 +421,18 @@ async function logout() {
 .content {
   padding: 16px 18px 18px;
   min-width: 0;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
+  min-height: 0 !important;
+  height: 100% !important;
+  overflow: hidden !important;
   display: flex;
   flex-direction: column;
+  align-self: stretch;
 }
 
 .content-frame {
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
+  /* 不再使用 calc(100vh - 92px) 固定高度，随主区剩余空间伸缩 */
   height: auto;
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(15, 61, 56, 0.06);
