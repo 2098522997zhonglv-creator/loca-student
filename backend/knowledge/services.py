@@ -1002,6 +1002,7 @@ class VectorStoreManager:
     _global_config_cache = None
     _global_config_cache_time = 0
     _embedded_qdrant_client = None
+    _reindex_attempted_ids: set = set()
 
     def __init__(self, knowledge_base: KnowledgeBase):
         self.knowledge_base = knowledge_base
@@ -1408,10 +1409,12 @@ class VectorStoreManager:
             if cache_key in cls._vector_store_cache:
                 del cls._vector_store_cache[cache_key]
                 logger.info(f"已清理知识库 {cache_key} 的向量存储缓存")
+            cls._reindex_attempted_ids.discard(cache_key)
         else:
             cls._vector_store_cache.clear()
             cls._embeddings_cache.clear()
             cls._sparse_encoder_cache.clear()
+            cls._reindex_attempted_ids.clear()
             logger.info("已清理所有向量存储缓存")
 
     @classmethod
@@ -1658,21 +1661,20 @@ class VectorStoreManager:
         DocumentChunk.objects.bulk_create(chunk_objects)
 
 
-    def _ensure_collection_for_search(self) -> None:
-        """检索前确保集合存在；集合丢失但库内有已完成文档时自动重建索引。"""
-        collection_name = self._get_collection_name()
-        existed = False
+    def _collection_points_count(self, collection_name: str) -> int:
+        """读取集合点数；不可用时返回 -1。"""
         try:
-            existed = bool(self.qdrant_client.collection_exists(collection_name))
+            info = self.qdrant_client.get_collection(collection_name)
+            return int(getattr(info, "points_count", 0) or 0)
         except Exception as e:
-            logger.warning(f"检查 Qdrant 集合失败: {e}")
-            existed = False
+            logger.warning(f"读取集合点数失败 {collection_name}: {e}")
+            return -1
 
-        # 显式确保集合（不依赖可能被吞掉的副作用）
-        self._ensure_qdrant_collection()
-        _ = self.vector_store
-
-        if existed:
+    def _reindex_completed_documents(self, reason: str) -> None:
+        """将已完成文档重新写入当前 Qdrant 集合。"""
+        kb_id = str(self.knowledge_base.id)
+        if kb_id in VectorStoreManager._reindex_attempted_ids:
+            logger.info(f"本进程已尝试重建过知识库 {kb_id}，跳过重复重建")
             return
 
         completed_docs = list(
@@ -1681,15 +1683,14 @@ class VectorStoreManager:
             )
         )
         if not completed_docs:
-            logger.info(
-                f"集合 {collection_name} 不存在且无已完成文档，已创建空集合供检索"
-            )
             return
 
+        VectorStoreManager._reindex_attempted_ids.add(kb_id)
         logger.warning(
-            "Qdrant 集合缺失但存在 %s 个已完成文档，开始自动重建: %s",
+            "Qdrant 需重建（%s），已完成文档 %s 个: kb_%s",
+            reason,
             len(completed_docs),
-            collection_name,
+            kb_id,
         )
         service = KnowledgeBaseService(self.knowledge_base)
         for doc in completed_docs:
@@ -1707,6 +1708,39 @@ class VectorStoreManager:
                     doc.id,
                     e,
                 )
+
+    def _ensure_collection_for_search(self) -> None:
+        """检索前确保集合存在；集合缺失或空壳时自动重建索引。"""
+        collection_name = self._get_collection_name()
+        existed = False
+        try:
+            existed = bool(self.qdrant_client.collection_exists(collection_name))
+        except Exception as e:
+            logger.warning(f"检查 Qdrant 集合失败: {e}")
+            existed = False
+
+        # 显式确保集合（不依赖可能被吞掉的副作用）
+        self._ensure_qdrant_collection()
+        _ = self.vector_store
+
+        points_count = self._collection_points_count(collection_name)
+        completed_exists = self.knowledge_base.documents.filter(
+            status="completed"
+        ).exists()
+
+        # 集合不存在刚创建、或上次创建失败留下空壳：有文档则重建
+        need_reindex = completed_exists and (
+            not existed or points_count == 0
+        )
+        if not need_reindex:
+            if not existed and not completed_exists:
+                logger.info(
+                    f"集合 {collection_name} 不存在且无已完成文档，已创建空集合供检索"
+                )
+            return
+
+        reason = "集合缺失" if not existed else "集合为空"
+        self._reindex_completed_documents(reason)
 
     def similarity_search(
         self, query: str, k: int = 5, score_threshold: float = 0.1
