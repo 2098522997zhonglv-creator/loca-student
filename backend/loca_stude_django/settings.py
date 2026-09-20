@@ -203,6 +203,23 @@ LANGGRAPH_CHECKPOINT_SQLITE_PATH = os.environ.get(
 )
 DJANGO_BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://127.0.0.1:8000")
 
+# 知识库从 URL 拉文档时的 SSRF 策略。
+# 本产品多为局域网部署，默认允许私网；生产可设 KB_URL_ALLOW_PRIVATE=false，
+# 并用 KB_URL_HOST_ALLOWLIST=prototypes.netflying.net 按域名放行。
+_kb_allow_private_env = os.environ.get("KB_URL_ALLOW_PRIVATE", "").strip().lower()
+if _kb_allow_private_env in ("0", "false", "no", "off"):
+    KB_URL_ALLOW_PRIVATE = False
+elif _kb_allow_private_env in ("1", "true", "yes", "on"):
+    KB_URL_ALLOW_PRIVATE = True
+else:
+    # 未配置时默认放行内网（本地知识中心常见场景）
+    KB_URL_ALLOW_PRIVATE = True
+KB_URL_HOST_ALLOWLIST = {
+    h.strip().lower()
+    for h in os.environ.get("KB_URL_HOST_ALLOWLIST", "").split(",")
+    if h.strip()
+}
+
 # Unified runtime logs under data/logs (same folder used by Windows auto-update scripts).
 LOG_DIR = Path(os.environ.get("LOG_DIR", DATA_DIR / "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)

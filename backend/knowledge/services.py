@@ -376,16 +376,31 @@ class DocumentProcessor:
         return self._load_from_content(markdown, document.title or doc_key)
 
     def _load_from_url(self, url: str) -> List[LangChainDocument]:
-        """从URL加载文档（含 SSRF 防护）"""
+        """从URL加载文档（含 SSRF 防护；可按配置放行内网）"""
         from urllib.parse import urlparse
         from ipaddress import ip_address
         import socket
 
+        from django.conf import settings
+
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(f"仅允许 http/https 协议: {parsed.scheme}")
-        hostname = parsed.hostname
-        if hostname:
+        hostname = (parsed.hostname or "").lower()
+        allow_private = bool(getattr(settings, "KB_URL_ALLOW_PRIVATE", False))
+        host_allowlist = {
+            h.lower().lstrip(".")
+            for h in getattr(settings, "KB_URL_HOST_ALLOWLIST", set()) or set()
+            if h
+        }
+        host_allowed = False
+        if hostname and host_allowlist:
+            host_allowed = any(
+                hostname == allowed or hostname.endswith("." + allowed)
+                for allowed in host_allowlist
+            )
+
+        if hostname and not allow_private and not host_allowed:
             resolved = socket.getaddrinfo(
                 hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
             )
@@ -397,7 +412,11 @@ class DocumentProcessor:
                     or addr.is_reserved
                     or addr.is_link_local
                 ):
-                    raise ValueError(f"禁止访问内网地址: {sockaddr[0]}")
+                    raise ValueError(
+                        f"禁止访问内网地址: {sockaddr[0]} "
+                        f"(可设 KB_URL_ALLOW_PRIVATE=true 或将 {hostname} "
+                        "加入 KB_URL_HOST_ALLOWLIST)"
+                    )
 
         loader = WebBaseLoader(url)
         return loader.load()
