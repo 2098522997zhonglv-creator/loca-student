@@ -49,3 +49,6 @@ langdetect==1.0.9
 nltk>=3.8.0
 tiktoken>=0.5.0
 uvicorn[standard]==0.34.0
+# Optional: render Axure/JS prototype pages for knowledge URL import
+# pip install playwright && playwright install chromium
+# playwright>=1.40.0

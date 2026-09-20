@@ -517,11 +517,14 @@ class DocumentProcessor:
         looks_axure = self._looks_like_axure(url, raw)
         if looks_axure or not text or len(text) < 40:
             axure_text = self._load_axure_page_text(
-                url, headers=headers, timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30)
+                url,
+                headers=headers,
+                timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30),
+                shell_html=raw,
             )
             if axure_text and len(axure_text) >= 20:
                 logger.info(
-                    "从 Axure data.js 提取正文 %s 字符 (page fragment)",
+                    "从 Axure 资源提取正文 %s 字符",
                     len(axure_text),
                 )
                 text = axure_text
@@ -537,11 +540,11 @@ class DocumentProcessor:
         if not text or len(text) < 20:
             if looks_axure or "#p=" in (url or "") or "p=" in (urlparse(url).fragment or ""):
                 raise ValueError(
-                    "该链接是 Axure 动态原型，静态 HTML 无正文。"
-                    "已尝试解析 files/<页面>/data.js 仍失败。"
-                    "请改用：1) 粘贴需求说明文本入库 2) 上传 Word/PDF "
-                    "3) 安装 Playwright 后重试（可选）"
-                    "4) 确认原型目录下 files/ 可匿名或带 Cookie 访问。"
+                    "该链接是 Axure 动态原型，静态 HTML 无正文，data.js 也未解析到可用文本。"
+                    "请优先：粘贴需求说明或上传 Word/PDF。"
+                    "若必须抓原型页，在服务器执行："
+                    "pip install playwright && playwright install chromium "
+                    "后重启服务再重试。"
                 )
             raise ValueError("URL 页面正文过短或为空，无法入库")
 
@@ -577,62 +580,170 @@ class DocumentProcessor:
             )
         )
 
+    @staticmethod
+    def _axure_build_url(scheme: str, netloc: str, path: str) -> str:
+        """拼接含中文的 Axure 资源 URL，避免双重编码/未编码导致 404。"""
+        from urllib.parse import quote, unquote, urlunparse
+
+        normalized = unquote(path or "/")
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        encoded = quote(normalized, safe="/")
+        return urlunparse((scheme, netloc, encoded, "", "", ""))
+
+    def _axure_get(self, url: str, headers: dict, timeout: int):
+        try:
+            return requests.get(
+                url, headers=headers, timeout=timeout, allow_redirects=True
+            )
+        except requests.RequestException as e:
+            logger.warning("Axure 资源请求失败 %s: %s", url, e)
+            return None
+
     def _load_axure_page_text(
-        self, url: str, headers: dict, timeout: int
+        self, url: str, headers: dict, timeout: int, shell_html: str = ""
     ) -> str:
-        """从 Axure 导出的 files/<page>/data.js 提取可见文案。"""
-        from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
+        """从 Axure 导出的 files/<page>/data.js / document.js / 页面 html 提取文案。"""
+        from urllib.parse import parse_qs, unquote, urlparse
+        import re
 
         parsed = urlparse(url)
         frag_qs = parse_qs(parsed.fragment or "")
         page_name = unquote((frag_qs.get("p") or [""])[0] or "").strip()
-        if not page_name:
-            return ""
+        page_id = unquote((frag_qs.get("id") or [""])[0] or "").strip()
 
-        path = parsed.path or "/"
+        path = unquote(parsed.path or "/")
         if path.endswith(".html"):
             base_path = path.rsplit("/", 1)[0] + "/"
         elif not path.endswith("/"):
             base_path = path + "/"
         else:
             base_path = path
-        base = urlunparse((parsed.scheme, parsed.netloc, base_path, "", "", ""))
 
-        # Axure 页面目录名通常与 p= 一致；兼容空格/下划线
-        name_variants = []
+        scheme, netloc = parsed.scheme, parsed.netloc
+
+        def u(*parts: str) -> str:
+            rel = "/".join(p.strip("/") for p in parts if p is not None)
+            full = base_path.rstrip("/") + "/" + rel
+            return self._axure_build_url(scheme, netloc, full)
+
+        name_variants: List[str] = []
         for name in (
             page_name,
             page_name.replace(" ", "_"),
             page_name.replace("_", " "),
             page_name.replace("·", "-"),
             page_name.replace("-", "·"),
+            page_name.replace("-", "_"),
+            page_name.replace("_", "-"),
         ):
             if name and name not in name_variants:
                 name_variants.append(name)
 
-        candidates = []
-        for name in name_variants:
-            candidates.append(urljoin(base, f"files/{name}/data.js"))
-            candidates.append(urljoin(base, f"files/{quote(name)}/data.js"))
-            candidates.append(urljoin(base, f"files/{quote(name, safe='')}/data.js"))
+        # 1) 从壳 HTML 里直接抓 files/.../data.js 引用
+        if shell_html:
+            for m in re.finditer(
+                r"""(?:src|href)\s*=\s*["']([^"']*?files/[^"']+?/data\.js)["']""",
+                shell_html,
+                flags=re.I,
+            ):
+                rel = m.group(1).strip()
+                if rel.startswith("http"):
+                    cand = rel
+                else:
+                    cand = self._axure_build_url(
+                        scheme,
+                        netloc,
+                        base_path.rstrip("/") + "/" + rel.lstrip("./"),
+                    )
+                resp = self._axure_get(cand, headers, timeout)
+                if resp is not None and resp.status_code == 200 and resp.text:
+                    text = self._extract_text_from_axure_js(resp.text)
+                    if text and len(text) >= 20:
+                        logger.info("Axure data.js(壳引用) 命中: %s", cand)
+                        return text
 
+        # 2) 读 sitemap document.js
+        doc_url = u("data", "document.js")
+        resp = self._axure_get(doc_url, headers, timeout)
+        sitemap_fallback = ""
+        if resp is not None and resp.status_code == 200 and resp.text:
+            logger.info(
+                "Axure document.js 可读: %s (%s bytes)", doc_url, len(resp.text)
+            )
+            sitemap_fallback = self._extract_text_from_axure_js(resp.text)
+            for m in re.finditer(r'"url"\s*:\s*"((?:\\.|[^"\\])*)"', resp.text):
+                page_url = m.group(1).replace(r"\/", "/").strip()
+                if not page_url.endswith(".html"):
+                    continue
+                stem = unquote(page_url[: -len(".html")])
+                if not stem or stem in name_variants:
+                    continue
+                if page_name and (
+                    page_name in stem
+                    or stem in page_name
+                    or page_name.replace("-", "") in stem.replace("-", "")
+                ):
+                    name_variants.insert(0, stem)
+                else:
+                    name_variants.append(stem)
+        else:
+            logger.warning(
+                "Axure document.js 不可用: %s status=%s",
+                doc_url,
+                getattr(resp, "status_code", None),
+            )
+
+        # 3) 按页面名尝试 data.js / 页面 html
+        candidates: List[str] = []
+        for name in name_variants:
+            candidates.extend(
+                [
+                    u("files", name, "data.js"),
+                    u(f"{name}.html"),
+                    u("files", name, f"{name}.html"),
+                ]
+            )
+        if page_id:
+            candidates.append(u("files", page_id, "data.js"))
+
+        tried: List[str] = []
         for cand in candidates:
-            try:
-                resp = requests.get(
-                    cand, headers=headers, timeout=timeout, allow_redirects=True
-                )
-            except requests.RequestException as e:
-                logger.debug("Axure data.js 拉取失败 %s: %s", cand, e)
+            if cand in tried:
                 continue
-            if resp.status_code != 200 or not resp.text:
-                logger.debug(
-                    "Axure data.js HTTP %s %s", resp.status_code, cand
-                )
+            tried.append(cand)
+            resp = self._axure_get(cand, headers, timeout)
+            status = getattr(resp, "status_code", None)
+            if resp is None or status != 200 or not resp.text:
+                logger.info("Axure 候选未命中 HTTP %s %s", status, cand)
                 continue
             text = self._extract_text_from_axure_js(resp.text)
+            if len(text) < 20 and not cand.endswith("data.js"):
+                try:
+                    from bs4 import BeautifulSoup
+
+                    soup = BeautifulSoup(resp.text, "html.parser")
+                    for tag in soup(["script", "style", "noscript"]):
+                        tag.decompose()
+                    text = " ".join(soup.get_text("\n", strip=True).split())
+                except Exception:
+                    text = text or ""
             if text and len(text) >= 20:
-                logger.info("Axure data.js 命中: %s", cand)
+                logger.info("Axure 资源命中: %s (%s 字符)", cand, len(text))
                 return text
+
+        if sitemap_fallback and len(sitemap_fallback) >= 20:
+            logger.warning(
+                "未命中页面 data.js，回退使用 document.js 站点文案 (%s 字符)",
+                len(sitemap_fallback),
+            )
+            return sitemap_fallback
+        logger.warning(
+            "Axure 全候选失败 page=%r variants=%s tried=%s",
+            page_name,
+            name_variants[:8],
+            len(tried),
+        )
         return ""
 
     @staticmethod
