@@ -830,82 +830,103 @@ class DocumentProcessor:
         return ""
 
     @staticmethod
+    def _is_axure_noise_text(value: str) -> bool:
+        """过滤 Axure 资源路径、字体、默认控件名等噪声。"""
+        import re
+
+        v = (value or "").strip()
+        if not v:
+            return True
+        lower = v.lower()
+        if any(
+            x in lower
+            for x in (
+                "images/",
+                "files/",
+                "fonts/",
+                "plugins/",
+                "resources/",
+                ".png",
+                ".svg",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".webp",
+                ".css",
+                ".js",
+                ".html",
+            )
+        ):
+            return True
+        if re.search(r"(?:^|/)u\d+\.(?:png|svg|jpg|jpeg|gif)$", lower):
+            return True
+        if re.fullmatch(r"u\d+", lower):
+            return True
+        if any(
+            x in v
+            for x in (
+                "微软雅黑",
+                "宋体",
+                "黑体",
+                "Arial",
+                "FontAwesome",
+                "Open Sans",
+                "Roboto",
+            )
+        ) and len(v) < 40:
+            return True
+        if re.search(r"\b(bold|regular|italic|light|medium|semibold)\b", lower) and len(v) < 40:
+            return True
+        if re.fullmatch(r"[\d.\spx%em#\-,'\"]+", v):
+            return True
+        if re.fullmatch(
+            r"(矩形|图片|热区|动态面板|中继器|文本框|文本标签|下拉框|列表框|"
+            r"表格|线条|椭圆|三角形|树|菜单|按钮|单选|复选|内联框架|"
+            r"页面名称标题栏|主菜单|链接|组合|形状)\d*",
+            v,
+        ):
+            return True
+        return False
+
+    @staticmethod
     def _extract_text_from_axure_js(js: str) -> str:
-        """从 Axure data.js / document.js 中抽取可见文案（含中文说明）。"""
+        """从 Axure data.js 抽取可读文案，排除图片路径与控件噪声。"""
         import json
         import re
 
         texts: List[str] = []
         seen = set()
-        skip = {
-            "",
-            "true",
-            "false",
-            "null",
-            "div",
-            "img",
-            "input",
-            "select",
-            "button",
-            "table",
-            "tr",
-            "td",
-            "span",
-            "p",
-            "a",
-            "none",
-            "block",
-            "auto",
-            "left",
-            "right",
-            "center",
-            "top",
-            "bottom",
-            "visible",
-            "hidden",
-            "bold",
-            "normal",
-            "arial",
-            "微软雅黑",
-            "宋体",
-            "黑体",
-            "wireframe",
-            "folder",
-        }
         cjk_re = re.compile(r"[\u4e00-\u9fff]")
-        # 1) 明确的 text 字段（含 textSpans）
+        # 只取可能展示给用户的字段；不要扫 name（多为「矩形」）
         patterns = [
             re.compile(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"'),
             re.compile(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"'),
-            re.compile(r'"name"\s*:\s*"((?:\\.|[^"\\])*)"'),
-            re.compile(r'"pageName"\s*:\s*"((?:\\.|[^"\\])*)"'),
-            re.compile(r'"label"\s*:\s*"((?:\\.|[^"\\])*)"'),
             re.compile(r'"hint"\s*:\s*"((?:\\.|[^"\\])*)"'),
             re.compile(r'"placeholderText"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"pageName"\s*:\s*"((?:\\.|[^"\\])*)"'),
         ]
 
-        def _push(raw: str) -> None:
+        def _decode(raw: str) -> str:
             try:
-                value = json.loads(f'"{raw}"')
+                return json.loads(f'"{raw}"')
             except Exception:
-                value = (
+                return (
                     raw.replace(r"\/", "/")
                     .replace(r"\n", "\n")
                     .replace(r"\t", "\t")
                     .replace(r"\"", '"')
                     .replace(r"\\", "\\")
                 )
-            value = (value or "").strip()
+
+        def _push(raw: str) -> None:
+            value = (_decode(raw) or "").strip()
             if len(value) < 2:
                 return
-            if value.lower() in skip or value in skip:
+            if DocumentProcessor._is_axure_noise_text(value):
                 return
             if value.startswith(("http://", "https://", "javascript:", "data:")):
                 return
-            if re.fullmatch(r"[\d.\spx%em#-]+", value):
-                return
-            # 纯英文样式短词丢掉；中文或较长说明保留
-            if not cjk_re.search(value) and len(value) < 6:
+            if not cjk_re.search(value) and len(value) < 12:
                 return
             if value not in seen:
                 seen.add(value)
@@ -915,15 +936,29 @@ class DocumentProcessor:
             for match in pattern.finditer(js or ""):
                 _push(match.group(1))
 
-        # 2) 兜底：所有含中文的 JSON 字符串（抓住「说明」长段落）
+        # 仅对长中文做兜底，避免 images/新增-xxx/u42.png 混入
         for match in re.finditer(r'"((?:\\.|[^"\\])*)"', js or ""):
             raw = match.group(1)
             if not cjk_re.search(raw):
                 continue
-            if len(raw) < 2:
+            if any(
+                x in raw.lower()
+                for x in ("images/", "files/", ".png", ".svg", ".jpg", ".js", ".css")
+            ):
+                continue
+            decoded = _decode(raw).strip()
+            if len(decoded) < 8 and not re.search(r"[、。；：;]", decoded):
                 continue
             _push(raw)
 
+        def _score(s: str) -> tuple:
+            return (
+                1 if re.search(r"[、。；：;]", s) else 0,
+                1 if any(k in s for k in ("说明", "数据来源", "搜索条件", "配置管理")) else 0,
+                len(s),
+            )
+
+        texts.sort(key=_score, reverse=True)
         return "\n".join(texts)
 
     def _load_url_via_playwright(
