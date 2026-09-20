@@ -600,10 +600,27 @@ class DocumentProcessor:
             logger.warning("Axure 资源请求失败 %s: %s", url, e)
             return None
 
+    @staticmethod
+    def _axure_norm_key(name: str) -> str:
+        """模糊匹配 Axure 页面名：忽略大小写、间隔符差异。"""
+        import re
+
+        s = (name or "").strip().lower()
+        s = s.replace("·", "-").replace("_", "-").replace(" ", "")
+        s = re.sub(r"-{2,}", "-", s)
+        return s
+
+    @classmethod
+    def _axure_name_match(cls, a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        na, nb = cls._axure_norm_key(a), cls._axure_norm_key(b)
+        return na == nb or na in nb or nb in na
+
     def _load_axure_page_text(
         self, url: str, headers: dict, timeout: int, shell_html: str = ""
     ) -> str:
-        """从 Axure 导出的 files/<page>/data.js / document.js / 页面 html 提取文案。"""
+        """从 Axure 导出资源提取文案；尽量抓当前页完整说明 + 站点目录。"""
         from urllib.parse import parse_qs, unquote, urlparse
         import re
 
@@ -627,6 +644,11 @@ class DocumentProcessor:
             full = base_path.rstrip("/") + "/" + rel
             return self._axure_build_url(scheme, netloc, full)
 
+        def add_variant(bucket: List[str], name: str) -> None:
+            if not name or name in bucket:
+                return
+            bucket.append(name)
+
         name_variants: List[str] = []
         for name in (
             page_name,
@@ -636,11 +658,14 @@ class DocumentProcessor:
             page_name.replace("-", "·"),
             page_name.replace("-", "_"),
             page_name.replace("_", "-"),
+            # 侧栏常见「新增·AI模型价格」vs URL「新增-ai模型价格」
+            page_name.replace("-", "·").replace("ai", "AI").replace("Ai", "AI"),
+            re.sub(r"ai", "AI", page_name, flags=re.I).replace("-", "·"),
+            re.sub(r"ai", "AI", page_name, flags=re.I),
         ):
-            if name and name not in name_variants:
-                name_variants.append(name)
+            add_variant(name_variants, name)
 
-        # 1) 从壳 HTML 里直接抓 files/.../data.js 引用
+        # 1) 壳 HTML 内嵌的 data.js
         if shell_html:
             for m in re.finditer(
                 r"""(?:src|href)\s*=\s*["']([^"']*?files/[^"']+?/data\.js)["']""",
@@ -663,30 +688,46 @@ class DocumentProcessor:
                         logger.info("Axure data.js(壳引用) 命中: %s", cand)
                         return text
 
-        # 2) 读 sitemap document.js
+        # 2) document.js：解析 pageName + url 对
         doc_url = u("data", "document.js")
         resp = self._axure_get(doc_url, headers, timeout)
-        sitemap_fallback = ""
+        sitemap_lines: List[str] = []
+        page_entries: List[tuple] = []  # (pageName, stem)
         if resp is not None and resp.status_code == 200 and resp.text:
             logger.info(
                 "Axure document.js 可读: %s (%s bytes)", doc_url, len(resp.text)
             )
-            sitemap_fallback = self._extract_text_from_axure_js(resp.text)
-            for m in re.finditer(r'"url"\s*:\s*"((?:\\.|[^"\\])*)"', resp.text):
+            doc_js = resp.text
+            for m in re.finditer(r'"url"\s*:\s*"((?:\\.|[^"\\])*)"', doc_js):
                 page_url = m.group(1).replace(r"\/", "/").strip()
                 if not page_url.endswith(".html"):
                     continue
                 stem = unquote(page_url[: -len(".html")])
-                if not stem or stem in name_variants:
-                    continue
-                if page_name and (
-                    page_name in stem
-                    or stem in page_name
-                    or page_name.replace("-", "") in stem.replace("-", "")
+                chunk = doc_js[max(0, m.start() - 400) : m.end()]
+                pm = re.search(
+                    r'"pageName"\s*:\s*"((?:\\.|[^"\\])*)"', chunk
+                )
+                pname = unquote(pm.group(1)) if pm else stem
+                try:
+                    import json as _json
+
+                    pname = _json.loads(f'"{pname}"') if "\\" in pname else pname
+                except Exception:
+                    pass
+                page_entries.append((pname, stem))
+                add_variant(name_variants, stem)
+                add_variant(name_variants, pname)
+                if self._axure_name_match(page_name, stem) or self._axure_name_match(
+                    page_name, pname
                 ):
+                    # 当前页相关名提到最前
+                    if stem in name_variants:
+                        name_variants.remove(stem)
                     name_variants.insert(0, stem)
-                else:
-                    name_variants.append(stem)
+                    if pname in name_variants:
+                        name_variants.remove(pname)
+                    name_variants.insert(0, pname)
+                sitemap_lines.append(f"- {pname} ({stem})")
         else:
             logger.warning(
                 "Axure document.js 不可用: %s status=%s",
@@ -694,67 +735,108 @@ class DocumentProcessor:
                 getattr(resp, "status_code", None),
             )
 
-        # 3) 按页面名尝试 data.js / 页面 html
-        candidates: List[str] = []
+        # 当前页优先的 stem 列表
+        priority_stems: List[str] = []
+        other_stems: List[str] = []
+        seen_stems = set()
+        for pname, stem in page_entries:
+            if stem in seen_stems:
+                continue
+            seen_stems.add(stem)
+            if self._axure_name_match(page_name, stem) or self._axure_name_match(
+                page_name, pname
+            ):
+                priority_stems.append(stem)
+            else:
+                other_stems.append(stem)
         for name in name_variants:
-            candidates.extend(
-                [
-                    u("files", name, "data.js"),
-                    u(f"{name}.html"),
-                    u("files", name, f"{name}.html"),
-                ]
-            )
-        if page_id:
-            candidates.append(u("files", page_id, "data.js"))
+            if name not in seen_stems:
+                priority_stems.append(name)
+                seen_stems.add(name)
 
-        tried: List[str] = []
-        for cand in candidates:
-            if cand in tried:
+        def fetch_page_text(stem: str) -> str:
+            for cand in (
+                u("files", stem, "data.js"),
+                u(f"{stem}.html"),
+                u("files", stem, f"{stem}.html"),
+            ):
+                r = self._axure_get(cand, headers, timeout)
+                status = getattr(r, "status_code", None)
+                if r is None or status != 200 or not r.text:
+                    logger.info("Axure 候选未命中 HTTP %s %s", status, cand)
+                    continue
+                text = self._extract_text_from_axure_js(r.text)
+                if len(text) < 20 and not cand.endswith("data.js"):
+                    try:
+                        from bs4 import BeautifulSoup
+
+                        soup = BeautifulSoup(r.text, "html.parser")
+                        for tag in soup(["script", "style", "noscript"]):
+                            tag.decompose()
+                        text = " ".join(soup.get_text("\n", strip=True).split())
+                    except Exception:
+                        pass
+                if text and len(text) >= 20:
+                    logger.info("Axure 资源命中: %s (%s 字符)", cand, len(text))
+                    return text
+            return ""
+
+        sections: List[str] = []
+        # 站点目录（侧栏）
+        if sitemap_lines:
+            sections.append("【原型站点目录】\n" + "\n".join(sitemap_lines))
+
+        # 先抓当前页（说明文案所在）
+        current_text = ""
+        for stem in priority_stems:
+            current_text = fetch_page_text(stem)
+            if current_text:
+                sections.append(f"【当前页：{stem}】\n{current_text}")
+                break
+        if page_id and not current_text:
+            t = fetch_page_text(page_id)
+            if t:
+                current_text = t
+                sections.append(f"【当前页：{page_id}】\n{t}")
+
+        # 再抓其余页，尽量「抓全」整个原型（上限防止过大）
+        max_chars = 120000
+        used = sum(len(s) for s in sections)
+        for stem in other_stems:
+            if used >= max_chars:
+                break
+            t = fetch_page_text(stem)
+            if not t:
                 continue
-            tried.append(cand)
-            resp = self._axure_get(cand, headers, timeout)
-            status = getattr(resp, "status_code", None)
-            if resp is None or status != 200 or not resp.text:
-                logger.info("Axure 候选未命中 HTTP %s %s", status, cand)
-                continue
-            text = self._extract_text_from_axure_js(resp.text)
-            if len(text) < 20 and not cand.endswith("data.js"):
-                try:
-                    from bs4 import BeautifulSoup
+            block = f"【页面：{stem}】\n{t}"
+            sections.append(block)
+            used += len(block)
 
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    for tag in soup(["script", "style", "noscript"]):
-                        tag.decompose()
-                    text = " ".join(soup.get_text("\n", strip=True).split())
-                except Exception:
-                    text = text or ""
-            if text and len(text) >= 20:
-                logger.info("Axure 资源命中: %s (%s 字符)", cand, len(text))
-                return text
-
-        if sitemap_fallback and len(sitemap_fallback) >= 20:
-            logger.warning(
-                "未命中页面 data.js，回退使用 document.js 站点文案 (%s 字符)",
-                len(sitemap_fallback),
+        merged = "\n\n".join(sections).strip()
+        if merged and len(merged) >= 20:
+            logger.info(
+                "Axure 汇总完成 current=%s sections=%s chars=%s",
+                bool(current_text),
+                len(sections),
+                len(merged),
             )
-            return sitemap_fallback
+            return merged
+
         logger.warning(
-            "Axure 全候选失败 page=%r variants=%s tried=%s",
+            "Axure 全候选失败 page=%r variants=%s",
             page_name,
-            name_variants[:8],
-            len(tried),
+            name_variants[:12],
         )
         return ""
 
     @staticmethod
     def _extract_text_from_axure_js(js: str) -> str:
-        """从 Axure data.js / document.js 中抽取文本字段。"""
+        """从 Axure data.js / document.js 中抽取可见文案（含中文说明）。"""
         import json
         import re
 
         texts: List[str] = []
         seen = set()
-        pattern = re.compile(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"')
         skip = {
             "",
             "true",
@@ -783,11 +865,26 @@ class DocumentProcessor:
             "hidden",
             "bold",
             "normal",
-            "Arial",
+            "arial",
             "微软雅黑",
+            "宋体",
+            "黑体",
+            "wireframe",
+            "folder",
         }
-        for match in pattern.finditer(js or ""):
-            raw = match.group(1)
+        cjk_re = re.compile(r"[\u4e00-\u9fff]")
+        # 1) 明确的 text 字段（含 textSpans）
+        patterns = [
+            re.compile(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"title"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"name"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"pageName"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"label"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"hint"\s*:\s*"((?:\\.|[^"\\])*)"'),
+            re.compile(r'"placeholderText"\s*:\s*"((?:\\.|[^"\\])*)"'),
+        ]
+
+        def _push(raw: str) -> None:
             try:
                 value = json.loads(f'"{raw}"')
             except Exception:
@@ -799,15 +896,34 @@ class DocumentProcessor:
                     .replace(r"\\", "\\")
                 )
             value = (value or "").strip()
-            if len(value) < 2 or value in skip:
-                continue
-            if value.startswith(("http://", "https://", "javascript:")):
-                continue
+            if len(value) < 2:
+                return
+            if value.lower() in skip or value in skip:
+                return
+            if value.startswith(("http://", "https://", "javascript:", "data:")):
+                return
             if re.fullmatch(r"[\d.\spx%em#-]+", value):
-                continue
+                return
+            # 纯英文样式短词丢掉；中文或较长说明保留
+            if not cjk_re.search(value) and len(value) < 6:
+                return
             if value not in seen:
                 seen.add(value)
                 texts.append(value)
+
+        for pattern in patterns:
+            for match in pattern.finditer(js or ""):
+                _push(match.group(1))
+
+        # 2) 兜底：所有含中文的 JSON 字符串（抓住「说明」长段落）
+        for match in re.finditer(r'"((?:\\.|[^"\\])*)"', js or ""):
+            raw = match.group(1)
+            if not cjk_re.search(raw):
+                continue
+            if len(raw) < 2:
+                continue
+            _push(raw)
+
         return "\n".join(texts)
 
     def _load_url_via_playwright(
