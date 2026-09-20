@@ -562,7 +562,7 @@ onMounted(async () => {
 
 /* 当没有页面标题时，调整内容容器的上边距 */
 .knowledge-management:has(.detail-panel-full) .content-container {
-  margin-top: 20px;
+  margin-top: 12px;
 }
 
 .knowledge-base-list {
@@ -577,6 +577,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0;
 }
 
 .list-header {
