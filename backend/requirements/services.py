@@ -493,6 +493,26 @@ class DocumentProcessor:
 
         return "", page_count
 
+    @staticmethod
+    def _vision_page_quality(page_text: str) -> dict:
+        """评估单页识图质量：有效字数、无法识别占比。"""
+        text = (page_text or "").strip()
+        if not text:
+            return {"ok": False, "effective_chars": 0, "unreadable_ratio": 1.0}
+
+        unreadable_hits = len(re.findall(r"\[无法识别\]|无法识别|看不清图片|没有收到图片", text))
+        cleaned = re.sub(r"\[无法识别\]", "", text)
+        cleaned = re.sub(r"\s+", "", cleaned)
+        effective = len(cleaned)
+        # 以「标记次数 vs 有效字符」粗判：有效字太少或几乎全是无法识别
+        unreadable_ratio = 1.0 if effective == 0 else min(1.0, unreadable_hits * 8 / max(effective, 1))
+        ok = effective >= 20 and unreadable_ratio < 0.6
+        return {
+            "ok": ok,
+            "effective_chars": effective,
+            "unreadable_ratio": unreadable_ratio,
+        }
+
     def _extract_pdf_with_vision(self, raw: bytes, llm) -> str:
         """将 PDF 页渲成图，用视觉大模型逐页提取需求文本。"""
         import base64
@@ -500,12 +520,16 @@ class DocumentProcessor:
         import fitz  # pymupdf
 
         max_pages = 30
-        max_edge = 1280
+        # 原型截图文字偏小，提高渲染边长以提升可读性
+        max_edge = 1600
         page_prompt = (
-            "请识别这张需求/原型截图中的全部文字与结构信息，"
-            "包括标题、说明、按钮文案、表单字段、业务规则、流程步骤、注释。"
-            "按阅读顺序输出纯文本，保留层级（可用 Markdown 标题与列表）。"
-            "不要编造图中不存在的内容；若某区域无法辨认，写[无法识别]。"
+            "你将收到一张需求/原型页面的截图（图片已附在消息中）。"
+            "请仔细阅读图中可见的全部中文/英文文字，按阅读顺序完整抄录，"
+            "包括标题、说明、按钮、表单标签、表格内容、业务规则、流程步骤、注释。"
+            "使用 Markdown 保留层级。禁止编造图中没有的内容。"
+            "禁止用「无法识别」敷衍整页；只有局部模糊时才可对那一小段标注[局部模糊]。"
+            "若消息中根本没有图片或你看不到图片，请只回复一行："
+            "ERROR_NO_IMAGE"
         )
 
         doc = fitz.open(stream=raw, filetype="pdf")
@@ -521,38 +545,52 @@ class DocumentProcessor:
                 )
 
             page_texts: list[str] = []
+            weak_pages = 0
+            no_image_pages = 0
             for index in range(limit):
                 page = doc[index]
                 rect = page.rect
                 longest = max(float(rect.width), float(rect.height), 1.0)
-                scale = min(1.0, max_edge / longest)
+                # 至少 1.5x，避免小页被压得太糊；同时受 max_edge 约束
+                scale = max(1.5, min(2.5, max_edge / longest))
+                if longest * scale > max_edge:
+                    scale = max_edge / longest
                 pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                 png_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
 
                 messages = [
                     SystemMessage(
-                        content="你是一位资深需求分析专家，擅长从原型截图中提取需求要点。"
+                        content=(
+                            "你是多模态需求分析助手。用户消息中会附带 image_url 图片，"
+                            "你必须基于图片像素内容提取文字，不能忽略图片。"
+                        )
                     ),
                     HumanMessage(
                         content=[
                             {
                                 "type": "text",
                                 "text": (
-                                    f"这是 PDF 第 {index + 1}/{page_count} 页。\n"
+                                    f"这是 PDF 第 {index + 1}/{page_count} 页截图。"
                                     f"{page_prompt}"
                                 ),
                             },
                             {
                                 "type": "image_url",
                                 "image_url": {
-                                    "url": f"data:image/png;base64,{png_b64}"
+                                    "url": f"data:image/png;base64,{png_b64}",
+                                    "detail": "high",
                                 },
                             },
                         ]
                     ),
                 ]
 
-                logger.info("PDF 识图提取第 %s/%s 页...", index + 1, limit)
+                logger.info(
+                    "PDF 识图提取第 %s/%s 页... png_bytes≈%s",
+                    index + 1,
+                    limit,
+                    len(png_b64) * 3 // 4,
+                )
                 try:
                     response = safe_llm_invoke(llm, messages)
                     page_text = self._llm_content_to_text(
@@ -564,20 +602,55 @@ class DocumentProcessor:
                         f"PDF 第 {index + 1} 页识图提取失败: {exc}"
                     ) from exc
 
+                if "ERROR_NO_IMAGE" in (page_text or "").upper().replace(" ", ""):
+                    no_image_pages += 1
+                    logger.warning(
+                        "PDF 第 %s 页模型回报未看到图片，响应预览: %s",
+                        index + 1,
+                        (page_text or "")[:120],
+                    )
+                    page_text = ""
+                quality = self._vision_page_quality(page_text)
+                if not quality["ok"]:
+                    weak_pages += 1
+                    logger.warning(
+                        "PDF 第 %s 页识图质量偏低: effective=%s ratio=%.2f preview=%r",
+                        index + 1,
+                        quality["effective_chars"],
+                        quality["unreadable_ratio"],
+                        (page_text or "")[:160],
+                    )
                 page_texts.append(page_text)
 
-            content = self._format_pdf_pages(page_texts)
-            if not content.strip():
+            if no_image_pages >= max(1, (limit + 1) // 2):
                 raise ValueError(
-                    f"PDF 共 {page_count} 页，视觉模型未识别出有效文字。"
-                    "请确认模型真正支持识图，或改用 Word/可复制文字的 PDF。"
+                    f"视觉模型在 {no_image_pages}/{limit} 页回报未看到图片。"
+                    "当前网关模型很可能未真正支持多模态（仅返回 HTTP 200）。"
+                    "请更换支持识图的模型，并确认 LLM 配置已开启 supports_vision。"
+                )
+
+            content = self._format_pdf_pages(page_texts)
+            total_quality = self._vision_page_quality(
+                re.sub(r"=== 第\d+页 ===\n?", "", content)
+            )
+            if (
+                not content.strip()
+                or weak_pages >= max(1, (limit * 2 + 2) // 3)
+                or total_quality["effective_chars"] < max(80, limit * 15)
+            ):
+                raise ValueError(
+                    f"PDF 共 {page_count} 页识图后有效内容不足"
+                    f"（弱页 {weak_pages}/{limit}，有效字符约 {total_quality['effective_chars']}）。"
+                    "常见原因：模型未真正读图、原型图文字过小。"
+                    "请换支持识图的多模态模型，或改用 Word/可复制文字的 PDF。"
                 )
 
             logger.info(
-                "PDF 识图提取完成: 处理页数=%s/%s, 内容长度=%s",
+                "PDF 识图提取完成: 处理页数=%s/%s, 内容长度=%s, 弱页=%s",
                 limit,
                 page_count,
                 len(content),
+                weak_pages,
             )
             return content
         finally:
