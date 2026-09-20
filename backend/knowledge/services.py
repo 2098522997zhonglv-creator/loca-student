@@ -663,30 +663,21 @@ class DocumentProcessor:
         ):
             add_variant(name_variants, name)
 
-        # 1) 壳 HTML 内嵌的 data.js
-        if shell_html:
-            for m in re.finditer(
-                r"""(?:src|href)\s*=\s*["']([^"']*?files/[^"']+?/data\.js)["']""",
-                shell_html,
-                flags=re.I,
-            ):
-                rel = m.group(1).strip()
-                if rel.startswith("http"):
-                    cand = rel
-                else:
-                    cand = self._axure_build_url(
-                        scheme,
-                        netloc,
-                        base_path.rstrip("/") + "/" + rel.lstrip("./"),
-                    )
-                resp = self._axure_get(cand, headers, timeout)
-                if resp is not None and resp.status_code == 200 and resp.text:
-                    text = self._extract_text_from_axure_js(resp.text)
-                    if text and len(text) >= 20:
-                        logger.info("Axure data.js(壳引用) 命中: %s", cand)
-                        return text
+        logger.info(
+            "Axure 目标页 p=%r id=%r variants=%s url=%s",
+            page_name,
+            page_id,
+            name_variants[:6],
+            url[:200],
+        )
+        if not page_name:
+            logger.warning("Axure URL 缺少 #p= 页面参数，无法定位需求页")
+            return ""
 
-        # 2) document.js：解析 pageName + url 对
+        # 注意：不要使用壳 HTML 里默认首页的 data.js（常为「版本记录」），
+        # 必须按 #p= 精确抓取目标页。
+
+        # document.js：解析 pageName + url 对
         doc_url = u("data", "document.js")
         resp = self._axure_get(doc_url, headers, timeout)
         sitemap_lines: List[str] = []
@@ -726,7 +717,7 @@ class DocumentProcessor:
                 getattr(resp, "status_code", None),
             )
 
-        # 只抓当前页：严格匹配 p= / pageName，绝不把其它页塞进优先列表
+        # 只抓当前页：严格匹配 p= / pageName
         priority_stems: List[str] = []
         seen_stems = set()
         for name in name_variants:
@@ -773,20 +764,27 @@ class DocumentProcessor:
 
         sections: List[str] = []
         if sitemap_lines:
-            # 目录只保留，避免再去抓全站所有页（会堵死 Web API）
             sections.append("【原型站点目录】\n" + "\n".join(sitemap_lines))
 
         current_text = ""
+        used_stem = ""
         for stem in priority_stems:
+            # 防御：绝不抓与目标 p= 明显无关的页（如误入「版本记录」）
+            if not (
+                self._axure_name_match(page_name, stem)
+                or page_name in stem
+                or stem in page_name
+            ):
+                # 允许 AI/ai、·/- 变体：用 norm_key 包含关系的宽松检查
+                na, nb = self._axure_norm_key(page_name), self._axure_norm_key(stem)
+                if na != nb and na not in nb and nb not in na:
+                    logger.info("Axure 跳过非目标页 stem=%r (目标 p=%r)", stem, page_name)
+                    continue
             current_text = fetch_page_text(stem)
             if current_text:
+                used_stem = stem
                 sections.append(f"【当前页：{stem}】\n{current_text}")
                 break
-        if page_id and not current_text:
-            t = fetch_page_text(page_id)
-            if t:
-                current_text = t
-                sections.append(f"【当前页：{page_id}】\n{t}")
 
         merged = "\n\n".join(sections).strip()
         if not current_text:
@@ -797,23 +795,34 @@ class DocumentProcessor:
             )
             return ""
 
-        if not DocumentProcessor._axure_content_quality_ok(current_text):
+        if used_stem and self._axure_norm_key(used_stem) == self._axure_norm_key(
+            "版本记录"
+        ) and self._axure_norm_key(page_name) != self._axure_norm_key("版本记录"):
             logger.warning(
-                "Axure 当前页文本质量过低（多为样式/控件名），拒绝入库 preview=%r",
+                "Axure 抓到版本记录页但目标是 %r，拒绝入库", page_name
+            )
+            return ""
+
+        if not DocumentProcessor._axure_content_quality_ok(
+            current_text, expected_page=page_name
+        ):
+            logger.warning(
+                "Axure 当前页文本质量过低 preview=%r",
                 current_text[:120],
             )
             return ""
 
         logger.info(
-            "Axure 汇总完成 current=True sections=%s chars=%s",
+            "Axure 汇总完成 stem=%r sections=%s chars=%s",
+            used_stem,
             len(sections),
             len(merged),
         )
         return merged
 
     @staticmethod
-    def _axure_content_quality_ok(text: str) -> bool:
-        """过滤 ax_default / 控件噪声后，是否仍有可入库正文。"""
+    def _axure_content_quality_ok(text: str, expected_page: str = "") -> bool:
+        """过滤噪声后是否仍有可入库正文；并拒绝「抓成版本记录」这类错页。"""
         import re
 
         lines = []
@@ -829,7 +838,19 @@ class DocumentProcessor:
                 continue
             lines.append(s)
         body = "\n".join(lines)
-        if any(k in body for k in ("说明", "数据来源", "搜索条件", "配置管理", "加价", "模型")):
+
+        # 目标不是版本记录页时，拒绝版本表内容
+        if expected_page and DocumentProcessor._axure_norm_key(
+            expected_page
+        ) != DocumentProcessor._axure_norm_key("版本记录"):
+            if ("修订人" in body or "修改内容" in body) and "说明" not in body:
+                if body.count("版本") >= 1 and len(body) < 400:
+                    return False
+
+        if any(
+            k in body
+            for k in ("说明", "数据来源", "搜索条件", "配置管理", "加价", "模型标识")
+        ):
             return len(body) >= 20
         return len(body) >= 40
 

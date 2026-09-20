@@ -305,7 +305,7 @@ class Document(models.Model):
         blank=True,
         null=True
     )
-    url = models.URLField(_('网页链接'), blank=True, null=True, max_length=1000)
+    url = models.TextField(_('网页链接'), blank=True, null=True)
     content = models.TextField(_('文档内容'), blank=True, null=True)
 
     # 外部来源（钉钉等）
