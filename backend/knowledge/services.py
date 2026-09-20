@@ -428,24 +428,42 @@ class DocumentProcessor:
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
+
+        def _header_value(value: str) -> str:
+            """requests/urllib3 要求 header 值为 latin-1；非 ASCII 按 UTF-8 字节透传。"""
+            try:
+                value.encode("latin-1")
+                return value
+            except UnicodeEncodeError:
+                return value.encode("utf-8").decode("latin-1")
+
         cookie = (getattr(settings, "KB_URL_COOKIE", "") or "").strip()
         if cookie:
-            headers["Cookie"] = cookie
+            headers["Cookie"] = _header_value(cookie)
 
-        auth = None
+        # 不用 requests auth=：其 Basic 实现按 latin-1 编码用户名密码，中文会直接炸。
         basic = (getattr(settings, "KB_URL_BASIC_AUTH", "") or "").strip()
         if basic and ":" in basic:
+            import base64
+
             user, _, password = basic.partition(":")
-            auth = (user, password)
+            token = base64.b64encode(
+                f"{user}:{password}".encode("utf-8")
+            ).decode("ascii")
+            headers["Authorization"] = f"Basic {token}"
 
         try:
             resp = requests.get(
                 fetch_url,
                 headers=headers,
-                auth=auth,
                 timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30),
                 allow_redirects=True,
             )
+        except UnicodeEncodeError as e:
+            raise ValueError(
+                f"请求头含无法编码的字符: {e}。"
+                "请检查 KB_URL_BASIC_AUTH / KB_URL_COOKIE 是否含特殊字符。"
+            ) from e
         except requests.RequestException as e:
             raise ValueError(f"拉取 URL 失败: {e}") from e
 
