@@ -1347,6 +1347,11 @@ class VectorStoreManager:
         logger.info(f"   💾 向量存储类型: Qdrant")
 
     @classmethod
+    def using_embedded_qdrant(cls) -> bool:
+        """未配置 QDRANT_URL 时使用本地嵌入式存储（单进程独占目录锁）。"""
+        return not bool(os.environ.get("QDRANT_URL", "").strip())
+
+    @classmethod
     def _new_qdrant_client(cls) -> QdrantClient:
         """Use embedded on-disk Qdrant by default; a URL remains optional."""
         qdrant_url = os.environ.get("QDRANT_URL", "").strip()
@@ -1360,7 +1365,17 @@ class VectorStoreManager:
         # Embedded Qdrant takes an exclusive directory lock. Reuse one process-wide
         # client so multiple knowledge bases can safely use separate collections.
         if cls._embedded_qdrant_client is None:
-            cls._embedded_qdrant_client = QdrantClient(path=local_path)
+            try:
+                cls._embedded_qdrant_client = QdrantClient(path=local_path)
+            except Exception as e:
+                err = str(e).lower()
+                if "already" in err or "lock" in err or "access" in err:
+                    raise RuntimeError(
+                        "嵌入式 Qdrant 目录已被其他进程占用（常见于 Celery worker 与 "
+                        "Web 同时打开 data/qdrant）。请只保留 Web 进程索引，或设置环境变量 "
+                        f"QDRANT_URL 使用独立 Qdrant 服务。原始错误: {e}"
+                    ) from e
+                raise
         return cls._embedded_qdrant_client
 
     def _get_collection_name(self) -> str:
@@ -1693,10 +1708,13 @@ class VectorStoreManager:
             kb_id,
         )
         service = KnowledgeBaseService(self.knowledge_base)
+        success = 0
         for doc in completed_docs:
             try:
                 ok = service.process_document(doc)
-                if not ok:
+                if ok:
+                    success += 1
+                else:
                     logger.error(
                         "自动重建文档失败 doc_id=%s title=%r",
                         doc.id,
@@ -1709,8 +1727,29 @@ class VectorStoreManager:
                     e,
                 )
 
+        points_after = self._collection_points_count(self._get_collection_name())
+        if success == 0 or points_after <= 0:
+            # 允许后续请求重试（例如嵌入服务短暂不可用）
+            VectorStoreManager._reindex_attempted_ids.discard(kb_id)
+            logger.error(
+                "知识库 %s 自动重建未写入向量 (success=%s points=%s)",
+                kb_id,
+                success,
+                points_after,
+            )
+        else:
+            logger.info(
+                "知识库 %s 自动重建完成: success=%s/%s points=%s",
+                kb_id,
+                success,
+                len(completed_docs),
+                points_after,
+            )
+
     def _ensure_collection_for_search(self) -> None:
-        """检索前确保集合存在；集合缺失或空壳时自动重建索引。"""
+        """检索前确保集合存在；集合缺失/空壳/与 DB 分块不一致时自动重建。"""
+        from .models import DocumentChunk
+
         collection_name = self._get_collection_name()
         existed = False
         try:
@@ -1724,13 +1763,19 @@ class VectorStoreManager:
         _ = self.vector_store
 
         points_count = self._collection_points_count(collection_name)
+        db_chunks = DocumentChunk.objects.filter(
+            document__knowledge_base=self.knowledge_base,
+            document__status="completed",
+        ).count()
         completed_exists = self.knowledge_base.documents.filter(
             status="completed"
         ).exists()
 
-        # 集合不存在刚创建、或上次创建失败留下空壳：有文档则重建
+        # 集合缺失、空壳、或 DB 有分块但向量明显偏少（常见于 Worker/Web 各写各的）
         need_reindex = completed_exists and (
-            not existed or points_count == 0
+            not existed
+            or points_count <= 0
+            or (db_chunks > 0 and points_count >= 0 and points_count < db_chunks)
         )
         if not need_reindex:
             if not existed and not completed_exists:
@@ -1739,7 +1784,12 @@ class VectorStoreManager:
                 )
             return
 
-        reason = "集合缺失" if not existed else "集合为空"
+        if not existed:
+            reason = "集合缺失"
+        elif points_count <= 0:
+            reason = "集合为空"
+        else:
+            reason = f"向量数({points_count})少于DB分块({db_chunks})"
         self._reindex_completed_documents(reason)
 
     def similarity_search(

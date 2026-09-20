@@ -115,6 +115,24 @@ def upsert_dingtalk_document(
 
 
 def _process_now(document: Document) -> None:
+    """向量化文档。嵌入式 Qdrant 在 Celery worker 中无法与 Web 共享目录锁，改为标记待 Web 重建。"""
+    import sys
+
+    from .services import VectorStoreManager
+
+    argv = " ".join(sys.argv).lower()
+    in_worker = "celery" in argv and "worker" in argv
+    if VectorStoreManager.using_embedded_qdrant() and in_worker:
+        # 保留 completed，便于 Web 检索时按「集合空/分块不一致」自动重建
+        document.status = "completed"
+        document.error_message = "deferred_embedded_qdrant_reindex"
+        document.save(update_fields=["status", "error_message"])
+        logger.warning(
+            "嵌入式 Qdrant：Celery worker 跳过向量写入，等待 Web 检索重建 doc_id=%s",
+            document.id,
+        )
+        return
+
     service = KnowledgeBaseService(document.knowledge_base)
     service.process_document(document)
 

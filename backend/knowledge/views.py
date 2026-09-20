@@ -62,10 +62,22 @@ def _restore_masked_secret(candidate, stored_secret):
 
 
 def _dispatch_document_task(document):
-    """派发文档处理任务：优先 Celery，不可用时同步执行"""
+    """派发文档处理任务。
+
+    嵌入式 Qdrant 目录锁只能被一个进程持有：此时必须在 Web 进程同步索引，
+    否则 Celery worker 写入的向量对检索进程不可见。
+    """
+    from .services import VectorStoreManager
     from .tasks import process_document_task
 
     def _send():
+        if VectorStoreManager.using_embedded_qdrant():
+            logger.info(
+                "嵌入式 Qdrant：在 Web 进程同步处理文档 doc_id=%s",
+                document.id,
+            )
+            process_document_task(str(document.id))
+            return
         try:
             process_document_task.delay(str(document.id))
         except Exception as e:
@@ -242,6 +254,42 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
     def perform_create(self, serializer):
         """创建知识库时自动设置创建人"""
         serializer.save(creator=self.request.user)
+
+    @action(detail=True, methods=["post"], url_path="rebuild-index")
+    def rebuild_index(self, request, pk=None):
+        """在当前 Web 进程重建该知识库的 Qdrant 索引（修复嵌入式空集合）。"""
+        from .services import KnowledgeBaseService, VectorStoreManager
+
+        knowledge_base = self.get_object()
+        VectorStoreManager.clear_cache(knowledge_base.id)
+        VectorStoreManager.drop_collection(knowledge_base.id)
+
+        docs = knowledge_base.documents.filter(status="completed")
+        service = KnowledgeBaseService(knowledge_base)
+        success, failed = 0, 0
+        errors = []
+        for doc in docs:
+            try:
+                if service.process_document(doc):
+                    success += 1
+                else:
+                    failed += 1
+                    errors.append({"doc_id": str(doc.id), "title": doc.title})
+            except Exception as e:
+                failed += 1
+                errors.append(
+                    {"doc_id": str(doc.id), "title": doc.title, "error": str(e)[:200]}
+                )
+
+        return Response(
+            {
+                "knowledge_base_id": str(knowledge_base.id),
+                "total": docs.count(),
+                "success": success,
+                "failed": failed,
+                "errors": errors[:20],
+            }
+        )
 
     @action(detail=True, methods=["post"])
     def query(self, request, pk=None):

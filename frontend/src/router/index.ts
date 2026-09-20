@@ -23,6 +23,8 @@ import TestSuiteManagementView from '@/views/TestSuiteManagementView.vue'
 import TestExecutionHistoryView from '@/views/TestExecutionHistoryView.vue'
 import TemplateManagementView from '@/features/testcase-templates/views/TemplateManagementView.vue'
 import UiAutomationView from '@/features/ui-automation/views/UiAutomationView.vue'
+import OperationLogView from '@/views/OperationLogView.vue'
+import SystemRuntimeLogView from '@/views/SystemRuntimeLogView.vue'
 
 const children: RouteRecordRaw[] = [
   { path: 'dashboard', name: 'Dashboard', component: KnowledgeHomeView },
@@ -50,8 +52,8 @@ const children: RouteRecordRaw[] = [
   { path: 'api-keys', name: 'ApiKeyManagement', component: ApiKeyManagementView },
   { path: 'remote-mcp-configs', name: 'RemoteMcpConfigManagement', component: RemoteMcpConfigManagementView },
   { path: 'skills', name: 'SkillsManagement', component: SkillsManagementView },
-  { path: 'operation-logs', name: 'OperationLogs', component: () => import('@/views/OperationLogView.vue') },
-  { path: 'system-runtime-logs', name: 'SystemRuntimeLogs', component: () => import('@/views/SystemRuntimeLogView.vue') },
+  { path: 'operation-logs', name: 'OperationLogs', component: OperationLogView },
+  { path: 'system-runtime-logs', name: 'SystemRuntimeLogs', component: SystemRuntimeLogView },
 ]
 
 const routes: RouteRecordRaw[] = [

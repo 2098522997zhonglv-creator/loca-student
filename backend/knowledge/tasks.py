@@ -11,8 +11,23 @@ logger = logging.getLogger(__name__)
 @shared_task(bind=True, name='knowledge.process_document')
 def process_document_task(self, document_id):
     """异步处理文档：加载、分块、向量化"""
+    import sys
+
     from .models import Document
-    from .services import KnowledgeBaseService
+    from .services import KnowledgeBaseService, VectorStoreManager
+
+    argv = " ".join(sys.argv).lower()
+    in_worker = "celery" in argv and "worker" in argv
+    if VectorStoreManager.using_embedded_qdrant() and in_worker:
+        logger.warning(
+            "KB_DOC skip vectorize in celery worker (embedded Qdrant) doc_id=%s",
+            document_id,
+        )
+        Document.objects.filter(id=document_id).update(
+            status="completed",
+            error_message="deferred_embedded_qdrant_reindex",
+        )
+        return
 
     try:
         document = Document.objects.select_related('knowledge_base').get(id=document_id)
