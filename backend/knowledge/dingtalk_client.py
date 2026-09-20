@@ -422,10 +422,35 @@ def blocks_to_markdown(blocks: List[Dict[str, Any]]) -> str:
     """将钉钉一级块粗转为 Markdown（检索优先，不追求 100% 保真）。"""
     lines: List[str] = []
     for block in blocks or []:
-        text = _block_to_markdown(block)
+        try:
+            text = _block_to_markdown(block)
+        except Exception as e:
+            logger.warning("块转 Markdown 失败，降级为纯文本: %s", e)
+            text = _inline_text(block)
         if text is not None and str(text).strip():
             lines.append(str(text).rstrip())
     return "\n\n".join(lines).strip() + ("\n" if lines else "")
+
+
+def _parse_heading_level(raw: Any, default: int = 1) -> int:
+    """兼容 level=5 / 'heading-5' / 'h5' 等钉钉标题层级写法。"""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return default
+    if isinstance(raw, int):
+        return max(1, min(raw, 6))
+    text = str(raw).strip().lower()
+    if not text:
+        return default
+    if text.isdigit():
+        return max(1, min(int(text), 6))
+    import re
+
+    match = re.search(r"(\d+)", text)
+    if match:
+        return max(1, min(int(match.group(1)), 6))
+    return default
 
 
 def _block_to_markdown(block: Dict[str, Any]) -> str:
@@ -446,8 +471,10 @@ def _block_to_markdown(block: Dict[str, Any]) -> str:
 
     if "heading" in block or block_type.startswith("heading") or block_type == "header":
         heading = block.get("heading") or block.get("header") or block
-        level = int(heading.get("level") or heading.get("headingLevel") or 1)
-        level = max(1, min(level, 6))
+        level = _parse_heading_level(
+            heading.get("level") or heading.get("headingLevel") or block_type,
+            default=1,
+        )
         text = _inline_text(heading)
         return f"{'#' * level} {text}".strip()
 
