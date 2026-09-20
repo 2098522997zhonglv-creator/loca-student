@@ -540,11 +540,9 @@ class DocumentProcessor:
         if not text or len(text) < 20:
             if looks_axure or "#p=" in (url or "") or "p=" in (urlparse(url).fragment or ""):
                 raise ValueError(
-                    "该链接是 Axure 动态原型，静态 HTML 无正文，data.js 也未解析到可用文本。"
-                    "请优先：粘贴需求说明或上传 Word/PDF。"
-                    "若必须抓原型页，在服务器执行："
-                    "pip install playwright && playwright install chromium "
-                    "后重启服务再重试。"
+                    "该 Axure 原型未能提取到有效需求正文（多为切图/样式类名）。"
+                    "请改用：粘贴「说明」文本，或上传 Word/PDF 需求文档。"
+                    "不要仅依赖原型链接入库。"
                 )
             raise ValueError("URL 页面正文过短或为空，无法入库")
 
@@ -612,10 +610,10 @@ class DocumentProcessor:
 
     @classmethod
     def _axure_name_match(cls, a: str, b: str) -> bool:
+        """严格匹配，避免「新增-ai…」误命中其它页。"""
         if not a or not b:
             return False
-        na, nb = cls._axure_norm_key(a), cls._axure_norm_key(b)
-        return na == nb or na in nb or nb in na
+        return cls._axure_norm_key(a) == cls._axure_norm_key(b)
 
     def _load_axure_page_text(
         self, url: str, headers: dict, timeout: int, shell_html: str = ""
@@ -715,18 +713,11 @@ class DocumentProcessor:
                 except Exception:
                     pass
                 page_entries.append((pname, stem))
-                add_variant(name_variants, stem)
-                add_variant(name_variants, pname)
                 if self._axure_name_match(page_name, stem) or self._axure_name_match(
                     page_name, pname
                 ):
-                    # 当前页相关名提到最前
-                    if stem in name_variants:
-                        name_variants.remove(stem)
-                    name_variants.insert(0, stem)
-                    if pname in name_variants:
-                        name_variants.remove(pname)
-                    name_variants.insert(0, pname)
+                    add_variant(name_variants, stem)
+                    add_variant(name_variants, pname)
                 sitemap_lines.append(f"- {pname} ({stem})")
         else:
             logger.warning(
@@ -735,24 +726,23 @@ class DocumentProcessor:
                 getattr(resp, "status_code", None),
             )
 
-        # 当前页优先的 stem 列表
+        # 只抓当前页：严格匹配 p= / pageName，绝不把其它页塞进优先列表
         priority_stems: List[str] = []
-        other_stems: List[str] = []
         seen_stems = set()
+        for name in name_variants:
+            if name and name not in seen_stems:
+                priority_stems.append(name)
+                seen_stems.add(name)
         for pname, stem in page_entries:
-            if stem in seen_stems:
-                continue
-            seen_stems.add(stem)
             if self._axure_name_match(page_name, stem) or self._axure_name_match(
                 page_name, pname
             ):
-                priority_stems.append(stem)
-            else:
-                other_stems.append(stem)
-        for name in name_variants:
-            if name not in seen_stems:
-                priority_stems.append(name)
-                seen_stems.add(name)
+                if stem not in seen_stems:
+                    priority_stems.insert(0, stem)
+                    seen_stems.add(stem)
+                if pname not in seen_stems:
+                    priority_stems.insert(0, pname)
+                    seen_stems.add(pname)
 
         def fetch_page_text(stem: str) -> str:
             for cand in (
@@ -782,11 +772,10 @@ class DocumentProcessor:
             return ""
 
         sections: List[str] = []
-        # 站点目录（侧栏）
         if sitemap_lines:
+            # 目录只保留，避免再去抓全站所有页（会堵死 Web API）
             sections.append("【原型站点目录】\n" + "\n".join(sitemap_lines))
 
-        # 先抓当前页（说明文案所在）
         current_text = ""
         for stem in priority_stems:
             current_text = fetch_page_text(stem)
@@ -799,35 +788,50 @@ class DocumentProcessor:
                 current_text = t
                 sections.append(f"【当前页：{page_id}】\n{t}")
 
-        # 再抓其余页，尽量「抓全」整个原型（上限防止过大）
-        max_chars = 120000
-        used = sum(len(s) for s in sections)
-        for stem in other_stems:
-            if used >= max_chars:
-                break
-            t = fetch_page_text(stem)
-            if not t:
-                continue
-            block = f"【页面：{stem}】\n{t}"
-            sections.append(block)
-            used += len(block)
-
         merged = "\n\n".join(sections).strip()
-        if merged and len(merged) >= 20:
-            logger.info(
-                "Axure 汇总完成 current=%s sections=%s chars=%s",
-                bool(current_text),
-                len(sections),
-                len(merged),
+        if not current_text:
+            logger.warning(
+                "Axure 未命中当前页 data.js page=%r priority=%s",
+                page_name,
+                priority_stems[:8],
             )
-            return merged
+            return ""
 
-        logger.warning(
-            "Axure 全候选失败 page=%r variants=%s",
-            page_name,
-            name_variants[:12],
+        if not DocumentProcessor._axure_content_quality_ok(current_text):
+            logger.warning(
+                "Axure 当前页文本质量过低（多为样式/控件名），拒绝入库 preview=%r",
+                current_text[:120],
+            )
+            return ""
+
+        logger.info(
+            "Axure 汇总完成 current=True sections=%s chars=%s",
+            len(sections),
+            len(merged),
         )
-        return ""
+        return merged
+
+    @staticmethod
+    def _axure_content_quality_ok(text: str) -> bool:
+        """过滤 ax_default / 控件噪声后，是否仍有可入库正文。"""
+        import re
+
+        lines = []
+        for line in (text or "").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            if "ax_default" in s.lower():
+                continue
+            if DocumentProcessor._is_axure_noise_text(s):
+                continue
+            if re.fullmatch(r"[_a-z0-9\-\s]+", s, flags=re.I) and len(s) < 40:
+                continue
+            lines.append(s)
+        body = "\n".join(lines)
+        if any(k in body for k in ("说明", "数据来源", "搜索条件", "配置管理", "加价", "模型")):
+            return len(body) >= 20
+        return len(body) >= 40
 
     @staticmethod
     def _is_axure_noise_text(value: str) -> bool:
@@ -861,6 +865,8 @@ class DocumentProcessor:
         if re.search(r"(?:^|/)u\d+\.(?:png|svg|jpg|jpeg|gif)$", lower):
             return True
         if re.fullmatch(r"u\d+", lower):
+            return True
+        if "ax_default" in lower or lower.startswith("ax_"):
             return True
         if any(
             x in v
@@ -1983,6 +1989,12 @@ class VectorStoreManager:
         # client so multiple knowledge bases can safely use separate collections.
         if cls._embedded_qdrant_client is None:
             try:
+                cls._embedded_qdrant_client = QdrantClient(
+                    path=local_path,
+                    force_disable_check_same_thread=True,
+                )
+            except TypeError:
+                # 旧版 qdrant-client 无该参数
                 cls._embedded_qdrant_client = QdrantClient(path=local_path)
             except Exception as e:
                 err = str(e).lower()

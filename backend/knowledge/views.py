@@ -9,6 +9,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 from django.db import transaction
 from django.db import models
+from django.db.models import Count, Q
 from django.utils import timezone
 from loca_stude_django.viewsets import BaseModelViewSet
 from .models import (
@@ -64,25 +65,34 @@ def _restore_masked_secret(candidate, stored_secret):
 def _dispatch_document_task(document):
     """派发文档处理任务。
 
-    嵌入式 Qdrant 目录锁只能被一个进程持有：此时必须在 Web 进程同步索引，
-    否则 Celery worker 写入的向量对检索进程不可见。
+    嵌入式 Qdrant 只能单进程写入：在 Web 进程处理，但放到后台线程，
+    避免 Axure/大文件同步索引堵死 API（权限列表、知识库列表一起变慢）。
     """
+    import threading
+
     from .services import VectorStoreManager
     from .tasks import process_document_task
+
+    def _run_sync():
+        process_document_task(str(document.id))
 
     def _send():
         if VectorStoreManager.using_embedded_qdrant():
             logger.info(
-                "嵌入式 Qdrant：在 Web 进程同步处理文档 doc_id=%s",
+                "嵌入式 Qdrant：后台线程处理文档 doc_id=%s",
                 document.id,
             )
-            process_document_task(str(document.id))
+            threading.Thread(
+                target=_run_sync,
+                name=f"kb-doc-{document.id}",
+                daemon=True,
+            ).start()
             return
         try:
             process_document_task.delay(str(document.id))
         except Exception as e:
             logger.warning(f"Celery 不可用 ({e})，降级为同步处理")
-            process_document_task(str(document.id))
+            _run_sync()
 
     transaction.on_commit(_send)
 
@@ -243,13 +253,24 @@ class KnowledgeBaseViewSet(BaseModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        """只返回用户有权限访问的知识库"""
+        """只返回用户有权限访问的知识库；计数一次聚合，避免列表 N+1。"""
         user = self.request.user
-        if user.is_superuser:
-            return KnowledgeBase.objects.all()
+        qs = KnowledgeBase.objects.select_related("project", "creator")
+        if not user.is_superuser:
+            qs = qs.filter(project__members__user=user).distinct()
 
-        # 普通用户只能看到自己是成员的项目的知识库
-        return KnowledgeBase.objects.filter(project__members__user=user).distinct()
+        return qs.annotate(
+            document_count=Count(
+                "documents",
+                filter=Q(documents__is_archived=False),
+                distinct=True,
+            ),
+            chunk_count=Count(
+                "documents__chunks",
+                filter=Q(documents__is_archived=False),
+                distinct=True,
+            ),
+        )
 
     def perform_create(self, serializer):
         """创建知识库时自动设置创建人"""

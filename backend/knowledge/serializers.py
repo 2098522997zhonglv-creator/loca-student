@@ -30,8 +30,8 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
     """知识库序列化器"""
     creator_name = serializers.CharField(source='creator.username', read_only=True)
     project_name = serializers.CharField(source='project.name', read_only=True)
-    document_count = serializers.SerializerMethodField()
-    chunk_count = serializers.SerializerMethodField()
+    document_count = serializers.IntegerField(read_only=True)
+    chunk_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = KnowledgeBase
@@ -45,16 +45,6 @@ class KnowledgeBaseSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'project': {'required': False}  # 在更新时project字段不是必填的
         }
-
-    def get_document_count(self, obj):
-        """获取文档数量（不含已归档）"""
-        return obj.documents.filter(is_archived=False).count()
-
-    def get_chunk_count(self, obj):
-        """获取分块数量"""
-        return DocumentChunk.objects.filter(
-            document__knowledge_base=obj, document__is_archived=False
-        ).count()
 
     def validate_project(self, value):
         """验证项目权限"""
