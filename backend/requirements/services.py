@@ -443,19 +443,34 @@ class DocumentProcessor:
             return "", page_count
         return text.strip(), page_count
 
-    def _extract_from_pdf(self, file) -> str:
-        """提取PDF文件内容；图片型/扫描件在多引擎失败后给出明确错误。"""
-        file.seek(0)
-        raw = file.read()
-        if isinstance(raw, str):
-            raw = raw.encode("utf-8", errors="ignore")
-        if not raw:
-            raise ValueError("PDF 文件为空，无法提取内容")
+    @staticmethod
+    def _llm_content_to_text(content) -> str:
+        """将 LLM 响应 content（str 或多模态块列表）规范为纯文本。"""
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, str):
+                    parts.append(block)
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text") or "")
+                elif hasattr(block, "text"):
+                    parts.append(getattr(block, "text") or "")
+            return "".join(parts).strip()
+        return str(content).strip()
 
+    def _extract_pdf_text_layer(self, raw: bytes) -> Tuple[str, int]:
+        """仅尝试文字层提取，可能返回空字符串。"""
         page_count = 0
         strategies = [
             ("pypdf", lambda: self._extract_pdf_with_pypdf(raw)),
-            ("pypdf-layout", lambda: self._extract_pdf_with_pypdf(raw, extraction_mode="layout")),
+            (
+                "pypdf-layout",
+                lambda: self._extract_pdf_with_pypdf(raw, extraction_mode="layout"),
+            ),
             ("pymupdf", lambda: self._extract_pdf_with_pymupdf(raw)),
             ("pdfminer", lambda: self._extract_pdf_with_pdfminer(raw)),
         ]
@@ -470,16 +485,124 @@ class DocumentProcessor:
                     len(content or ""),
                 )
                 if content and content.strip():
-                    return content
+                    return content, page_count
             except ImportError as exc:
                 logger.info("PDF策略 %s 不可用（依赖未安装）: %s", name, exc)
             except Exception as exc:
                 logger.warning("PDF策略 %s 失败: %s", name, exc)
 
+        return "", page_count
+
+    def _extract_pdf_with_vision(self, raw: bytes, llm) -> str:
+        """将 PDF 页渲成图，用视觉大模型逐页提取需求文本。"""
+        import base64
+
+        import fitz  # pymupdf
+
+        max_pages = 30
+        max_edge = 1280
+        page_prompt = (
+            "请识别这张需求/原型截图中的全部文字与结构信息，"
+            "包括标题、说明、按钮文案、表单字段、业务规则、流程步骤、注释。"
+            "按阅读顺序输出纯文本，保留层级（可用 Markdown 标题与列表）。"
+            "不要编造图中不存在的内容；若某区域无法辨认，写[无法识别]。"
+        )
+
+        doc = fitz.open(stream=raw, filetype="pdf")
+        try:
+            page_count = doc.page_count
+            if page_count <= 0:
+                raise ValueError("PDF 无页面，无法进行识图提取")
+
+            limit = min(page_count, max_pages)
+            if page_count > max_pages:
+                logger.warning(
+                    "PDF 共 %s 页，识图仅处理前 %s 页", page_count, max_pages
+                )
+
+            page_texts: list[str] = []
+            for index in range(limit):
+                page = doc[index]
+                rect = page.rect
+                longest = max(float(rect.width), float(rect.height), 1.0)
+                scale = min(1.0, max_edge / longest)
+                pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
+                png_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+
+                messages = [
+                    SystemMessage(
+                        content="你是一位资深需求分析专家，擅长从原型截图中提取需求要点。"
+                    ),
+                    HumanMessage(
+                        content=[
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"这是 PDF 第 {index + 1}/{page_count} 页。\n"
+                                    f"{page_prompt}"
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{png_b64}"
+                                },
+                            },
+                        ]
+                    ),
+                ]
+
+                logger.info("PDF 识图提取第 %s/%s 页...", index + 1, limit)
+                try:
+                    response = safe_llm_invoke(llm, messages)
+                    page_text = self._llm_content_to_text(
+                        getattr(response, "content", None)
+                    )
+                except Exception as exc:
+                    logger.error("PDF 第 %s 页识图失败: %s", index + 1, exc)
+                    raise ValueError(
+                        f"PDF 第 {index + 1} 页识图提取失败: {exc}"
+                    ) from exc
+
+                page_texts.append(page_text)
+
+            content = self._format_pdf_pages(page_texts)
+            if not content.strip():
+                raise ValueError(
+                    f"PDF 共 {page_count} 页，视觉模型未识别出有效文字。"
+                    "请确认模型真正支持识图，或改用 Word/可复制文字的 PDF。"
+                )
+
+            logger.info(
+                "PDF 识图提取完成: 处理页数=%s/%s, 内容长度=%s",
+                limit,
+                page_count,
+                len(content),
+            )
+            return content
+        finally:
+            doc.close()
+
+    def _read_file_bytes(self, file) -> bytes:
+        file.seek(0)
+        raw = file.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", errors="ignore")
+        return raw or b""
+
+    def _extract_from_pdf(self, file) -> str:
+        """提取PDF文字层；无文字时抛出明确错误（识图回退由拆分流程触发）。"""
+        raw = self._read_file_bytes(file)
+        if not raw:
+            raise ValueError("PDF 文件为空，无法提取内容")
+
+        content, page_count = self._extract_pdf_text_layer(raw)
+        if content and content.strip():
+            return content
+
         raise ValueError(
             f"PDF 共 {page_count or '?'} 页但未提取到可编辑文字。"
             "该文件很可能是扫描件或图片型 PDF（如原型/设计稿导出）。"
-            "请改用 Word(.docx)、可复制选中文字的 PDF，或粘贴需求文本后再拆分。"
         )
 
     def _extract_from_word(self, file, document: RequirementDocument = None) -> str:
@@ -1281,6 +1404,7 @@ class ModuleSplitter:
 
     def __init__(self, user=None):
         self.user = user
+        self.llm_config = None
         self.llm = self._get_llm_instance()
 
     def _get_llm_instance(self):
@@ -1290,6 +1414,7 @@ class ModuleSplitter:
             if not active_config:
                 raise Exception("没有可用的LLM配置")
 
+            self.llm_config = active_config
             # 使用新的LLM工厂函数，支持多供应商
             return create_llm_instance(active_config, temperature=0.1)
         except Exception as e:
@@ -2202,7 +2327,55 @@ class RequirementModuleService:
         self.document_processor = DocumentProcessor()
         self.module_splitter = ModuleSplitter(user=user)
 
+    @staticmethod
+    def _is_pdf_document(document: RequirementDocument) -> bool:
+        if not document.file or not document.file.name:
+            return False
+        return document.file.name.lower().rsplit(".", 1)[-1] == "pdf"
 
+    def _extract_image_pdf_via_vision(
+        self, document: RequirementDocument, prior_error: Optional[Exception] = None
+    ) -> str:
+        """文字层为空时，用视觉模型对 PDF 截图页做识图提取。"""
+        if not self._is_pdf_document(document):
+            if prior_error:
+                raise prior_error
+            raise ValueError("无法提取文档内容")
+
+        llm_config = self.module_splitter.llm_config
+        if llm_config is None:
+            llm_config = LLMConfig.objects.filter(is_active=True).first()
+        if not llm_config:
+            raise ValueError(
+                "PDF 无文字层，需要视觉模型识图提取，但当前没有可用的 LLM 配置。"
+            )
+        if not getattr(llm_config, "supports_vision", False):
+            raise ValueError(
+                "PDF 无文字层（多为原型截图/扫描件），需要识图提取；"
+                "但当前模型未开启「支持图片输入」(supports_vision)。"
+                "请在 LLM 配置中开启，或切换到支持识图的模型后重试。"
+            )
+
+        try:
+            document.file.open("rb")
+            raw = self.document_processor._read_file_bytes(document.file)
+        finally:
+            try:
+                document.file.close()
+            except Exception:
+                pass
+
+        if not raw:
+            raise ValueError("PDF 文件为空，无法进行识图提取")
+
+        logger.info(
+            "PDF 文字层为空，开始视觉识图提取: doc_id=%s model=%s",
+            document.id,
+            llm_config.name,
+        )
+        return self.document_processor._extract_pdf_with_vision(
+            raw, self.module_splitter.llm
+        )
 
     def process_document_and_split(
         self, document: RequirementDocument, split_options: dict = None
@@ -2215,11 +2388,29 @@ class RequirementModuleService:
 
             # 提取文档内容
             logger.info(f"开始处理文档 {document.id}: {document.title}")
-            content = self.document_processor.extract_content(document)
+            content = ""
+            extract_error: Optional[Exception] = None
+            try:
+                content = self.document_processor.extract_content(document) or ""
+            except ValueError as exc:
+                extract_error = exc
+                logger.info("文字提取未成功，将尝试识图回退: %s", exc)
+
+            if not str(content).strip() and self._is_pdf_document(document):
+                content = self._extract_image_pdf_via_vision(
+                    document, prior_error=extract_error
+                )
+
             if not content or not str(content).strip():
+                if extract_error:
+                    raise ValueError(
+                        f"{extract_error} "
+                        "可开启 LLM 的 supports_vision 对截图 PDF 识图提取，"
+                        "或改用 Word(.docx)/可复制文字的 PDF。"
+                    )
                 raise ValueError(
                     "无法提取文档内容。若为 PDF，请确认不是扫描件/图片型文档，"
-                    "可改用 Word(.docx) 或可复制文字的 PDF。"
+                    "可开启 supports_vision 识图，或改用 Word(.docx)/可复制文字的 PDF。"
                 )
 
             logger.info(f"文档内容提取完成，原始长度: {len(content)} 字符")
