@@ -778,6 +778,14 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                     {"error": "文档状态不允许开始评审，请先完成模块拆分"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if not (document.content or "").strip():
+                return Response(
+                    {
+                        "error": "文档内容为空，无法评审。请先成功完成模块拆分；"
+                        "若为扫描件/图片型 PDF，请改用 Word 或可复制文字的 PDF。"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         # 检查权限
         if not CanStartReview().has_object_permission(request, self, document):

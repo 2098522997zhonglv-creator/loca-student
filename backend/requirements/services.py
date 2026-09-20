@@ -3124,7 +3124,8 @@ class RequirementReviewEngine:
                     logic_prompt, document=processed_content
                 )
                 logger.debug(
-                    f"逻辑分析提示词已格式化，文档长度: {len(processed_content)}"
+                    "逻辑分析提示词已格式化，文档长度: %s",
+                    len(processed_content or ""),
                 )
                 messages = [
                     SystemMessage(
@@ -3135,7 +3136,10 @@ class RequirementReviewEngine:
 
             logger.info("调用LLM进行逻辑分析...")
             response = safe_llm_invoke(self.llm, messages)
-            logger.info(f"LLM响应完成，内容长度: {len(response.content)}")
+            logger.info(
+                "LLM响应完成，内容长度: %s",
+                len(response.content or "") if response is not None else 0,
+            )
 
             result = extract_json_from_response(response.content)
             if result:
@@ -3174,8 +3178,25 @@ class RequirementReviewEngine:
         progress_callback = analysis_options.get("progress_callback")  # 进度回调函数
 
         try:
+            content = (document.content or "").strip()
+            if not content and document.file:
+                processor = DocumentProcessor()
+                content = (processor.extract_content(document, force_file=True) or "").strip()
+                if content:
+                    document.content = content
+                    document.save(update_fields=["content", "updated_at"])
+
+            if not content:
+                raise ValueError(
+                    "文档内容为空，无法评审。若为 PDF，请确认不是扫描件/图片型文档，"
+                    "可改用 Word(.docx) 或可复制文字的 PDF，并先完成模块拆分。"
+                )
+
             logger.info(
-                f"开始全面分析文档: {document.title}, 内容长度: {len(document.content)}, 并发数: {max_workers}"
+                "开始全面分析文档: %s, 内容长度: %s, 并发数: %s",
+                document.title,
+                len(content),
+                max_workers,
             )
 
             # 更新进度：开始分析
@@ -3223,7 +3244,7 @@ class RequirementReviewEngine:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # 提交所有任务 - 传递 document 而非 content
                 future_to_analysis = {
-                    executor.submit(task_func, document.content, document): (
+                    executor.submit(task_func, content, document): (
                         name,
                         display_name,
                     )
@@ -3933,6 +3954,23 @@ class RequirementReviewService:
                 document.save()
 
             logger.info(f"开始评审文档: {document.title}")
+
+            if not (document.content or "").strip():
+                if document.file:
+                    try:
+                        extracted = DocumentProcessor().extract_content(
+                            document, force_file=True
+                        )
+                    except ValueError:
+                        raise
+                    if extracted and extracted.strip():
+                        document.content = extracted
+                        document.save(update_fields=["content", "updated_at"])
+                if not (document.content or "").strip():
+                    raise ValueError(
+                        "文档内容为空，无法评审。请先成功完成模块拆分，"
+                        "或改用含可编辑文字的 Word/PDF。"
+                    )
 
             # 定义进度回调函数
             def progress_callback(
