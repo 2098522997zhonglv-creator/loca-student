@@ -4,7 +4,7 @@ import os
 import re
 from datetime import timedelta
 from string import Template
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from django.conf import settings
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -270,6 +270,9 @@ class DocumentProcessor:
                 return self._extract_from_file(document.file, document)
 
             return ""
+        except ValueError:
+            # 业务可理解错误（如扫描件 PDF）向上抛出，便于接口返回明确提示
+            raise
         except Exception as e:
             logger.error(f"提取文档内容失败: {e}")
             return ""
@@ -341,6 +344,8 @@ class DocumentProcessor:
             elif file_extension == "doc":
                 return self._extract_from_doc(file, document)
 
+        except ValueError:
+            raise
         except Exception as e:
             logger.error(f"文件内容提取失败: {e}")
             return ""
@@ -380,44 +385,102 @@ class DocumentProcessor:
         """提取Markdown文件内容"""
         return self._extract_from_txt(file)  # Markdown本质上是文本文件
 
-    def _extract_from_pdf(self, file) -> str:
-        """提取PDF文件内容"""
+    @staticmethod
+    def _format_pdf_pages(page_texts: list[str]) -> str:
+        parts = []
+        for idx, text in enumerate(page_texts):
+            cleaned = (text or "").strip()
+            if cleaned:
+                parts.append(f"=== 第{idx + 1}页 ===\n{cleaned}")
+        return "\n\n".join(parts)
+
+    def _extract_pdf_with_pypdf(self, raw: bytes, extraction_mode: Optional[str] = None) -> Tuple[str, int]:
+        from io import BytesIO
+
+        from pypdf import PdfReader
+
+        reader = PdfReader(BytesIO(raw))
+        page_texts: list[str] = []
+        for page in reader.pages:
+            try:
+                if extraction_mode:
+                    page_texts.append(page.extract_text(extraction_mode=extraction_mode) or "")
+                else:
+                    page_texts.append(page.extract_text() or "")
+            except TypeError:
+                # 旧版 pypdf 不支持 extraction_mode
+                page_texts.append(page.extract_text() or "")
+            except Exception as exc:
+                logger.warning("pypdf 单页提取失败: %s", exc)
+                page_texts.append("")
+        return self._format_pdf_pages(page_texts), len(reader.pages)
+
+    def _extract_pdf_with_pymupdf(self, raw: bytes) -> Tuple[str, int]:
+        import fitz  # pymupdf
+
+        doc = fitz.open(stream=raw, filetype="pdf")
+        try:
+            page_texts = [page.get_text("text") or "" for page in doc]
+            return self._format_pdf_pages(page_texts), doc.page_count
+        finally:
+            doc.close()
+
+    def _extract_pdf_with_pdfminer(self, raw: bytes) -> Tuple[str, int]:
+        from io import BytesIO
+
+        from pdfminer.high_level import extract_text
+
+        text = extract_text(BytesIO(raw)) or ""
+        # pdfminer 不方便按页切，整份作为单块；页数用 pypdf 估算
+        page_count = 0
         try:
             from pypdf import PdfReader
 
-            # 重置文件指针
-            file.seek(0)
+            page_count = len(PdfReader(BytesIO(raw)).pages)
+        except Exception:
+            page_count = 1 if text.strip() else 0
+        if not text.strip():
+            return "", page_count
+        return text.strip(), page_count
 
-            # 创建PDF读取器
-            pdf_reader = PdfReader(file)
+    def _extract_from_pdf(self, file) -> str:
+        """提取PDF文件内容；图片型/扫描件在多引擎失败后给出明确错误。"""
+        file.seek(0)
+        raw = file.read()
+        if isinstance(raw, str):
+            raw = raw.encode("utf-8", errors="ignore")
+        if not raw:
+            raise ValueError("PDF 文件为空，无法提取内容")
 
-            # 提取所有页面的文本
-            text_content = []
-            for page_num, page in enumerate(pdf_reader.pages):
-                try:
-                    page_text = page.extract_text()
-                    if page_text.strip():
-                        text_content.append(
-                            f"=== 第{page_num + 1}页 ===\n{page_text.strip()}"
-                        )
-                except Exception as e:
-                    logger.warning(f"提取PDF第{page_num + 1}页失败: {e}")
-                    continue
+        page_count = 0
+        strategies = [
+            ("pypdf", lambda: self._extract_pdf_with_pypdf(raw)),
+            ("pypdf-layout", lambda: self._extract_pdf_with_pypdf(raw, extraction_mode="layout")),
+            ("pymupdf", lambda: self._extract_pdf_with_pymupdf(raw)),
+            ("pdfminer", lambda: self._extract_pdf_with_pdfminer(raw)),
+        ]
 
-            content = "\n\n".join(text_content)
-            logger.info(
-                f"成功提取PDF内容，页数: {len(pdf_reader.pages)}, 内容长度: {len(content)}"
-            )
+        for name, runner in strategies:
+            try:
+                content, page_count = runner()
+                logger.info(
+                    "PDF策略 %s: 页数=%s, 内容长度=%s",
+                    name,
+                    page_count,
+                    len(content or ""),
+                )
+                if content and content.strip():
+                    return content
+            except ImportError as exc:
+                logger.info("PDF策略 %s 不可用（依赖未安装）: %s", name, exc)
+            except Exception as exc:
+                logger.warning("PDF策略 %s 失败: %s", name, exc)
 
-            return content
-
-        except ImportError:
-            logger.error("pypdf库未安装，无法解析PDF文档")
-            return ""
-        except Exception as e:
-            logger.error(f"PDF文档解析失败: {e}")
-            # 如果PDF解析失败，不要fallback到文本读取
-            return ""
+        raise ValueError(
+            f"PDF 共 {page_count or '?'} 页但未提取到可编辑文字。"
+            "该文件很可能是扫描件或图片型 PDF（如原型/设计稿导出）。"
+            "请改用 Word(.docx)、可复制选中文字的 PDF，或粘贴需求文本后再拆分。"
+        )
 
     def _extract_from_word(self, file, document: RequirementDocument = None) -> str:
         """提取Word文件内容，保留标题格式、表格位置和图片"""
@@ -2153,8 +2216,11 @@ class RequirementModuleService:
             # 提取文档内容
             logger.info(f"开始处理文档 {document.id}: {document.title}")
             content = self.document_processor.extract_content(document)
-            if not content:
-                raise Exception("无法提取文档内容")
+            if not content or not str(content).strip():
+                raise ValueError(
+                    "无法提取文档内容。若为 PDF，请确认不是扫描件/图片型文档，"
+                    "可改用 Word(.docx) 或可复制文字的 PDF。"
+                )
 
             logger.info(f"文档内容提取完成，原始长度: {len(content)} 字符")
 
