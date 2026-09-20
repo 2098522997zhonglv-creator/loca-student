@@ -1685,24 +1685,44 @@ class VectorStoreManager:
             logger.warning(f"读取集合点数失败 {collection_name}: {e}")
             return -1
 
-    def _reindex_completed_documents(self, reason: str) -> None:
+    def _docs_for_reindex(self):
+        """可重建文档：completed，以及曾延期向量化的文档。"""
+        from django.db.models import Q
+
+        return list(
+            self.knowledge_base.documents.filter(
+                Q(status="completed")
+                | Q(error_message="deferred_embedded_qdrant_reindex")
+            )
+            .exclude(is_archived=True)
+            .order_by("uploaded_at")
+        )
+
+    def _reindex_completed_documents(self, reason: str, force: bool = False) -> None:
         """将已完成文档重新写入当前 Qdrant 集合。"""
         kb_id = str(self.knowledge_base.id)
-        if kb_id in VectorStoreManager._reindex_attempted_ids:
+        if not force and kb_id in VectorStoreManager._reindex_attempted_ids:
             logger.info(f"本进程已尝试重建过知识库 {kb_id}，跳过重复重建")
             return
 
-        completed_docs = list(
-            self.knowledge_base.documents.filter(status="completed").order_by(
-                "uploaded_at"
-            )
-        )
+        completed_docs = self._docs_for_reindex()
         if not completed_docs:
+            from collections import Counter
+
+            logger.warning(
+                "无法自动重建：知识库 %s 无可用文档 status=%s",
+                kb_id,
+                dict(
+                    Counter(
+                        self.knowledge_base.documents.values_list("status", flat=True)
+                    )
+                ),
+            )
             return
 
         VectorStoreManager._reindex_attempted_ids.add(kb_id)
         logger.warning(
-            "Qdrant 需重建（%s），已完成文档 %s 个: kb_%s",
+            "Qdrant 需重建（%s），文档 %s 个: kb_%s",
             reason,
             len(completed_docs),
             kb_id,
@@ -1716,9 +1736,11 @@ class VectorStoreManager:
                     success += 1
                 else:
                     logger.error(
-                        "自动重建文档失败 doc_id=%s title=%r",
+                        "自动重建文档失败 doc_id=%s title=%r status=%s err=%r",
                         doc.id,
                         doc.title,
+                        doc.status,
+                        (doc.error_message or "")[:200],
                     )
             except Exception as e:
                 logger.error(
@@ -1729,7 +1751,6 @@ class VectorStoreManager:
 
         points_after = self._collection_points_count(self._get_collection_name())
         if success == 0 or points_after <= 0:
-            # 允许后续请求重试（例如嵌入服务短暂不可用）
             VectorStoreManager._reindex_attempted_ids.discard(kb_id)
             logger.error(
                 "知识库 %s 自动重建未写入向量 (success=%s points=%s)",
@@ -1758,7 +1779,6 @@ class VectorStoreManager:
             logger.warning(f"检查 Qdrant 集合失败: {e}")
             existed = False
 
-        # 显式确保集合（不依赖可能被吞掉的副作用）
         self._ensure_qdrant_collection()
         _ = self.vector_store
 
@@ -1766,21 +1786,38 @@ class VectorStoreManager:
         db_chunks = DocumentChunk.objects.filter(
             document__knowledge_base=self.knowledge_base,
             document__status="completed",
+            document__is_archived=False,
         ).count()
-        completed_exists = self.knowledge_base.documents.filter(
-            status="completed"
-        ).exists()
+        reindex_docs = self._docs_for_reindex()
+        completed_exists = len(reindex_docs) > 0
 
-        # 集合缺失、空壳、或 DB 有分块但向量明显偏少（常见于 Worker/Web 各写各的）
+        logger.info(
+            "KB_SEARCH ensure collection=%s existed=%s points=%s db_chunks=%s reindex_docs=%s",
+            collection_name,
+            existed,
+            points_count,
+            db_chunks,
+            len(reindex_docs),
+        )
+
         need_reindex = completed_exists and (
             not existed
             or points_count <= 0
             or (db_chunks > 0 and points_count >= 0 and points_count < db_chunks)
         )
         if not need_reindex:
-            if not existed and not completed_exists:
-                logger.info(
-                    f"集合 {collection_name} 不存在且无已完成文档，已创建空集合供检索"
+            if not completed_exists:
+                from collections import Counter
+
+                counts = dict(
+                    Counter(
+                        self.knowledge_base.documents.values_list("status", flat=True)
+                    )
+                )
+                logger.warning(
+                    "知识库 %s 无可重建文档，文档状态分布: %s",
+                    self.knowledge_base.id,
+                    counts or "{}",
                 )
             return
 
@@ -1791,6 +1828,41 @@ class VectorStoreManager:
         else:
             reason = f"向量数({points_count})少于DB分块({db_chunks})"
         self._reindex_completed_documents(reason)
+
+    def _force_reindex_after_empty_hits(self) -> bool:
+        """集合无向量但库内有文档时，删除集合并强制重建一次。"""
+        docs = self._docs_for_reindex()
+        if not docs:
+            from collections import Counter
+
+            logger.warning(
+                "检索无命中且无可重建文档，status=%s",
+                dict(
+                    Counter(
+                        self.knowledge_base.documents.values_list("status", flat=True)
+                    )
+                ),
+            )
+            return False
+
+        points = self._collection_points_count(self._get_collection_name())
+        if points > 0:
+            # 已有向量但未命中：更像阈值/语义问题，不在此处重建
+            return False
+
+        kb_id = str(self.knowledge_base.id)
+        logger.warning(
+            "检索候选为 0 且集合无向量，强制重建知识库 %s（%s 个文档）",
+            kb_id,
+            len(docs),
+        )
+        VectorStoreManager._reindex_attempted_ids.discard(kb_id)
+        VectorStoreManager.drop_collection(kb_id)
+        self._vector_store = None
+        self._ensure_qdrant_collection()
+        self._reindex_completed_documents("检索无候选强制重建", force=True)
+        points_after = self._collection_points_count(self._get_collection_name())
+        return points_after > 0
 
     def similarity_search(
         self, query: str, k: int = 5, score_threshold: float = 0.1
@@ -1804,13 +1876,19 @@ class VectorStoreManager:
 
         self._ensure_collection_for_search()
 
-        # 根据是否有稀疏编码器选择检索方式
-        if self.sparse_encoder:
-            logger.info("   🔀 使用混合检索（BM25 + 稠密向量）")
-            return self._hybrid_similarity_search(query, k, score_threshold)
-        else:
+        def _run():
+            if self.sparse_encoder:
+                logger.info("   🔀 使用混合检索（BM25 + 稠密向量）")
+                return self._hybrid_similarity_search(query, k, score_threshold)
             logger.info("   📊 使用纯稠密向量检索")
             return self._dense_similarity_search(query, k, score_threshold)
+
+        results = _run()
+        # 集合存在但搜不到：多为空壳/向量名不兼容，强制重建后再搜一次
+        if not results and self._force_reindex_after_empty_hits():
+            logger.info("强制重建后重试检索: %r", query[:80])
+            results = _run()
+        return results
 
     def _dense_similarity_search(
         self, query: str, k: int, score_threshold: float

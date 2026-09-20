@@ -516,7 +516,33 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
             )
 
             if not search_results:
-                return "未找到相关信息。"
+                from collections import Counter
+                from .models import Document
+
+                counts = dict(
+                    Counter(
+                        Document.objects.filter(
+                            knowledge_base_id=knowledge_base_id
+                        ).values_list("status", flat=True)
+                    )
+                )
+                logger.warning(
+                    "知识库工具无命中 kb_id=%s doc_status=%s",
+                    knowledge_base_id,
+                    counts,
+                )
+                if not counts:
+                    return "当前知识库没有文档，请先上传或同步文档后再查询。"
+                if counts.get("completed", 0) == 0:
+                    return (
+                        f"当前知识库没有「已完成」的文档（状态分布: {counts}）。"
+                        "请到知识库详情中重新处理文档，或调用 "
+                        f"POST /api/knowledge/bases/{knowledge_base_id}/rebuild-index/"
+                    )
+                return (
+                    "未检索到相关片段。若刚同步过文档，请先重建索引："
+                    f"POST /api/knowledge/bases/{knowledge_base_id}/rebuild-index/"
+                )
 
             # 格式化结果
             formatted_results = []
