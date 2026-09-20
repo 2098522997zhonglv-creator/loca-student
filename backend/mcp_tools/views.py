@@ -22,7 +22,7 @@ import logging  # 导入 logging 模块
 from langchain_mcp_adapters.client import (
     MultiServerMCPClient,
 )  # 导入 LangGraph 的 MCP 客户端
-from wharttest_django.permissions import HasModelPermission
+from loca_stude_django.permissions import HasModelPermission
 
 logger = logging.getLogger(__name__)  # 获取日志实例
 

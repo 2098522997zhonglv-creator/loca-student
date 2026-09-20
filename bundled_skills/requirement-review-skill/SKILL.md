@@ -5,7 +5,7 @@ description: 需求评审数据查询工具集。用于查询项目下的需求�
 
 # 需求评审数据查询
 
-需求文档与项目文件附件是两套独立的数据。本工具查的是「需求评审」模块的数据；项目文件附件请用 `whart-test` 的 `list_files`。
+需求文档与项目文件附件是两套独立的数据。本工具查的是「需求评审」模块的数据；项目文件附件请用 `loca-stude` 的 `list_files`。
 
 ## 快速开始
 
@@ -13,7 +13,7 @@ description: 需求评审数据查询工具集。用于查询项目下的需求�
 python requirement_tools.py --action <action_name> --project_id <项目ID> [其他参数]
 ```
 
-**`--project_id` 是所有操作的必填参数**，缺失或不匹配会返回 403。项目 ID 是整数，可用 `whart-test` 的 `get_projects` 查到。文档、报告、模块的 ID 都是 UUID。
+**`--project_id` 是所有操作的必填参数**，缺失或不匹配会返回 403。项目 ID 是整数，可用 `loca-stude` 的 `get_projects` 查到。文档、报告、模块的 ID 都是 UUID。
 
 ## 可用操作
 

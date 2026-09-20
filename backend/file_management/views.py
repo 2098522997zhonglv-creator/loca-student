@@ -12,9 +12,9 @@ from django.utils.decorators import method_decorator
 from rest_framework.filters import SearchFilter, OrderingFilter
 
 from projects.models import Project
-from wharttest_django.permissions import HasModelPermission
-from wharttest_django.api_permissions import IsProjectMemberForResource
-from wharttest_django.pagination import StandardPagination
+from loca_stude_django.permissions import HasModelPermission
+from loca_stude_django.api_permissions import IsProjectMemberForResource
+from loca_stude_django.pagination import StandardPagination
 from .models import FileAsset, FileManagementSetting
 from .serializers import FileAssetSerializer, FileUploadSerializer, FileManagementSettingSerializer
 from .services import validate_file_ids, extract_file_text, cleanup_unreferenced_files, resolve_file_reference_detail

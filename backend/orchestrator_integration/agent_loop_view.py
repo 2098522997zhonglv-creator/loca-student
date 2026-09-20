@@ -26,7 +26,7 @@ from urllib.parse import urlparse
 import httpx
 from django.http import StreamingHttpResponse, JsonResponse
 
-from wharttest_django.streaming import sse_response
+from loca_stude_django.streaming import sse_response
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
@@ -42,7 +42,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain.agents import create_agent
-from wharttest_django.checkpointer import get_async_checkpointer
+from loca_stude_django.checkpointer import get_async_checkpointer
 
 from .middleware_config import (
     get_middleware_from_config,

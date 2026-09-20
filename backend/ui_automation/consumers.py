@@ -18,7 +18,7 @@ from .socket_models import (
     SocketDataModel, QueueModel, NoticeType, ResponseCode,
     UiSocketEnum, ExecutionTaskModel, StepResultModel, CaseResultModel
 )
-from wharttest_django.i18n import translate_app_text
+from loca_stude_django.i18n import translate_app_text
 
 logger = logging.getLogger('ui_automation')
 

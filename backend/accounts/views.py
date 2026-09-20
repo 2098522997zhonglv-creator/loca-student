@@ -9,7 +9,7 @@ from rest_framework.filters import SearchFilter
 from rest_framework.permissions import AllowAny, IsAuthenticated, IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from wharttest_django.permissions import HasModelPermission, permission_required
+from loca_stude_django.permissions import HasModelPermission, permission_required
 
 from rest_framework_simplejwt.views import (
     TokenObtainPairView as BaseTokenObtainPairView,

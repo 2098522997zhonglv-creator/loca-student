@@ -9,8 +9,8 @@ from django.shortcuts import get_object_or_404
 import logging
 import os
 
-from wharttest_django.viewsets import BaseModelViewSet
-from wharttest_django.permissions import permission_required
+from loca_stude_django.viewsets import BaseModelViewSet
+from loca_stude_django.permissions import permission_required
 from prompts.models import UserPrompt
 from .docx_editor_client import DocxEditorClientError, DocxEditorNotConfiguredError, create_docx_editor_session
 from .models import (

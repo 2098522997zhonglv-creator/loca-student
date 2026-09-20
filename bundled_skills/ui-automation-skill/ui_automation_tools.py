@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-WHartTest UI 自动化管理工具
+loca_stude UI 自动化管理工具
 
 管理 UI 自动化测试的完整生命周期：模块 → 页面 → 元素 → 页面步骤 → 测试用例
 """
@@ -26,15 +26,15 @@ except ImportError:
 
 # 配置（运行时读取环境变量，避免 import 时固化）
 _DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-_DEFAULT_API_KEY = "wharttest-default-mcp-key-2025"
+_DEFAULT_API_KEY = "loca_stude-default-mcp-key-2025"
 
 
 def _base_url() -> str:
-    return (os.environ.get("WHARTTEST_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
+    return (os.environ.get("LOCA_STUDE_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
 
 def _api_key() -> str:
-    return (os.environ.get("WHARTTEST_API_KEY") or _DEFAULT_API_KEY).strip()
+    return (os.environ.get("LOCA_STUDE_API_KEY") or _DEFAULT_API_KEY).strip()
 
 
 def _headers() -> dict:
@@ -843,7 +843,7 @@ def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str
 # ==================== 命令行入口 ====================
 
 def main():
-    parser = argparse.ArgumentParser(description="WHartTest UI 自动化管理工具")
+    parser = argparse.ArgumentParser(description="loca_stude UI 自动化管理工具")
     parser.add_argument("--action", required=True, help="操作名称")
     
     # 通用参数

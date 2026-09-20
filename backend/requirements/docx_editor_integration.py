@@ -116,7 +116,7 @@ def launch_requirement_document_in_docx_editor(
         headers["X-Docx-Editor-Public-Base-Url"] = public_base_url
 
     data = {
-        "source_system": "wharttest",
+        "source_system": "loca_stude",
         "source_document_id": str(document.id),
         "title": document.title,
         "filename": filename,

@@ -24,7 +24,7 @@ except ImportError:
 
 # 配置（运行时读取环境变量，避免 import 时固化导致父进程注入的 Key 失效）
 _DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-_DEFAULT_API_KEY = "wharttest-default-mcp-key-2025"
+_DEFAULT_API_KEY = "loca_stude-default-mcp-key-2025"
 IMAGE_MIME_TYPES = {
     '.png': 'image/png',
     '.jpg': 'image/jpeg',
@@ -34,11 +34,11 @@ IMAGE_MIME_TYPES = {
 
 
 def _base_url() -> str:
-    return (os.environ.get("WHARTTEST_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
+    return (os.environ.get("LOCA_STUDE_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
 
 def _api_key() -> str:
-    return (os.environ.get("WHARTTEST_API_KEY") or _DEFAULT_API_KEY).strip()
+    return (os.environ.get("LOCA_STUDE_API_KEY") or _DEFAULT_API_KEY).strip()
 
 
 def _headers() -> dict:
@@ -818,7 +818,7 @@ ACTIONS = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description="WHartTest 测试管理平台工具")
+    parser = argparse.ArgumentParser(description="loca_stude 测试管理平台工具")
     parser.add_argument("--action", required=True, choices=ACTIONS.keys(), help="要执行的操作")
     parser.add_argument("--project_id", type=int, help="项目ID")
     parser.add_argument("--module_id", type=int, help="模块ID")

@@ -12,15 +12,15 @@ if sys.platform == 'win32':
 import os
 
 _DEFAULT_BASE_URL = 'http://127.0.0.1:8000'
-_DEFAULT_API_KEY = 'wharttest-default-mcp-key-2025'
+_DEFAULT_API_KEY = 'loca_stude-default-mcp-key-2025'
 
 
 def _base_url():
-    return (os.environ.get('WHARTTEST_BACKEND_URL') or _DEFAULT_BASE_URL).rstrip('/')
+    return (os.environ.get('LOCA_STUDE_BACKEND_URL') or _DEFAULT_BASE_URL).rstrip('/')
 
 
 def _api_key():
-    return (os.environ.get('WHARTTEST_API_KEY') or _DEFAULT_API_KEY).strip()
+    return (os.environ.get('LOCA_STUDE_API_KEY') or _DEFAULT_API_KEY).strip()
 
 
 def _headers():
@@ -152,8 +152,8 @@ def _configure_request_settings(base_url, api_key):
     global API_KEY, BASE_URL, HEADERS
     resolved_url = (base_url or _DEFAULT_BASE_URL).rstrip('/')
     resolved_key = (api_key or _DEFAULT_API_KEY).strip()
-    os.environ['WHARTTEST_BACKEND_URL'] = resolved_url
-    os.environ['WHARTTEST_API_KEY'] = resolved_key
+    os.environ['LOCA_STUDE_BACKEND_URL'] = resolved_url
+    os.environ['LOCA_STUDE_API_KEY'] = resolved_key
     BASE_URL = resolved_url
     API_KEY = resolved_key
     HEADERS = _headers()
@@ -380,7 +380,7 @@ ACTIONS = _build_actions()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='WHartTest 接口自动化 Skill 工具')
+    parser = argparse.ArgumentParser(description='loca_stude 接口自动化 Skill 工具')
     parser.add_argument('--action', required=True, choices=sorted(ACTIONS), help='要执行的动作')
     parser.add_argument('--project_id', type=int, required=True, help='项目 ID')
     parser.add_argument('--base_url', default=BASE_URL, help='后端服务地址')

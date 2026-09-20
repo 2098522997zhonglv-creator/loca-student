@@ -7,9 +7,9 @@ import { useLocaleStore } from '@/store/localeStore';
 
 declare global {
   interface Window {
-    __wharttestFetchPatched__?: boolean;
-    __wharttestAxiosPatched__?: boolean;
-    __wharttestMessagePatched__?: boolean;
+    __loca_studeFetchPatched__?: boolean;
+    __loca_studeAxiosPatched__?: boolean;
+    __loca_studeMessagePatched__?: boolean;
   }
 }
 
@@ -90,7 +90,7 @@ const localizeMessageInput = <T extends LocalizablePayload | undefined>(input: T
 };
 
 const patchMessage = (pinia?: Pinia) => {
-  if (typeof window !== 'undefined' && window.__wharttestMessagePatched__) {
+  if (typeof window !== 'undefined' && window.__loca_studeMessagePatched__) {
     return;
   }
 
@@ -119,12 +119,12 @@ const patchMessage = (pinia?: Pinia) => {
   });
 
   if (typeof window !== 'undefined') {
-    window.__wharttestMessagePatched__ = true;
+    window.__loca_studeMessagePatched__ = true;
   }
 };
 
 const patchAxios = (pinia?: Pinia) => {
-  if (typeof window !== 'undefined' && window.__wharttestAxiosPatched__) {
+  if (typeof window !== 'undefined' && window.__loca_studeAxiosPatched__) {
     return;
   }
 
@@ -146,12 +146,12 @@ const patchAxios = (pinia?: Pinia) => {
   });
 
   if (typeof window !== 'undefined') {
-    window.__wharttestAxiosPatched__ = true;
+    window.__loca_studeAxiosPatched__ = true;
   }
 };
 
 const patchFetch = (pinia?: Pinia) => {
-  if (typeof window === 'undefined' || window.__wharttestFetchPatched__) {
+  if (typeof window === 'undefined' || window.__loca_studeFetchPatched__) {
     return;
   }
 
@@ -182,7 +182,7 @@ const patchFetch = (pinia?: Pinia) => {
     });
   };
 
-  window.__wharttestFetchPatched__ = true;
+  window.__loca_studeFetchPatched__ = true;
 };
 
 export const installLocaleAdapters = (pinia?: Pinia) => {

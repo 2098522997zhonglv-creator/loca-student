@@ -25,7 +25,7 @@ except ImportError:
     pass
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8000"
-_DEFAULT_API_KEY = "wharttest-default-mcp-key-2025"
+_DEFAULT_API_KEY = "loca_stude-default-mcp-key-2025"
 
 # 正文与长文本字段的默认截断长度，避免一次查询塞爆模型上下文
 _DEFAULT_CONTENT_CHARS = 4000
@@ -33,11 +33,11 @@ _ANALYSIS_PREVIEW_CHARS = 600
 
 
 def _base_url() -> str:
-    return (os.environ.get("WHARTTEST_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
+    return (os.environ.get("LOCA_STUDE_BACKEND_URL") or _DEFAULT_BASE_URL).rstrip("/")
 
 
 def _api_key() -> str:
-    return (os.environ.get("WHARTTEST_API_KEY") or _DEFAULT_API_KEY).strip()
+    return (os.environ.get("LOCA_STUDE_API_KEY") or _DEFAULT_API_KEY).strip()
 
 
 def _headers() -> dict:

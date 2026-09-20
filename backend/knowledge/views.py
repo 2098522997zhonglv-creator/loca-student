@@ -10,7 +10,7 @@ from rest_framework import filters
 from django.db import transaction
 from django.db import models
 from django.utils import timezone
-from wharttest_django.viewsets import BaseModelViewSet
+from loca_stude_django.viewsets import BaseModelViewSet
 from .models import (
     KnowledgeBase,
     Document,

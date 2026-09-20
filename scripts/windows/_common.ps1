@@ -100,7 +100,7 @@ function Start-KnowledgeCenter {
         "-m", "daphne",
         "-b", $script:BindHost,
         "-p", "$($script:Port)",
-        "wharttest_django.asgi:application"
+        "loca_stude_django.asgi:application"
     )
 
     $proc = Start-Process `
@@ -155,7 +155,7 @@ function Start-ReviewWorker {
     # -P solo：Windows 不支持 prefork。评审内部已用线程池并发，单任务串行即可。
     $argList = @(
         "-m", "celery",
-        "-A", "wharttest_django",
+        "-A", "loca_stude_django",
         "worker",
         "-l", "info",
         "-P", "solo"
@@ -211,7 +211,7 @@ function Start-CeleryBeat {
 
     $argList = @(
         "-m", "celery",
-        "-A", "wharttest_django",
+        "-A", "loca_stude_django",
         "beat",
         "-l", "info"
     )

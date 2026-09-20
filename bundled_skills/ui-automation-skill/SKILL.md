@@ -1,9 +1,9 @@
 ---
 name: ui-automation
-description: WHartTest UI 自动化管理工具。用于创建、编辑、删除 UI 测试模块、页面、元素、页面步骤和测试用例。支持执行记录查询和错误分析。当需要将浏览器技能获取到的页面元素保存到平台、创建 UI 自动化用例、执行测试或分析执行结果时使用。元素采集默认优先 browser-use，无法覆盖时再用 playwright-skill 兜底。
+description: loca_stude UI 自动化管理工具。用于创建、编辑、删除 UI 测试模块、页面、元素、页面步骤和测试用例。支持执行记录查询和错误分析。当需要将浏览器技能获取到的页面元素保存到平台、创建 UI 自动化用例、执行测试或分析执行结果时使用。元素采集默认优先 browser-use，无法覆盖时再用 playwright-skill 兜底。
 ---
 
-# WHartTest UI 自动化管理
+# loca_stude UI 自动化管理
 
 ## 生命周期概览
 

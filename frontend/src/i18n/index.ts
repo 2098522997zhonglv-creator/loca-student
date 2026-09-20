@@ -12,7 +12,7 @@ export type AppLocale = (typeof APP_LOCALES)[number];
 export type MessageParams = Record<string, string | number>;
 
 export const DEFAULT_APP_LOCALE: AppLocale = 'zh-CN';
-export const LOCALE_STORAGE_KEY = 'wharttest-app-locale';
+export const LOCALE_STORAGE_KEY = 'loca_stude-app-locale';
 
 const isBrowser = () => typeof window !== 'undefined' && typeof document !== 'undefined';
 
@@ -461,7 +461,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '还没有账号?': 'No account yet?',
   '立即注册': 'Register now',
   '注册新账户': 'Create an account',
-  '欢迎加入WHartTest': 'Welcome to Knowledge Studio',
+  '欢迎加入loca_stude': 'Welcome to Knowledge Studio',
   '请输入邮箱地址': 'Enter email address',
   '请再次输入密码': 'Confirm password',
   '注册': 'Register',
@@ -721,7 +721,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '系统全局配置修改成功，已即时对全平台应用！': 'System-wide configuration updated successfully and applied immediately across the platform!',
   '修改失败，请重试': 'Update failed. Please try again.',
   '保存过程中发生错误': 'An error occurred while saving.',
-  '如：WHartTest': 'e.g. Knowledge Studio',
+  '如：loca_stude': 'e.g. Knowledge Studio',
   '如：小麦智测自动化平台': 'e.g. WheatTest Automation Platform',
   '展示在浏览器标签页上的网站标题（Document Title）。': 'Shown in the browser tab.',
   '系统主界面左上角 Logo 旁展示的品牌文字名称。': 'Brand name shown next to the logo.',
@@ -792,7 +792,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '工具审批': 'Tool approval',
   '微信接入': 'WeChat access',
   '清除对话': 'Clear chat',
-  '开始与 WHartTest 的对话吧': 'Start a conversation with Knowledge Studio',
+  '开始与 loca_stude 的对话吧': 'Start a conversation with Knowledge Studio',
   '图表预览': 'Diagram preview',
   'HTML 预览': 'HTML preview',
   '工具执行审批': 'Tool execution approval',
@@ -1158,7 +1158,7 @@ const LEGACY_EXACT_EN_MAP: Record<string, string> = {
   '请先选择要执行的用例': 'Select the cases to execute first',
   '没有可用的执行器，请先启动执行器': 'No actuators are available. Start one first',
   '没有可用的执行器，请先启动执行器服务': 'No actuator is available. Start the actuator service first.',
-  '请先启动执行器服务：cd WHartTest_Actuator && python main.py': 'Start the actuator service first: cd WHartTest_Actuator && python main.py',
+  '请先启动执行器服务：cd loca_stude_Actuator && python main.py': 'Start the actuator service first: cd loca_stude_Actuator && python main.py',
   '该页面步骤没有操作': 'This page step has no actions',
   '该模块下有子模块，请先删除子模块': 'This module has child modules. Delete them first',
   '存在关联，无法删除。请先解除关联': 'Linked data prevents deletion. Remove the associations first',

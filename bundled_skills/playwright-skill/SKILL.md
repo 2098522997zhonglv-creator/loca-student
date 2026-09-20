@@ -22,7 +22,7 @@ console.log(desc);  // 输出所有可交互元素及其选择器
 
 输出示例：
 ```
-## Page: WHartTest
+## Page: loca_stude
 URL: http://192.168.150.114:8913/login
 
 ### Input Fields (2)

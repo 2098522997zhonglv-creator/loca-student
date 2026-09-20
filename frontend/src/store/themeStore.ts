@@ -3,7 +3,7 @@ import { computed, ref } from 'vue';
 
 type ThemeMode = 'default' | 'black';
 
-const THEME_STORAGE_KEY = 'wharttest-theme-mode';
+const THEME_STORAGE_KEY = 'loca_stude-theme-mode';
 
 const isBrowser = () => typeof window !== 'undefined' && typeof document !== 'undefined';
 

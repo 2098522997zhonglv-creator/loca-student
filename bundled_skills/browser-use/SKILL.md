@@ -167,6 +167,6 @@ Only applies when `BH_DOMAIN_SKILLS=1`. Otherwise ignore domain skills.
 When enabled, search `$BH_AGENT_WORKSPACE/domain-skills/<host>/` before inventing an approach. `goto_url(...)` returns up to 10 skill filenames for the navigated host.
 
 
-## WHartTest 截图路径约定
+## loca_stude 截图路径约定
 
 保存截图时优先使用环境变量 `SCREENSHOT_DIR`（由平台注入），不要手写 `/tmp/screenshots` 等路径。

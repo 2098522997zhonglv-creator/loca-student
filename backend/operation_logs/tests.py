@@ -114,7 +114,7 @@ class OperationLogMiddlewareTests(TestCase):
     def test_logs_system_config_write_requests(self):
         request = self.factory.post(
             '/api/accounts/system-config/',
-            {'site_name': 'WHartTest'},
+            {'site_name': 'loca_stude'},
             format='json',
         )
         request.user = self.user
@@ -131,7 +131,7 @@ class OperationLogMiddlewareTests(TestCase):
 
         self.assertEqual(log.path, '/api/accounts/system-config/')
         self.assertEqual(log.module, '系统配置')
-        self.assertEqual(payload['body']['site_name'], 'WHartTest')
+        self.assertEqual(payload['body']['site_name'], 'loca_stude')
 
     def test_skips_operation_log_endpoint_to_avoid_recursion(self):
         request = self.factory.get('/api/operation-logs/')

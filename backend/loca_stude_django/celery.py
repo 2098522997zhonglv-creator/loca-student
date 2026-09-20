@@ -13,10 +13,10 @@ from celery import Celery
 os.umask(0o002)
 
 # 设置默认 Django settings 模块（外部未设置时生效）。
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "loca_stude_django.settings")
 
 # 创建 Celery 应用实例。
-app = Celery("wharttest_django")
+app = Celery("loca_stude_django")
 
 # 从 Django settings 读取 Celery 配置，要求配置键使用 CELERY_ 前缀。
 app.config_from_object("django.conf:settings", namespace="CELERY")

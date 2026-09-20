@@ -1,4 +1,4 @@
-"""Local-only settings for the extracted WHartTest knowledge center."""
+"""Local-only settings for the extracted loca_stude knowledge center."""
 
 import os
 from datetime import timedelta
@@ -73,7 +73,7 @@ LANGUAGES = [
     ("en", "English"),
 ]
 
-ROOT_URLCONF = "wharttest_django.urls"
+ROOT_URLCONF = "loca_stude_django.urls"
 TEMPLATES = [{
     "BACKEND": "django.template.backends.django.DjangoTemplates",
     "DIRS": [FRONTEND_DIST], "APP_DIRS": True,
@@ -83,8 +83,8 @@ TEMPLATES = [{
         "django.contrib.messages.context_processors.messages",
     ]},
 }]
-WSGI_APPLICATION = "wharttest_django.wsgi.application"
-ASGI_APPLICATION = "wharttest_django.asgi.application"
+WSGI_APPLICATION = "loca_stude_django.wsgi.application"
+ASGI_APPLICATION = "loca_stude_django.asgi.application"
 
 CHANNEL_LAYERS = {
     "default": {
@@ -119,11 +119,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_PAGINATION_CLASS": "wharttest_django.pagination.StandardPagination",
+    "DEFAULT_PAGINATION_CLASS": "loca_stude_django.pagination.StandardPagination",
     "PAGE_SIZE": 20,
-    # 与 WHartTest 一致：统一包装为 { status, code, message, data }
+    # 与 loca_stude 一致：统一包装为 { status, code, message, data }
     "DEFAULT_RENDERER_CLASSES": (
-        "wharttest_django.renderers.UnifiedResponseRenderer",
+        "loca_stude_django.renderers.UnifiedResponseRenderer",
     ),
 }
 SIMPLE_JWT = {
@@ -226,7 +226,7 @@ LOGGING = {
             "level": LOG_LEVEL,
         },
         "file": {
-            "()": "wharttest_django.safe_log_handler.SafeTimedRotatingFileHandler",
+            "()": "loca_stude_django.safe_log_handler.SafeTimedRotatingFileHandler",
             "filename": str(APP_LOG_FILE),
             "when": "midnight",
             "interval": 1,
@@ -257,7 +257,7 @@ import logging.config as _logging_config
 _logging_config.dictConfig(LOGGING)
 import logging as _logging
 
-_logging.getLogger("wharttest_django.settings").info(
+_logging.getLogger("loca_stude_django.settings").info(
     "Runtime logging ready: file=%s level=%s backup_count=%s",
     APP_LOG_FILE,
     LOG_LEVEL,

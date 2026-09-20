@@ -37,12 +37,12 @@ def create_docx_editor_session(document, pushback_url: str) -> dict:
     endpoint = f"{base_url}/api/integration/external-documents/upsert-and-launch"
     headers = {
         "Authorization": f"Bearer {service_key}",
-        "User-Agent": "wharttest-docx-editor-client",
+        "User-Agent": "loca_stude-docx-editor-client",
     }
     if public_base_url:
         headers["X-Docx-Editor-Public-Base-Url"] = public_base_url
     data = {
-        "source_system": "wharttest",
+        "source_system": "loca_stude",
         "source_document_id": str(document.id),
         "title": document.title,
         "filename": Path(file_name).name,

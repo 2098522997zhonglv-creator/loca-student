@@ -1,19 +1,19 @@
 ---
-name: whart-test
-description: WHartTest测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。
+name: loca-stude
+description: loca_stude测试管理平台工具集。用于管理项目、模块、测试用例、测试截图和项目文件附件的增删改查。当用户需要操作测试用例、查询项目信息、上传截图、上传/下载/预览/删除项目文件、校验 file_ids 或管理文件清理设置时使用。
 ---
 
-# WHartTest 测试管理平台
+# loca_stude 测试管理平台
 
 ## 快速开始
 
 ```bash
 # 设置环境变量
-export WHARTTEST_BACKEND_URL="http://your-backend:8000"
-export WHARTTEST_API_KEY="your-api-key"
+export LOCA_STUDE_BACKEND_URL="http://your-backend:8000"
+export LOCA_STUDE_API_KEY="your-api-key"
 
 # 执行操作
-python whart_tools.py --action <action_name> [--参数名 参数值]
+python loca_stude_tools.py --action <action_name> [--参数名 参数值]
 ```
 
 ## 可用操作
@@ -90,29 +90,29 @@ python whart_tools.py --action <action_name> [--参数名 参数值]
 - `compatibility` - 兼容性测试
 
 `--is_optimization` 标志（布尔型，无需传值）：在 edit_testcase 时带上此标志，会自动将状态设为 `optimization_pending_review`（优化待审核），用于AI优化后的用例提交。**一次调用即可完成编辑+状态更新。**
-- ✅ 正确用法：`python whart_tools.py --action edit_testcase --project_id 1 --case_id 51 ... --is_optimization`
+- ✅ 正确用法：`python loca_stude_tools.py --action edit_testcase --project_id 1 --case_id 51 ... --is_optimization`
 - ❌ 错误用法：`--is_optimization true`（不要传值）
 
 ## 使用示例
 
 ```bash
 # 获取项目列表
-python whart_tools.py --action get_projects
+python loca_stude_tools.py --action get_projects
 
 # 获取项目1的模块
-python whart_tools.py --action get_modules --project_id 1
+python loca_stude_tools.py --action get_modules --project_id 1
 
 # 新增用例模块
-python whart_tools.py --action add_module --project_id 1 --name "新功能模块"
+python loca_stude_tools.py --action add_module --project_id 1 --name "新功能模块"
 
 # 新增子用例模块
-python whart_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
+python loca_stude_tools.py --action add_module --project_id 1 --name "子功能模块" --parent_id 10
 
 # 获取用例列表
-python whart_tools.py --action get_testcases --project_id 1 --module_id 5
+python loca_stude_tools.py --action get_testcases --project_id 1 --module_id 5
 
 # 新增用例
-python whart_tools.py --action add_testcase \
+python loca_stude_tools.py --action add_testcase \
   --project_id 1 \
   --module_id 5 \
   --name "登录功能测试" \
@@ -122,7 +122,7 @@ python whart_tools.py --action add_testcase \
   --notes "冒烟测试"
 
 # 上传单张截图
-python whart_tools.py --action upload_screenshot \
+python loca_stude_tools.py --action upload_screenshot \
   --project_id 1 \
   --case_id 10 \
   --file_path "step1.png" \
@@ -130,36 +130,36 @@ python whart_tools.py --action upload_screenshot \
   --step_number 1
 
 # 批量上传截图
-python whart_tools.py --action upload_screenshots \
+python loca_stude_tools.py --action upload_screenshots \
   --project_id 1 \
   --case_id 10 \
   --file_paths "step1.png,step2.png,step3.png" \
   --title "登录测试截图"
 
 # 上传项目文件
-python whart_tools.py --action upload_file \
+python loca_stude_tools.py --action upload_file \
   --project_id 1 \
   --file_path "./需求说明.docx"
 
 # 查询项目文件
-python whart_tools.py --action list_files \
+python loca_stude_tools.py --action list_files \
   --project_id 1 \
   --search "需求" \
   --page_size 20
 
 # 校验附件 file_ids
-python whart_tools.py --action validate_files \
+python loca_stude_tools.py --action validate_files \
   --project_id 1 \
   --file_ids "12,13"
 
 # 下载项目文件
-python whart_tools.py --action download_file \
+python loca_stude_tools.py --action download_file \
   --project_id 1 \
   --file_id 12 \
   --output_dir "./downloads"
 
 # 更新文件清理设置
-python whart_tools.py --action update_file_settings \
+python loca_stude_tools.py --action update_file_settings \
   --project_id 1 \
   --auto_delete_on_unbind true \
   --auto_delete_zero_refs false

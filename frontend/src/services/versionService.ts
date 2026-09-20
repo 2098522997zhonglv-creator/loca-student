@@ -14,7 +14,7 @@ export interface VersionInfo {
 }
 
 // GitHub 仓库配置
-const GITHUB_REPO = 'mgdaaslab/WHartTest'
+const GITHUB_REPO = 'mgdaaslab/loca_stude'
 const GITHUB_API_BASE = 'https://api.github.com'
 
 // 缓存版本信息，避免频繁请求

@@ -23,7 +23,7 @@ from .views import TestCaseViewSet
 # 因此，这个文件可能只是一个占位，或者定义非嵌套的 testcase 路由（如果未来需要）。
 # 按照我们的计划，TestCaseViewSet 是嵌套的，所以其路由注册将在主 URL 文件中完成。
 # 这个文件可以暂时为空，或者包含一个简单的 router 实例，
-# 但实际的嵌套注册会在 wharttest_django/urls.py 中进行。
+# 但实际的嵌套注册会在 loca_stude_django/urls.py 中进行。
 
 # 为了让 testcases 应用有一个自己的 urls.py，并且能够被 include，
 # 我们可以创建一个空的 urlpatterns 列表，或者一个简单的 router，
@@ -44,14 +44,14 @@ urlpatterns = [
     # TestCaseViewSet 的路由将通过 Nested Routers 在主 urls.py 中定义
 ]
 
-# 如果我们希望在 wharttest_django/urls.py 中使用 include('testcases.urls')
+# 如果我们希望在 loca_stude_django/urls.py 中使用 include('testcases.urls')
 # 并且让 testcases.urls.py 自己定义其在 /projects/{project_pk}/testcases 下的路由，
 # 这会比较复杂，因为 SimpleRouter 本身不直接支持从 URL 中提取父级 lookup。
 # Nested Routers 更适合这种情况，并且通常在父级 router 声明的地方使用。
 
 # 因此，最合适的做法是：
 # 1. testcases/views.py 定义 TestCaseViewSet。
-# 2. wharttest_django/urls.py (或 projects/urls.py 如果项目路由在那里定义)
+# 2. loca_stude_django/urls.py (或 projects/urls.py 如果项目路由在那里定义)
 #    导入 TestCaseViewSet 并使用 NestedSimpleRouter 将其注册到 projects 路由下。
 # 3. testcases/urls.py 可以为空，或者用于将来可能的非嵌套路由。
 

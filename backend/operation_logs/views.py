@@ -23,7 +23,7 @@ class OperationLogFilter(django_filters.FilterSet):
         model = OperationLog
         fields = ['username', 'module', 'action', 'method', 'response_code']
 
-from wharttest_django.pagination import StandardPagination
+from loca_stude_django.pagination import StandardPagination
 
 
 class OperationLogReadPermission(permissions.BasePermission):

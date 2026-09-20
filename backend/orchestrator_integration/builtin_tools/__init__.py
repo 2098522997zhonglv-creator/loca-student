@@ -4,7 +4,7 @@
 提供 AI Agent 可调用的持久化工具，包括：
 - Skill 脚本执行工具（执行用户上传的 Python 脚本）
 
-注意：Diagram 工具（display_diagram, edit_diagram）已移至 WHartTest-Tools MCP
+注意：Diagram 工具（display_diagram, edit_diagram）已移至 loca_stude-Tools MCP
 """
 
 from .skill_tools import get_skill_tools

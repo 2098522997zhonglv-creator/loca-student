@@ -21,7 +21,7 @@ from .permissions import (
     HasProjectMemberPermission
 )
 from accounts.serializers import UserDetailSerializer
-from wharttest_django.viewsets import BaseModelViewSet
+from loca_stude_django.viewsets import BaseModelViewSet
 
 
 class ProjectViewSet(BaseModelViewSet):

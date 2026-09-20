@@ -3,7 +3,7 @@
 import os
 
 os.umask(0o002)
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "wharttest_django.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "loca_stude_django.settings")
 
 import django
 

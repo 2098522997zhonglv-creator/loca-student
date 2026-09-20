@@ -23,8 +23,8 @@ from projects.models import Project, ProjectMember
 from projects.permissions import IsProjectMember
 
 # 导入统一的权限系统
-from wharttest_django.viewsets import BaseModelViewSet
-from wharttest_django.permissions import HasModelPermission
+from loca_stude_django.viewsets import BaseModelViewSet
+from loca_stude_django.permissions import HasModelPermission
 
 # 导入提示词管理
 from prompts.models import UserPrompt
@@ -253,7 +253,7 @@ def schedule_auto_summarize_session_title(llm, chat_session, user_message):
 
 
 # 统一的 Checkpointer 工厂
-from wharttest_django.checkpointer import (
+from loca_stude_django.checkpointer import (
     get_async_checkpointer,
     get_sync_checkpointer,
     delete_checkpoints_by_thread_id,
@@ -266,7 +266,7 @@ import json  # For JSON serialization in streaming
 import asyncio  # For async operations
 
 # Django 流式响应
-from wharttest_django.streaming import sse_response
+from loca_stude_django.streaming import sse_response
 
 from mcp_tools.models import RemoteMCPConfig  # To load remote MCP server configs
 from langchain_mcp_adapters.client import (
@@ -1818,7 +1818,7 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
     from datetime import datetime
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
     from langgraph_integration.models import ChatMessage
-    from wharttest_django.checkpointer import get_sync_checkpointer
+    from loca_stude_django.checkpointer import get_sync_checkpointer
     import logging
 
     logger = logging.getLogger(__name__)
@@ -2157,7 +2157,7 @@ class ChatHistoryAPIView(APIView):
 
         try:
             # 使用统一的 Checkpointer 读取数据
-            from wharttest_django.checkpointer import (
+            from loca_stude_django.checkpointer import (
                 get_database_type,
                 get_db_connection_string,
             )
@@ -3821,7 +3821,7 @@ class UserToolApprovalViewSet(viewsets.ModelViewSet):
         )
 
         # 2. MCP 工具组（从数据库读取，按 MCP 分组）
-        # 注意：Diagram 工具（display_diagram, edit_diagram）已移至 WHartTest-Tools MCP
+        # 注意：Diagram 工具（display_diagram, edit_diagram）已移至 loca_stude-Tools MCP
         from mcp_tools.models import RemoteMCPConfig
 
         mcp_configs = RemoteMCPConfig.objects.filter(is_active=True).prefetch_related(

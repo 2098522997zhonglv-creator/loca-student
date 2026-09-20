@@ -101,7 +101,7 @@ class Command(BaseCommand):
             demo_project = Project.objects.create(
                 name=demo_project_name,
                 description=(
-                    "WHartTest"
+                    "loca_stude"
                 ),
                 creator=admin_user
             )

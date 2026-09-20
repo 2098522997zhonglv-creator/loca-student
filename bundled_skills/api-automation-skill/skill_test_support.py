@@ -8,7 +8,7 @@ from urllib import error, parse, request
 ROOT_DIR = Path(__file__).resolve().parents[2]
 SKILL_PATH = Path(__file__).resolve().with_name('api_automation_tools.py')
 BASE_URL = 'http://127.0.0.1:8000'
-API_KEY = 'wharttest-default-mcp-key-2025'
+API_KEY = 'loca_stude-default-mcp-key-2025'
 DEFAULT_HEADERS = {
     'accept': 'application/json',
     'Content-Type': 'application/json',

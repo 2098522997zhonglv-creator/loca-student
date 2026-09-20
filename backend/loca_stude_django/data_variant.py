@@ -46,10 +46,10 @@ def get_branch_data_variant(base_dir: Path) -> str:
 
 def build_postgres_db_name(variant: str) -> str:
     if variant == "dev":
-        return "wharttest_dev"
+        return "loca_stude_dev"
     if variant in {"ce", "pe"}:
-        return f"wharttest_{variant}"
-    return f"wharttest_dev_{variant}"
+        return f"loca_stude_{variant}"
+    return f"loca_stude_dev_{variant}"
 
 
 def get_postgres_db_name(base_dir: Path) -> str:

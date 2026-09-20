@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 # 依赖平台 API Key 的内部 Skill 名称（与 SKILL.md / manifest name 对齐）
 INTERNAL_PLATFORM_SKILL_NAMES = frozenset(
     {
-        "whart-test",
+        "loca-stude",
         "requirement-review",
         "api-automation",
         "ui-automation",
@@ -71,16 +71,16 @@ def inject_api_key_into_skill_dir(
 
         updated = original
 
-        # WHARTTEST_API_KEY = os.environ.get("WHARTTEST_API_KEY", "...")
+        # LOCA_STUDE_API_KEY = os.environ.get("LOCA_STUDE_API_KEY", "...")
         updated = re.sub(
-            r'os\.environ\.get\(\s*["\']WHARTTEST_API_KEY["\']\s*,\s*["\'][^"\']*["\']\s*\)',
-            f'os.environ.get("WHARTTEST_API_KEY", "{key_esc}")',
+            r'os\.environ\.get\(\s*["\']LOCA_STUDE_API_KEY["\']\s*,\s*["\'][^"\']*["\']\s*\)',
+            f'os.environ.get("LOCA_STUDE_API_KEY", "{key_esc}")',
             updated,
         )
-        # BASE_URL = os.environ.get("WHARTTEST_BACKEND_URL", "...")
+        # BASE_URL = os.environ.get("LOCA_STUDE_BACKEND_URL", "...")
         updated = re.sub(
-            r'os\.environ\.get\(\s*["\']WHARTTEST_BACKEND_URL["\']\s*,\s*["\'][^"\']*["\']\s*\)',
-            f'os.environ.get("WHARTTEST_BACKEND_URL", "{url_esc}")',
+            r'os\.environ\.get\(\s*["\']LOCA_STUDE_BACKEND_URL["\']\s*,\s*["\'][^"\']*["\']\s*\)',
+            f'os.environ.get("LOCA_STUDE_BACKEND_URL", "{url_esc}")',
             updated,
         )
 

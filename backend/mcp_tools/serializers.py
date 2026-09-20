@@ -41,7 +41,7 @@ class RemoteMCPConfigSerializer(serializers.ModelSerializer):
         自定义 URL 验证，支持：
         - 标准域名 (example.com)
         - IP 地址 (192.168.1.1)
-        - Docker 容器名 (wharttest-mcp, mcp)
+        - Docker 容器名 (loca_stude-mcp, mcp)
         - localhost
         """
         if not value:

@@ -4,8 +4,8 @@ from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters
 
-from wharttest_django.viewsets import BaseModelViewSet
-from wharttest_django.permissions import HasModelPermission
+from loca_stude_django.viewsets import BaseModelViewSet
+from loca_stude_django.permissions import HasModelPermission
 from .models import UserPrompt, PromptType
 from .serializers import (
     UserPromptSerializer,

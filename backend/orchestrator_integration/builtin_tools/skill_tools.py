@@ -364,7 +364,7 @@ def _resolve_skill_runtime_api_key(user_id: int) -> tuple[str, str]:
     """解析 Skill 运行时使用的 API Key。
 
     优先级：
-    1. 非空的 settings/环境变量 WHARTTEST_API_KEY（运维覆盖）
+    1. 非空的 settings/环境变量 LOCA_STUDE_API_KEY（运维覆盖）
     2. 当前对话用户名下最新一条有效 API Key
     3. 空字符串（不注入，保留 skill 脚本内默认值）
 
@@ -372,8 +372,8 @@ def _resolve_skill_runtime_api_key(user_id: int) -> tuple[str, str]:
         (api_key, source_label) source_label 仅用于日志，不含密钥内容。
     """
     configured = (
-        getattr(settings, "WHARTTEST_API_KEY", None)
-        or os.environ.get("WHARTTEST_API_KEY")
+        getattr(settings, "LOCA_STUDE_API_KEY", None)
+        or os.environ.get("LOCA_STUDE_API_KEY")
         or ""
     ).strip()
     if configured:
@@ -441,8 +441,8 @@ def _prepend_interpreter_to_path(env: dict) -> None:
 def _resolve_skill_runtime_backend_url() -> str:
     """Skill 在 backend 进程内执行时，默认回环访问本服务。"""
     configured = (
-        getattr(settings, "WHARTTEST_BACKEND_URL", None)
-        or os.environ.get("WHARTTEST_BACKEND_URL")
+        getattr(settings, "LOCA_STUDE_BACKEND_URL", None)
+        or os.environ.get("LOCA_STUDE_BACKEND_URL")
         or ""
     ).strip()
     if configured:
@@ -534,9 +534,9 @@ def get_skill_tools(
             backend_url = _resolve_skill_runtime_backend_url()
             api_key, key_source = _resolve_skill_runtime_api_key(current_user_id)
             if backend_url:
-                env["WHARTTEST_BACKEND_URL"] = backend_url
+                env["LOCA_STUDE_BACKEND_URL"] = backend_url
             if api_key:
-                env["WHARTTEST_API_KEY"] = api_key
+                env["LOCA_STUDE_API_KEY"] = api_key
                 logger.info(
                     "[execute_skill_script] 已注入运行时 API Key (user_id=%s, source=%s)",
                     current_user_id,
@@ -757,12 +757,12 @@ def get_skill_tools(
 
         Args:
             skill_name: Skill 名称（单个执行时必填）
-            command: shell 命令，如 "python whart_tools.py --action get_projects"（单个执行时必填）
+            command: shell 命令，如 "python loca_stude_tools.py --action get_projects"（单个执行时必填）
             session_id: 可选会话ID，用于 playwright-skill 保持浏览器会话
             commands: 批量命令列表，每个元素包含 skill_name、command、session_id（可选）
                 示例: [
-                    {"skill_name": "whart-test", "command": "python whart_tools.py --action add_testcase ..."},
-                    {"skill_name": "whart-test", "command": "python whart_tools.py --action add_testcase ..."}
+                    {"skill_name": "loca-stude", "command": "python loca_stude_tools.py --action add_testcase ..."},
+                    {"skill_name": "loca-stude", "command": "python loca_stude_tools.py --action add_testcase ..."}
                 ]
             parallel: 批量模式下是否并发执行（默认 True）
             max_workers: 批量模式下最大并发数（默认 5）

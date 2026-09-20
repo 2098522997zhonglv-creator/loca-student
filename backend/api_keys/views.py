@@ -11,7 +11,7 @@ from .serializers import APIKeySerializer
 from .permissions import IsOwnerOrAdmin
 
 # 导入项目统一模型权限控制。
-from wharttest_django.permissions import HasModelPermission
+from loca_stude_django.permissions import HasModelPermission
 
 
 class APIKeyViewSet(viewsets.ModelViewSet):

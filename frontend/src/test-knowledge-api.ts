@@ -224,7 +224,7 @@ export function validateResponseFormat() {
         content: "用户用户用户用户用户用户",
         metadata: {
           title: "注册用户",
-          file_path: "D:\\Google\\WHartTest_django\\media\\knowledge_bases\\5cefbc6b-c4f9-4326-a123-24295e3d83de\\documents\\注册用户.txt",
+          file_path: "D:\\Google\\loca_stude_django\\media\\knowledge_bases\\5cefbc6b-c4f9-4326-a123-24295e3d83de\\documents\\注册用户.txt",
           source: "注册用户",
           document_type: "txt",
           document_id: "c67cd6a7-304c-475f-8f7c-cc11d147da35"

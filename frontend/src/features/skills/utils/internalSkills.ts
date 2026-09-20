@@ -1,6 +1,6 @@
 /** 依赖平台 API Key 的内部 Skill 名称（与后端 platform_skills 对齐） */
 export const INTERNAL_PLATFORM_SKILL_NAMES = new Set([
-  'whart-test',
+  'loca-stude',
   'api-automation',
   'ui-automation',
 ])
@@ -13,9 +13,9 @@ export function isInternalPlatformSkill(name: string | undefined | null): boolea
 export function zipNameSuggestsInternalSkill(fileName: string | undefined | null): boolean {
   if (!fileName) return false
   const lower = fileName.toLowerCase()
-  // 与内部名单派生，避免两处硬编码漂移；另兼容 wharttest_skills.zip 等包名
+  // 与内部名单派生，避免两处硬编码漂移；另兼容 loca_stude_skills.zip 等包名
   for (const name of INTERNAL_PLATFORM_SKILL_NAMES) {
     if (lower.includes(name)) return true
   }
-  return lower.includes('whart')
+  return lower.includes('loca_stude') or lower.includes('loca-stude')
 }

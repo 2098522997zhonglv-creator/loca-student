@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "license": "Apache-2.0",
-  "author": "WHartTest Team",
-  "description": "Local knowledge base and requirement review center extracted from WHartTest",
+  "author": "loca_stude Team",
+  "description": "Local knowledge base and requirement review center extracted from loca_stude",
   "keywords": [
     "vue",
     "knowledge-base",

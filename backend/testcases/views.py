@@ -30,11 +30,11 @@ from .serializers import (
 )
 from .permissions import IsProjectMemberForTestCase, IsProjectMemberForTestCaseModule
 from .filters import TestCaseFilter  # 导入自定义过滤器
-from wharttest_django.pagination import StandardPagination
+from loca_stude_django.pagination import StandardPagination
 
 # 确保导入项目自定义的权限类
-from wharttest_django.permissions import HasModelPermission, permission_required
-from wharttest_django.pagination import StandardPagination
+from loca_stude_django.permissions import HasModelPermission, permission_required
+from loca_stude_django.pagination import StandardPagination
 
 
 def _normalize_media_url(url: str) -> str:

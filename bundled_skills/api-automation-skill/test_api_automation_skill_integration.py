@@ -7,7 +7,7 @@ from pathlib import Path
 from skill_test_support import API_KEY, BASE_URL, BackendAdmin, ResultReader, SkillCLI
 
 SKILL_PATH = Path(__file__).resolve().with_name('api_automation_tools.py')
-SQLITE_PATH = Path('/tmp') / f'wharttest_api_skill_full_{uuid.uuid4().hex[:8]}.sqlite3'
+SQLITE_PATH = Path('/tmp') / f'loca_stude_api_skill_full_{uuid.uuid4().hex[:8]}.sqlite3'
 
 
 def load_action_names():

@@ -371,7 +371,7 @@ interface HtmlPreviewPayload {
   sourceMessage: ChatMessage;
 }
 
-const HTML_PREVIEW_STYLE_ID = 'wharttest-html-preview-style';
+const HTML_PREVIEW_STYLE_ID = 'loca_stude-html-preview-style';
 const HTML_PREVIEW_BASE_STYLE = `
 <style id="${HTML_PREVIEW_STYLE_ID}">
   html, body {
@@ -508,7 +508,7 @@ const selectedPromptId = ref<number | null>(null); // 用户选择的提示词ID
 const hasPrompts = ref(false); // 是否有可用的提示词
 
 // ⭐从localStorage恢复选中的提示词
-const PROMPT_STORAGE_KEY = 'wharttest_selected_prompt_id';
+const PROMPT_STORAGE_KEY = 'loca_stude_selected_prompt_id';
 const loadSavedPromptId = () => {
   try {
     const saved = localStorage.getItem(PROMPT_STORAGE_KEY);

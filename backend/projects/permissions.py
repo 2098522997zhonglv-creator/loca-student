@@ -5,7 +5,7 @@ from rest_framework import permissions
 from .models import ProjectMember
 
 # 导入统一模型权限基类。
-from wharttest_django.permissions import HasModelPermission
+from loca_stude_django.permissions import HasModelPermission
 
 
 class IsProjectMember(permissions.BasePermission):

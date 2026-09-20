@@ -1,9 +1,9 @@
 ---
 name: api-automation
-description: WHartTest 接口自动化管理工具。用于按真实后端接口管理接口模块、数据库配置、环境与变量、自定义函数、接口定义与调试、单接口用例 ApiInterfaceCase、场景用例 ApiTestCase、任务套件、执行报告与同步配置。当需要创建、查询、修改、执行 API 自动化资源，区分单接口测试和场景用例，或排查执行、同步、任务套件问题时使用。
+description: loca_stude 接口自动化管理工具。用于按真实后端接口管理接口模块、数据库配置、环境与变量、自定义函数、接口定义与调试、单接口用例 ApiInterfaceCase、场景用例 ApiTestCase、任务套件、执行报告与同步配置。当需要创建、查询、修改、执行 API 自动化资源，区分单接口测试和场景用例，或排查执行、同步、任务套件问题时使用。
 ---
 
-# WHartTest 接口自动化管理
+# loca_stude 接口自动化管理
 
 ## 先遵守这些
 
@@ -27,7 +27,7 @@ python api_automation_tools.py --action list_interfaces --project_id 1 --params 
 可覆盖默认服务地址和 API Key：
 
 ```bash
-python api_automation_tools.py --action list_modules --project_id 1 --base_url http://127.0.0.1:8000 --api_key wharttest-default-mcp-key-2025
+python api_automation_tools.py --action list_modules --project_id 1 --base_url http://127.0.0.1:8000 --api_key loca_stude-default-mcp-key-2025
 ```
 
 ## 用例概览

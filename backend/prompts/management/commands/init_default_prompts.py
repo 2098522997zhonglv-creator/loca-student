@@ -6,7 +6,7 @@ from prompts.services import get_default_prompts, initialize_user_prompts
 
 class Command(BaseCommand):
     help = (
-        "从 prompts.default_templates（与 WHartTest 同源）为用户初始化默认提示词。"
+        "从 prompts.default_templates（与 loca_stude 同源）为用户初始化默认提示词。"
         "包含：默认通用提示词、六维评审分析、测试用例执行、智能用例生成、图表生成。"
     )
 
@@ -85,5 +85,5 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("默认提示词初始化完成。"))
         if not force_update:
             self.stdout.write(
-                "提示：若需用 WHartTest 模板覆盖已有内容，请追加 --force"
+                "提示：若需用 loca_stude 模板覆盖已有内容，请追加 --force"
             )

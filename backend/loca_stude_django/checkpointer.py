@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from typing import Optional
 from django.conf import settings
 
-from wharttest_django.data_variant import (
+from loca_stude_django.data_variant import (
     get_checkpoint_sqlite_path,
     get_postgres_db_name,
 )

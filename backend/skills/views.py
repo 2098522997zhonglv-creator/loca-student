@@ -8,7 +8,7 @@ from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from wharttest_django.viewsets import BaseModelViewSet
+from loca_stude_django.viewsets import BaseModelViewSet
 from projects.models import Project
 from .models import Skill
 from .serializers import SkillSerializer, SkillUploadSerializer, SkillGitImportSerializer, SkillListSerializer, SkillToggleSerializer, SkillZipUrlImportSerializer

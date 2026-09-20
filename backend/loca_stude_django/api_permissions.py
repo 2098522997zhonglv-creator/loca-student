@@ -2,7 +2,7 @@
 API 自动化测试模块的通用权限基类。
 
 所有 api_* 应用的权限类都继承自 IsProjectMemberForResource，
-遵循 WHartTest 三层权限模式：IsAuthenticated + HasModelPermission + IsProjectMember。
+遵循 loca_stude 三层权限模式：IsAuthenticated + HasModelPermission + IsProjectMember。
 """
 
 from rest_framework import permissions
