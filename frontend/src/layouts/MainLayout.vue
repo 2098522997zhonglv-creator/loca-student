@@ -161,7 +161,11 @@ async function logout() {
 
 <style scoped>
 .shell {
-  min-height: 100vh;
+  height: 100vh;
+  max-height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   background:
     radial-gradient(900px 360px at 0% 0%, rgba(126, 224, 200, 0.18), transparent 55%),
     linear-gradient(180deg, #f4f7f6 0%, #e9f0ed 100%);
@@ -169,6 +173,7 @@ async function logout() {
 
 .header {
   height: 60px;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 18px;
@@ -303,13 +308,25 @@ async function logout() {
 }
 
 .body {
-  min-height: calc(100vh - 60px);
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  overflow: hidden;
 }
 
 .sider {
   background: rgba(255, 255, 255, 0.72);
   border-right: 1px solid rgba(15, 61, 56, 0.07);
   backdrop-filter: blur(10px);
+  height: 100% !important;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.sider :deep(.arco-layout-sider-children) {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .nav {
@@ -392,11 +409,17 @@ async function logout() {
 .content {
   padding: 16px 18px 18px;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .content-frame {
-  min-height: calc(100vh - 92px);
-  height: calc(100vh - 92px);
+  flex: 1;
+  min-height: 0;
+  height: auto;
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(15, 61, 56, 0.06);
   border-radius: 18px;
@@ -430,8 +453,6 @@ async function logout() {
   }
   .content-frame {
     border-radius: 14px;
-    min-height: calc(100vh - 80px);
-    height: calc(100vh - 80px);
   }
 }
 </style>
