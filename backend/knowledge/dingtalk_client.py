@@ -238,12 +238,21 @@ class DingTalkClient:
 
     def get_document_markdown(self, doc_key: str) -> str:
         """拉取文档正文并转为 Markdown。优先 blocks，失败再尝试 content API。"""
+        blocks_error: Exception | None = None
         try:
             blocks = self.get_document_blocks(doc_key)
             md = blocks_to_markdown(blocks)
             if md.strip():
                 return md
+            if blocks:
+                # 有块但转不出文本，仍返回空串标记，继续尝试 content
+                logger.warning(
+                    "blocks 非空但转 Markdown 为空 docKey=%s count=%s",
+                    doc_key,
+                    len(blocks),
+                )
         except DingTalkAPIError as e:
+            blocks_error = e
             logger.warning("blocks 拉取失败，尝试 content API: %s", e)
 
         token = self.get_access_token()
@@ -256,15 +265,38 @@ class DingTalkClient:
         )
         if resp.status_code == 200:
             data = self._parse_json(resp)
-            content = data.get("content") or data.get("data") or ""
+            content = data.get("content") or data.get("data")
+            result = data.get("result")
+            if content in (None, "") and isinstance(result, dict):
+                content = (
+                    result.get("content")
+                    or result.get("markdown")
+                    or result.get("data")
+                )
             if isinstance(content, dict):
                 content = content.get("markdown") or content.get("text") or str(content)
-            if content:
+            if content and str(content).strip():
                 return str(content)
+        # 汇总真实错误，避免只看到笼统的 dockey
+        detail_parts = []
+        if blocks_error:
+            detail_parts.append(f"blocks: {blocks_error}")
+        try:
+            err_body = resp.json() if resp.content else {}
+        except ValueError:
+            err_body = {"raw": (resp.text or "")[:500]}
+        content_msg = (
+            err_body.get("message")
+            or err_body.get("errmsg")
+            or err_body.get("code")
+            or (resp.text or "")[:300]
+            or f"HTTP {resp.status_code}"
+        )
+        detail_parts.append(f"content: {content_msg}")
         raise DingTalkAPIError(
-            f"无法获取文档正文 docKey={doc_key}",
+            f"无法获取文档正文 docKey={doc_key}；" + "；".join(detail_parts),
             getattr(resp, "status_code", None),
-            getattr(resp, "text", None),
+            err_body,
         )
 
     def get_document_blocks(self, doc_key: str) -> List[Dict[str, Any]]:
@@ -286,9 +318,7 @@ class DingTalkClient:
                 timeout=60,
             )
             data = self._parse_json(resp, expect_ok=True)
-            batch = data.get("data") or data.get("blocks") or data.get("result") or []
-            if isinstance(batch, dict):
-                batch = batch.get("blocks") or batch.get("elements") or []
+            batch = self._extract_blocks_list(data)
             if not batch:
                 break
             blocks.extend(batch)
@@ -296,6 +326,40 @@ class DingTalkClient:
                 break
             start_index = end_index
         return blocks
+
+    @staticmethod
+    def _extract_blocks_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """兼容钉钉多种返回结构：result.data / data / blocks。"""
+        if not isinstance(data, dict):
+            return []
+        candidates = [
+            data.get("data"),
+            data.get("blocks"),
+        ]
+        result = data.get("result")
+        if isinstance(result, list):
+            candidates.append(result)
+        elif isinstance(result, dict):
+            candidates.extend(
+                [
+                    result.get("data"),
+                    result.get("blocks"),
+                    result.get("elements"),
+                ]
+            )
+        for item in candidates:
+            if isinstance(item, list):
+                return item
+            if isinstance(item, dict):
+                nested = (
+                    item.get("data")
+                    or item.get("blocks")
+                    or item.get("elements")
+                    or item.get("list")
+                )
+                if isinstance(nested, list):
+                    return nested
+        return []
 
     def _headers(self, token: str) -> Dict[str, str]:
         return {
