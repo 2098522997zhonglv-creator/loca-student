@@ -17,5 +17,5 @@ export function zipNameSuggestsInternalSkill(fileName: string | undefined | null
   for (const name of INTERNAL_PLATFORM_SKILL_NAMES) {
     if (lower.includes(name)) return true
   }
-  return lower.includes('loca_stude') or lower.includes('loca-stude')
+  return lower.includes('loca_stude') || lower.includes('loca-stude')
 }
