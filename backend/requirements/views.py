@@ -6,8 +6,10 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.urls import reverse
 from django.shortcuts import get_object_or_404
+import gc
 import logging
 import os
+import time
 
 from loca_stude_django.viewsets import BaseModelViewSet
 from loca_stude_django.permissions import permission_required
@@ -60,6 +62,54 @@ from .services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_remove_filesystem_path(path: str, retries: int = 6, delay: float = 0.25) -> bool:
+    """删除本地文件；Windows 下文件被占用时重试，仍失败则跳过避免整单删除失败。"""
+    if not path:
+        return True
+    for attempt in range(retries):
+        try:
+            if not os.path.exists(path):
+                return True
+            os.remove(path)
+            return True
+        except OSError as exc:
+            winerr = getattr(exc, "winerror", None)
+            # WinError 32: 文件被占用；Errno 13: Permission denied
+            if winerr == 32 or getattr(exc, "errno", None) in (13, 11):
+                gc.collect()
+                time.sleep(delay * (attempt + 1))
+                continue
+            logger.warning("删除文件失败 %s: %s", path, exc)
+            return False
+    logger.warning("文件仍被占用，已跳过物理删除: %s", path)
+    return False
+
+
+def _collect_document_media_paths(document: RequirementDocument) -> list:
+    paths = []
+    if document.file:
+        try:
+            document.file.close()
+        except Exception:
+            pass
+        try:
+            paths.append(document.file.path)
+        except Exception:
+            pass
+    for doc_image in document.images.all():
+        if not doc_image.image_file:
+            continue
+        try:
+            doc_image.image_file.close()
+        except Exception:
+            pass
+        try:
+            paths.append(doc_image.image_file.path)
+        except Exception:
+            pass
+    return paths
 
 
 class RequirementDocumentViewSet(BaseModelViewSet):
@@ -151,21 +201,28 @@ class RequirementDocumentViewSet(BaseModelViewSet):
                 logger.error(f"文档内容提取失败: {e}")
 
     def destroy(self, request, *args, **kwargs):
-        """删除需求文档时同时删除物理文件"""
+        """删除需求文档时同时删除物理文件（Windows 占用时不阻断库记录删除）"""
         document = self.get_object()
+        document_title = document.title
 
         try:
-            # 删除物理文件
-            if document.file:
-                if os.path.exists(document.file.path):
-                    os.remove(document.file.path)
-                    logger.info(f"已删除文件: {document.file.path}")
+            media_paths = _collect_document_media_paths(document)
 
-            # 删除数据库记录（这会级联删除相关的模块、评审报告等）
-            document_title = document.title
+            # 先删库记录，避免 WinError 32 导致整单删除失败
             document.delete()
 
-            logger.info(f"需求文档删除成功: {document_title}")
+            removed = 0
+            for path in media_paths:
+                if _safe_remove_filesystem_path(path):
+                    removed += 1
+                    logger.info("已删除文件: %s", path)
+
+            logger.info(
+                "需求文档删除成功: %s (物理文件 %s/%s)",
+                document_title,
+                removed,
+                len(media_paths),
+            )
             return Response(status=status.HTTP_204_NO_CONTENT)
 
         except Exception as e:
