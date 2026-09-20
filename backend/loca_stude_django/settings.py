@@ -219,6 +219,10 @@ KB_URL_HOST_ALLOWLIST = {
     for h in os.environ.get("KB_URL_HOST_ALLOWLIST", "").split(",")
     if h.strip()
 }
+# 内网原型站常需 Basic Auth / Cookie；未配置时 401 会标记文档失败而非入库错误页。
+KB_URL_BASIC_AUTH = os.environ.get("KB_URL_BASIC_AUTH", "").strip()
+KB_URL_COOKIE = os.environ.get("KB_URL_COOKIE", "").strip()
+KB_URL_FETCH_TIMEOUT = int(os.environ.get("KB_URL_FETCH_TIMEOUT", "30"))
 
 # Unified runtime logs under data/logs (same folder used by Windows auto-update scripts).
 LOG_DIR = Path(os.environ.get("LOG_DIR", DATA_DIR / "logs"))

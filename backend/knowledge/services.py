@@ -376,16 +376,19 @@ class DocumentProcessor:
         return self._load_from_content(markdown, document.title or doc_key)
 
     def _load_from_url(self, url: str) -> List[LangChainDocument]:
-        """从URL加载文档（含 SSRF 防护；可按配置放行内网）"""
-        from urllib.parse import urlparse
+        """从URL加载文档（含 SSRF 防护、HTTP 状态校验；可按配置放行内网/鉴权）"""
+        from urllib.parse import urlparse, urlunparse
         from ipaddress import ip_address
         import socket
+        import re
 
         from django.conf import settings
 
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(f"仅允许 http/https 协议: {parsed.scheme}")
+        # 片段 (#...) 仅前端路由，请求时去掉，避免干扰
+        fetch_url = urlunparse(parsed._replace(fragment=""))
         hostname = (parsed.hostname or "").lower()
         allow_private = bool(getattr(settings, "KB_URL_ALLOW_PRIVATE", False))
         host_allowlist = {
@@ -418,8 +421,94 @@ class DocumentProcessor:
                         "加入 KB_URL_HOST_ALLOWLIST)"
                     )
 
-        loader = WebBaseLoader(url)
-        return loader.load()
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; loca_stude-knowledge/1.0; "
+                "+local-knowledge-center)"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        cookie = (getattr(settings, "KB_URL_COOKIE", "") or "").strip()
+        if cookie:
+            headers["Cookie"] = cookie
+
+        auth = None
+        basic = (getattr(settings, "KB_URL_BASIC_AUTH", "") or "").strip()
+        if basic and ":" in basic:
+            user, _, password = basic.partition(":")
+            auth = (user, password)
+
+        try:
+            resp = requests.get(
+                fetch_url,
+                headers=headers,
+                auth=auth,
+                timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30),
+                allow_redirects=True,
+            )
+        except requests.RequestException as e:
+            raise ValueError(f"拉取 URL 失败: {e}") from e
+
+        if resp.status_code in (401, 403):
+            raise ValueError(
+                f"URL 需要鉴权 (HTTP {resp.status_code})。请在 .env 配置 "
+                "KB_URL_BASIC_AUTH=用户名:密码 或 KB_URL_COOKIE=会话Cookie 后重新处理文档。"
+            )
+        if resp.status_code >= 400:
+            raise ValueError(f"拉取 URL 失败: HTTP {resp.status_code}")
+
+        # 部分网关对未登录返回 200 + 错误页
+        text_sample = (resp.text or "")[:4000]
+        lower = text_sample.lower()
+        error_markers = (
+            "401 authorization required",
+            "403 forbidden",
+            "access denied",
+            "nginx",
+        )
+        if (
+            "authorization required" in lower
+            or "401 authorization" in lower
+            or (lower.strip().startswith("<html") and "401" in lower and "nginx" in lower)
+        ):
+            raise ValueError(
+                "URL 返回未授权页面（如 nginx 401），未写入知识库。"
+                "请配置 KB_URL_BASIC_AUTH / KB_URL_COOKIE 后重新处理。"
+            )
+
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        raw = resp.text or ""
+        if "html" in content_type or raw.lstrip().lower().startswith(
+            ("<!doctype", "<html")
+        ):
+            try:
+                from bs4 import BeautifulSoup
+
+                soup = BeautifulSoup(raw, "html.parser")
+                for tag in soup(["script", "style", "noscript"]):
+                    tag.decompose()
+                text = " ".join(soup.get_text("\n", strip=True).split())
+            except Exception:
+                text = re.sub(r"<[^>]+>", " ", raw)
+                text = " ".join(text.split())
+        else:
+            text = raw.strip()
+
+        if not text or len(text) < 20:
+            raise ValueError("URL 页面正文过短或为空，无法入库")
+
+        # 正文仍是典型错误页
+        if any(m in text.lower() for m in error_markers) and len(text) < 200:
+            raise ValueError(
+                "URL 内容疑似错误页，未入库。请检查链接权限或配置鉴权后重试。"
+            )
+
+        return [
+            LangChainDocument(
+                page_content=text,
+                metadata={"source": fetch_url, "title": hostname or fetch_url},
+            )
+        ]
 
     def _load_from_content(self, content: str, title: str) -> List[LangChainDocument]:
         """从文本内容加载文档"""
