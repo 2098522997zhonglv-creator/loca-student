@@ -496,6 +496,7 @@ class DocumentProcessor:
 
         content_type = (resp.headers.get("Content-Type") or "").lower()
         raw = resp.text or ""
+        text = ""
         if "html" in content_type or raw.lstrip().lower().startswith(
             ("<!doctype", "<html")
         ):
@@ -512,7 +513,36 @@ class DocumentProcessor:
         else:
             text = raw.strip()
 
+        # Axure 等 SPA：壳页面几乎无字，正文在 files/<page>/data.js 或需浏览器渲染
+        looks_axure = self._looks_like_axure(url, raw)
+        if looks_axure or not text or len(text) < 40:
+            axure_text = self._load_axure_page_text(
+                url, headers=headers, timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30)
+            )
+            if axure_text and len(axure_text) >= 20:
+                logger.info(
+                    "从 Axure data.js 提取正文 %s 字符 (page fragment)",
+                    len(axure_text),
+                )
+                text = axure_text
+
+        if (not text or len(text) < 20) and looks_axure:
+            rendered = self._load_url_via_playwright(
+                url, headers=headers, timeout=getattr(settings, "KB_URL_FETCH_TIMEOUT", 30)
+            )
+            if rendered and len(rendered) >= 20:
+                logger.info("通过 Playwright 渲染原型页，提取 %s 字符", len(rendered))
+                text = rendered
+
         if not text or len(text) < 20:
+            if looks_axure or "#p=" in (url or "") or "p=" in (urlparse(url).fragment or ""):
+                raise ValueError(
+                    "该链接是 Axure 动态原型，静态 HTML 无正文。"
+                    "已尝试解析 files/<页面>/data.js 仍失败。"
+                    "请改用：1) 粘贴需求说明文本入库 2) 上传 Word/PDF "
+                    "3) 安装 Playwright 后重试（可选）"
+                    "4) 确认原型目录下 files/ 可匿名或带 Cookie 访问。"
+                )
             raise ValueError("URL 页面正文过短或为空，无法入库")
 
         # 正文仍是典型错误页
@@ -527,6 +557,205 @@ class DocumentProcessor:
                 metadata={"source": fetch_url, "title": hostname or fetch_url},
             )
         ]
+
+    @staticmethod
+    def _looks_like_axure(url: str, html: str) -> bool:
+        from urllib.parse import urlparse
+
+        frag = urlparse(url).fragment or ""
+        if "p=" in frag or "id=" in frag:
+            return True
+        lower = (html or "").lower()
+        return any(
+            marker in lower
+            for marker in (
+                "axure",
+                "$axure",
+                "data-label",
+                "axure_annotate",
+                "start_with_pages.html",
+            )
+        )
+
+    def _load_axure_page_text(
+        self, url: str, headers: dict, timeout: int
+    ) -> str:
+        """从 Axure 导出的 files/<page>/data.js 提取可见文案。"""
+        from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
+
+        parsed = urlparse(url)
+        frag_qs = parse_qs(parsed.fragment or "")
+        page_name = unquote((frag_qs.get("p") or [""])[0] or "").strip()
+        if not page_name:
+            return ""
+
+        path = parsed.path or "/"
+        if path.endswith(".html"):
+            base_path = path.rsplit("/", 1)[0] + "/"
+        elif not path.endswith("/"):
+            base_path = path + "/"
+        else:
+            base_path = path
+        base = urlunparse((parsed.scheme, parsed.netloc, base_path, "", "", ""))
+
+        # Axure 页面目录名通常与 p= 一致；兼容空格/下划线
+        name_variants = []
+        for name in (
+            page_name,
+            page_name.replace(" ", "_"),
+            page_name.replace("_", " "),
+            page_name.replace("·", "-"),
+            page_name.replace("-", "·"),
+        ):
+            if name and name not in name_variants:
+                name_variants.append(name)
+
+        candidates = []
+        for name in name_variants:
+            candidates.append(urljoin(base, f"files/{name}/data.js"))
+            candidates.append(urljoin(base, f"files/{quote(name)}/data.js"))
+            candidates.append(urljoin(base, f"files/{quote(name, safe='')}/data.js"))
+
+        for cand in candidates:
+            try:
+                resp = requests.get(
+                    cand, headers=headers, timeout=timeout, allow_redirects=True
+                )
+            except requests.RequestException as e:
+                logger.debug("Axure data.js 拉取失败 %s: %s", cand, e)
+                continue
+            if resp.status_code != 200 or not resp.text:
+                logger.debug(
+                    "Axure data.js HTTP %s %s", resp.status_code, cand
+                )
+                continue
+            text = self._extract_text_from_axure_js(resp.text)
+            if text and len(text) >= 20:
+                logger.info("Axure data.js 命中: %s", cand)
+                return text
+        return ""
+
+    @staticmethod
+    def _extract_text_from_axure_js(js: str) -> str:
+        """从 Axure data.js / document.js 中抽取文本字段。"""
+        import json
+        import re
+
+        texts: List[str] = []
+        seen = set()
+        pattern = re.compile(r'"text"\s*:\s*"((?:\\.|[^"\\])*)"')
+        skip = {
+            "",
+            "true",
+            "false",
+            "null",
+            "div",
+            "img",
+            "input",
+            "select",
+            "button",
+            "table",
+            "tr",
+            "td",
+            "span",
+            "p",
+            "a",
+            "none",
+            "block",
+            "auto",
+            "left",
+            "right",
+            "center",
+            "top",
+            "bottom",
+            "visible",
+            "hidden",
+            "bold",
+            "normal",
+            "Arial",
+            "微软雅黑",
+        }
+        for match in pattern.finditer(js or ""):
+            raw = match.group(1)
+            try:
+                value = json.loads(f'"{raw}"')
+            except Exception:
+                value = (
+                    raw.replace(r"\/", "/")
+                    .replace(r"\n", "\n")
+                    .replace(r"\t", "\t")
+                    .replace(r"\"", '"')
+                    .replace(r"\\", "\\")
+                )
+            value = (value or "").strip()
+            if len(value) < 2 or value in skip:
+                continue
+            if value.startswith(("http://", "https://", "javascript:")):
+                continue
+            if re.fullmatch(r"[\d.\spx%em#-]+", value):
+                continue
+            if value not in seen:
+                seen.add(value)
+                texts.append(value)
+        return "\n".join(texts)
+
+    def _load_url_via_playwright(
+        self, url: str, headers: dict, timeout: int
+    ) -> str:
+        """可选：用 Playwright 渲染动态原型页（未安装则跳过）。"""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.info("未安装 playwright，跳过原型页浏览器渲染")
+            return ""
+
+        cookie_header = headers.get("Cookie") or ""
+        auth_header = headers.get("Authorization") or ""
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context_kwargs = {}
+                if auth_header.lower().startswith("basic "):
+                    # Playwright 基本认证走 http_credentials 更稳
+                    import base64
+
+                    try:
+                        decoded = base64.b64decode(auth_header.split(" ", 1)[1]).decode(
+                            "utf-8"
+                        )
+                        user, _, password = decoded.partition(":")
+                        context_kwargs["http_credentials"] = {
+                            "username": user,
+                            "password": password,
+                        }
+                    except Exception:
+                        pass
+                context = browser.new_context(**context_kwargs)
+                if cookie_header:
+                    # 粗粒度：整段 Cookie 头注入到目标域
+                    from urllib.parse import urlparse
+
+                    host = urlparse(url).hostname
+                    if host:
+                        pairs = []
+                        for part in cookie_header.split(";"):
+                            part = part.strip()
+                            if "=" in part:
+                                n, _, v = part.partition("=")
+                                pairs.append(
+                                    {"name": n.strip(), "value": v.strip(), "domain": host, "path": "/"}
+                                )
+                        if pairs:
+                            context.add_cookies(pairs)
+                page = context.new_page()
+                page.goto(url, wait_until="networkidle", timeout=max(timeout, 15) * 1000)
+                page.wait_for_timeout(1500)
+                text = page.inner_text("body") or ""
+                browser.close()
+                return " ".join(text.split())
+        except Exception as e:
+            logger.warning("Playwright 渲染原型失败: %s", e)
+            return ""
 
     def _load_from_content(self, content: str, title: str) -> List[LangChainDocument]:
         """从文本内容加载文档"""
