@@ -808,7 +808,14 @@ async def _format_project_skills(project):
             return ""
 
         skills_text = "\n\n# Available Skills\n\n"
-        skills_text += "以下是可用的 Skills 列表。需要使用某个 Skill 时，先调用 `read_skill_content` 工具获取完整的使用说明，再调用 `execute_skill_script` 执行命令。\n\n"
+        skills_text += (
+            "以下是可用的 Skills 列表，仅用于**操作平台数据**"
+            "（创建/查询用例、模块、接口自动化资源、发起评审数据查询等）。\n"
+            "需要使用某个 Skill 时，先调用 `read_skill_content` 获取完整说明，"
+            "再调用 `execute_skill_script` 执行命令。\n"
+            "**不要**用这些 Skill 回答「需求文档里写了什么 / 接口在哪设置 / 业务规则如何」"
+            "——这类问题应使用 `knowledge_search`（或系统已注入的知识库预检索结果）。\n\n"
+        )
         for skill in skills:
             skills_text += f"- **{skill.name}**: {skill.description}\n"
 
@@ -842,13 +849,16 @@ def _build_project_scope_hint(project) -> str:
     )
 
 
-async def _inject_project_context(prompt_content: str, project) -> str:
+async def _inject_project_context(
+    prompt_content: str, project, include_skills: bool = True
+) -> str:
     """
     注入项目上下文（项目作用域、凭据和 Skills）到提示词中
 
     Args:
         prompt_content: 原始提示词内容
         project: 项目对象
+        include_skills: 是否注入 Skills 元数据（知识库问答模式应关闭）
 
     Returns:
         str: 注入上下文后的提示词
@@ -877,19 +887,24 @@ async def _inject_project_context(prompt_content: str, project) -> str:
         prompt_content = prompt_content.replace("{credentials_info}", credentials_text)
 
     # 注入 Skills 信息
-    if "{skills_info}" in prompt_content:
-        skills_text = await _format_project_skills(project)
-        prompt_content = prompt_content.replace("{skills_info}", skills_text)
-    else:
-        # 即使没有占位符，也自动追加 Skills 到提示词末尾
-        skills_text = await _format_project_skills(project)
-        if skills_text:
-            prompt_content = prompt_content + skills_text
+    if include_skills:
+        if "{skills_info}" in prompt_content:
+            skills_text = await _format_project_skills(project)
+            prompt_content = prompt_content.replace("{skills_info}", skills_text)
+        else:
+            # 即使没有占位符，也自动追加 Skills 到提示词末尾
+            skills_text = await _format_project_skills(project)
+            if skills_text:
+                prompt_content = prompt_content + skills_text
+    elif "{skills_info}" in prompt_content:
+        prompt_content = prompt_content.replace("{skills_info}", "")
 
     return prompt_content
 
 
-async def get_effective_system_prompt_async(user, prompt_id=None, project=None):
+async def get_effective_system_prompt_async(
+    user, prompt_id=None, project=None, include_skills: bool = True
+):
     """
     获取有效的系统提示词（异步版本）
     优先级：用户指定的提示词 > 用户默认提示词 > 全局LLM配置的system_prompt
@@ -902,6 +917,7 @@ async def get_effective_system_prompt_async(user, prompt_id=None, project=None):
         user: 当前用户
         prompt_id: 指定的提示词ID（可选）
         project: 项目对象（可选），用于注入凭据和 Skills 信息
+        include_skills: 是否注入 Skills 元数据；知识库问答模式传 False
 
     Returns:
         tuple: (prompt_content, prompt_source)
@@ -916,7 +932,7 @@ async def get_effective_system_prompt_async(user, prompt_id=None, project=None):
                     id=prompt_id, user=user, is_active=True
                 )
                 prompt_content = await _inject_project_context(
-                    user_prompt.content, project
+                    user_prompt.content, project, include_skills=include_skills
                 )
                 return prompt_content, "user_specified"
             except UserPrompt.DoesNotExist:
@@ -931,7 +947,7 @@ async def get_effective_system_prompt_async(user, prompt_id=None, project=None):
             )
             if default_prompt:
                 prompt_content = await _inject_project_context(
-                    default_prompt.content, project
+                    default_prompt.content, project, include_skills=include_skills
                 )
                 return prompt_content, "user_default"
         except UserPrompt.DoesNotExist:
@@ -942,7 +958,9 @@ async def get_effective_system_prompt_async(user, prompt_id=None, project=None):
             active_config = await sync_to_async(LLMConfig.objects.get)(is_active=True)
             if active_config.system_prompt and active_config.system_prompt.strip():
                 prompt_content = await _inject_project_context(
-                    active_config.system_prompt.strip(), project
+                    active_config.system_prompt.strip(),
+                    project,
+                    include_skills=include_skills,
                 )
                 return prompt_content, "global"
         except LLMConfig.DoesNotExist:

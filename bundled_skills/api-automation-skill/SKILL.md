@@ -1,6 +1,6 @@
 ---
 name: api-automation
-description: loca_stude 接口自动化管理工具。用于按真实后端接口管理接口模块、数据库配置、环境与变量、自定义函数、接口定义与调试、单接口用例 ApiInterfaceCase、场景用例 ApiTestCase、任务套件、执行报告与同步配置。当需要创建、查询、修改、执行 API 自动化资源，区分单接口测试和场景用例，或排查执行、同步、任务套件问题时使用。
+description: loca_stude 接口自动化管理工具。用于按真实后端接口管理接口模块、数据库配置、环境与变量、自定义函数、接口定义与调试、单接口用例、场景用例、任务套件与报告。仅当用户要操作「接口自动化」模块资源时使用；问业务文档里的接口设计请用 knowledge_search，不要 list_modules 瞎试。
 ---
 
 # loca_stude 接口自动化管理

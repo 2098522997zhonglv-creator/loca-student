@@ -78,8 +78,10 @@ _KB_PRIORITY_HINT = """
 # 知识库使用规则（强制）
 - 下方「知识库预检索结果」是服务端已根据用户问题检索到的资料，必须作为回答业务问题的主要依据。
 - 若预检索不足，再调用 knowledge_search 工具补充查询；不要跳过知识库去编造项目内业务事实。
-- 禁止用 get_projects / list_files 等平台管理工具代替知识库回答需求、规则、流程类问题。
+- 本轮为知识库问答模式：禁止调用 execute_skill_script / read_skill_content，以及任何 loca-stude、requirement-review、api-automation、whart-test 等平台 Skill。
+- 禁止用 get_projects / list_modules / get_testcases / list_files 等平台管理动作代替知识库回答需求、规则、接口、流程类问题。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
+- 用户若明确要求「写入用例 / 创建模块 / 执行自动化」等平台操作，请提示其关闭知识库问答或改用不带知识库的对话后再操作。
 """.strip()
 
 
@@ -1086,17 +1088,26 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
                 )
 
-            # 6. 添加内置工具（Playwright 脚本管理等）
-            from orchestrator_integration.builtin_tools import get_builtin_tools
+            # 6. 添加内置 Skill 工具
+            # 知识库问答模式下不挂载，避免模型在已命中文档后仍乱调平台脚本
+            kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
+            if kb_qa_mode and not generate_playwright_script:
+                logger.info(
+                    "AgentLoopStreamAPI: 知识库问答模式，跳过 Skill 工具挂载"
+                )
+            else:
+                from orchestrator_integration.builtin_tools import get_builtin_tools
 
-            builtin_tools = get_builtin_tools(
-                user_id=request.user.id,
-                project_id=int(project_id),
-                test_case_id=test_case_id,
-                chat_session_id=session_id,
-            )
-            tools.extend(builtin_tools)
-            logger.info(f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools")
+                builtin_tools = get_builtin_tools(
+                    user_id=request.user.id,
+                    project_id=int(project_id),
+                    test_case_id=test_case_id,
+                    chat_session_id=session_id,
+                )
+                tools.extend(builtin_tools)
+                logger.info(
+                    f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools"
+                )
 
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
             prompt_obj = None
@@ -1127,9 +1138,12 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: Created new ChatSession: {session_id}"
                 )
 
-            # 8. 获取系统提示词
+            # 8. 获取系统提示词（KB 问答模式不注入 Skills 元数据，减少干扰）
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
-                request.user, prompt_id, project
+                request.user,
+                prompt_id,
+                project,
+                include_skills=not (kb_qa_mode and not generate_playwright_script),
             )
 
             # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
@@ -2128,24 +2142,32 @@ class AgentLoopResumeAPIView(View):
                             f"AgentLoopResumeAPI: ❌ Knowledge tool creation failed: {e}"
                         )
 
-                # 加载内置工具
-                try:
-                    from orchestrator_integration.builtin_tools import get_builtin_tools
-
-                    builtin_tools = get_builtin_tools(
-                        user_id=user.id,
-                        project_id=int(project_id) if project_id else 0,
-                        test_case_id=None,
-                        chat_session_id=session_id,
-                    )
-                    tools.extend(builtin_tools)
+                # 加载内置工具（知识库问答模式跳过，避免绕开检索乱调 Skill）
+                kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
+                if kb_qa_mode:
                     logger.info(
-                        f"AgentLoopResumeAPI: Added {len(builtin_tools)} builtin tools"
+                        "AgentLoopResumeAPI: 知识库问答模式，跳过 Skill 工具挂载"
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"AgentLoopResumeAPI: Builtin tools loading failed: {e}"
-                    )
+                else:
+                    try:
+                        from orchestrator_integration.builtin_tools import (
+                            get_builtin_tools,
+                        )
+
+                        builtin_tools = get_builtin_tools(
+                            user_id=user.id,
+                            project_id=int(project_id) if project_id else 0,
+                            test_case_id=None,
+                            chat_session_id=session_id,
+                        )
+                        tools.extend(builtin_tools)
+                        logger.info(
+                            f"AgentLoopResumeAPI: Added {len(builtin_tools)} builtin tools"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"AgentLoopResumeAPI: Builtin tools loading failed: {e}"
+                        )
 
                 # 5. 获取工具名列表和中间件配置
                 # 尝试从 ChatSession 关联的 prompt 获取系统提示词，用于精确计算 overhead

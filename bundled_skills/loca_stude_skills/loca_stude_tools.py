@@ -222,7 +222,11 @@ def get_levels():
 
 
 def get_testcases(project_id: int, module_id: int):
-    """获取用例列表"""
+    """获取用例列表。module_id 必填；不确定时先 get_modules。"""
+    if module_id is None:
+        return {
+            "error": "module_id 必填。请先调用 get_modules 获取模块列表，再传入具体 module_id。"
+        }
     url = f"{_base_url()}/api/projects/{project_id}/testcases/?page=1&page_size=1000&module_id={module_id}"
     try:
         resp = requests.get(url, headers=_headers())

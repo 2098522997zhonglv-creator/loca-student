@@ -1,11 +1,17 @@
 ---
 name: requirement-review
-description: 需求评审数据查询工具集。用于查询项目下的需求文档列表与正文、模块拆分结果、评审报告评分与结论、评审发现的问题清单。当用户问“有哪些需求”“需求文档写了什么”“评审结果怎么样”“评审发现了什么问题”“某个模块评得如何”时使用。只读，不能上传文档或发起评审。
+description: 需求评审数据查询工具集。用于查询项目下的需求文档列表与正文、模块拆分结果、评审报告评分与结论、评审发现的问题清单。仅当用户问「评审模块里有哪些文档/评审结果怎么样」时使用；问知识库文档内容（如某功能接口怎么设）请用 knowledge_search。只读，不能上传文档或发起评审。
 ---
 
 # 需求评审数据查询
 
 需求文档与项目文件附件是两套独立的数据。本工具查的是「需求评审」模块的数据；项目文件附件请用 `loca-stude` 的 `list_files`。
+
+## 先遵守这些
+
+- **动作名以本表为准**：只有 `list_documents` / `get_document` / `list_modules` / `get_report` / `list_issues` / `list_module_results`，没有 `list_requirements`。
+- **脚本文件名**：`requirement_tools.py`（不要猜成 `requirement_review_tools.py`）。
+- 问「知识库/需求 PDF 里某功能怎么设计」→ 用会话的 `knowledge_search`，不要用本 Skill 试探。
 
 ## 快速开始
 
