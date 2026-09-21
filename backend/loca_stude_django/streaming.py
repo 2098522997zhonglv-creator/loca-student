@@ -1,17 +1,16 @@
 """
 SSE 流式响应工具。
 
-背景：Django 5 的 StreamingHttpResponse 在 WSGI（runserver / gunicorn 等同步
-服务器）下拿到 async 生成器时，会在 __iter__ 里用 async_to_sync 把整个流一次性
-收集成 list 再输出（见 django/http/response.py）。结果是浏览器等到全部内容生成
-完才收到第一个字节，SSE 退化为一次性响应。
+背景：
+- Django 5 在 WSGI（runserver / gunicorn）下若直接塞 async 生成器，会在
+  __iter__ 里用 async_to_sync 把整段攒齐再输出，SSE 退化成一次性响应。
+- 本机生产路径是 Daphne（ASGI，见 django.channels.server 日志）。ASGI 下应直接
+  喂 async 迭代器，才能真正逐块刷出；若再套「独立线程 + asyncio.run」同步泵，
+  反而可能与请求事件循环错位，表现为 diagnose 第四步通、第五步/浏览器仍整段出。
 
-这里把 async 生成器放到独立线程的事件循环中运行，通过队列逐块交给 WSGI，使
-StreamingHttpResponse 拿到的是真正的同步迭代器。
-
-注意：async 生成器体在首次迭代时才执行，因此其内部创建的所有异步资源
-（checkpointer、MCP 会话、agent.astream 等）都会绑定到这个新事件循环，
-不会与视图自身的循环冲突。
+策略：
+- 已有 running loop（典型 ASGI/Daphne）→ 原生 async StreamingHttpResponse
+- 无 running loop（典型同步 WSGI 视图）→ 线程泵转同步迭代器
 """
 
 import asyncio
@@ -68,13 +67,34 @@ def iter_async_generator(
         yield chunk
 
 
+def _under_asgi() -> bool:
+    """当前是否已在事件循环中（ASGI 请求处理路径）。"""
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
 def sse_response(
     make_async_iterator: Callable[[], AsyncIterator],
     status: int = 200,
 ) -> StreamingHttpResponse:
-    """构造一个在 WSGI 下也能真正逐块输出的 SSE 响应。"""
+    """构造 SSE 响应：ASGI 用原生 async 流，WSGI 用线程泵。"""
+    if _under_asgi():
+
+        async def async_body():
+            async for chunk in make_async_iterator():
+                yield chunk
+
+        streaming_content = async_body()
+        logger.debug("SSE response using native ASGI async iterator")
+    else:
+        streaming_content = iter_async_generator(make_async_iterator)
+        logger.debug("SSE response using WSGI thread pump")
+
     response = StreamingHttpResponse(
-        iter_async_generator(make_async_iterator),
+        streaming_content,
         content_type="text/event-stream; charset=utf-8",
         status=status,
     )
