@@ -84,7 +84,7 @@ class KnowledgeRAGService:
 
             # 获取检索参数
             top_k = state.get("top_k", 5)
-            similarity_threshold = state.get("similarity_threshold", 0.7)
+            similarity_threshold = state.get("similarity_threshold", 0.3)
 
             # 统一检索增强（含 Query Rewrite）
             search_results = service.enhanced_search(
@@ -119,7 +119,7 @@ class KnowledgeRAGService:
             if context_sources:
                 # 构建详细的上下文信息
                 context_parts = []
-                for i, result in enumerate(context_sources[:3], 1):
+                for i, result in enumerate(context_sources[:5], 1):
                     content = result.get("content", "")
                     score = result.get("similarity_score", 0.0)
                     metadata = result.get("metadata", {})
@@ -183,7 +183,7 @@ class KnowledgeRAGService:
 
     def query(self, question: str, knowledge_base_id: str = None, user=None,
               project_id: str = None, thread_id: str = None,
-              use_knowledge_base: bool = True, similarity_threshold: float = 0.7,
+              use_knowledge_base: bool = True, similarity_threshold: float = 0.3,
               top_k: int = 5) -> Dict[str, Any]:
         """执行RAG查询"""
         start_time = time.time()
@@ -488,23 +488,45 @@ class ConversationalRAGService(KnowledgeRAGService):
             }
 
 
-def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: float = 0.5, top_k: int = 5):
+def create_knowledge_tool(
+    knowledge_base_id: str,
+    user,
+    similarity_threshold: float = 0.3,
+    top_k: int = 5,
+):
     """创建知识库工具，用于Agent调用"""
     from langchain_core.tools import tool
+
+    # 兜底：避免前端传 0 / None 导致检索异常
+    try:
+        similarity_threshold = float(similarity_threshold)
+    except (TypeError, ValueError):
+        similarity_threshold = 0.3
+    try:
+        top_k = max(1, min(int(top_k), 20))
+    except (TypeError, ValueError):
+        top_k = 5
 
     @tool
     def knowledge_search(query: str) -> str:
         """
-        搜索知识库获取相关信息
+        搜索当前会话绑定的知识库，获取需求/业务文档相关片段。
+        回答项目内业务、接口、流程、规则类问题时必须优先使用本工具。
 
         Args:
-            query: 搜索查询字符串
+            query: 搜索查询字符串（尽量包含功能名、模块名等关键词）
 
         Returns:
             str: 搜索结果，包含相关文档内容
         """
         try:
-            logger.info(f"知识库工具被调用: {query[:50]}...")
+            logger.info(
+                "知识库工具被调用: kb=%s threshold=%s top_k=%s query=%s",
+                knowledge_base_id,
+                similarity_threshold,
+                top_k,
+                (query or "")[:50],
+            )
 
             # 获取知识库
             knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_id)
@@ -518,6 +540,7 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
             if not search_results:
                 from collections import Counter
                 from .models import Document
+                from .services import VectorStoreManager
 
                 counts = dict(
                     Counter(
@@ -526,27 +549,40 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
                         ).values_list("status", flat=True)
                     )
                 )
+                points = 0
+                try:
+                    vm = VectorStoreManager(knowledge_base)
+                    points = vm._collection_points_count(vm._get_collection_name())
+                except Exception:
+                    points = -1
+
                 logger.warning(
-                    "知识库工具无命中 kb_id=%s doc_status=%s",
+                    "知识库工具无命中 kb_id=%s doc_status=%s points=%s",
                     knowledge_base_id,
                     counts,
+                    points,
                 )
                 if not counts:
                     return "当前知识库没有文档，请先上传或同步文档后再查询。"
                 if counts.get("completed", 0) == 0:
                     return (
                         f"当前知识库没有「已完成」的文档（状态分布: {counts}）。"
-                        "请到知识库详情中重新处理文档，或调用 "
-                        f"POST /api/knowledge/bases/{knowledge_base_id}/rebuild-index/"
+                        "请到知识库详情中重新处理文档，或执行重建索引。"
+                    )
+                if points == 0:
+                    return (
+                        "知识库文档已存在，但向量索引为空（Qdrant 点数=0）。"
+                        "请在知识库详情执行「重建索引」后再提问。"
                     )
                 return (
-                    "未检索到相关片段。若刚同步过文档，请先重建索引："
-                    f"POST /api/knowledge/bases/{knowledge_base_id}/rebuild-index/"
+                    f"未检索到与「{query}」足够相似的片段"
+                    f"（阈值={similarity_threshold}, top_k={top_k}, 向量点数={points}）。"
+                    "可尝试换关键词，或降低相似度阈值后重试；若刚同步文档请先重建索引。"
                 )
 
-            # 格式化结果
+            # 格式化结果（返回全部 top_k，避免材料多却只看见 3 条）
             formatted_results = []
-            for i, result in enumerate(search_results[:3], 1):
+            for i, result in enumerate(search_results[:top_k], 1):
                 content = result.get("content", "")
                 score = result.get("similarity_score", 0.0)
                 metadata = result.get("metadata", {})
@@ -576,13 +612,16 @@ def create_knowledge_tool(knowledge_base_id: str, user, similarity_threshold: fl
                 VectorStoreManager.clear_cache(knowledge_base_id)
                 return (
                     "知识库向量索引暂不可用（集合缺失或未重建）。"
-                    "请在知识库中重新处理文档，或执行："
-                    f"python manage.py fix_knowledge_base --kb-id {knowledge_base_id}"
+                    "请在知识库中重新处理文档，或执行重建索引。"
                 )
             return f"知识库搜索失败: {err}"
 
     # 设置工具的名称和描述
     knowledge_search.name = "knowledge_search"
-    knowledge_search.description = f"搜索知识库 {knowledge_base_id} 获取相关信息。当用户询问特定知识、文档内容或需要查找资料时使用此工具。"
+    knowledge_search.description = (
+        "搜索当前绑定知识库中的需求/业务文档。"
+        "当用户询问功能规则、接口、流程、原型说明、测试点或任何项目内资料时，"
+        "必须优先调用本工具；不要用 get_projects 等平台工具代替知识库检索。"
+    )
 
     return knowledge_search

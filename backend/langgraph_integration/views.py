@@ -1034,7 +1034,7 @@ class ChatAPIView(APIView):
         use_knowledge_base = request.data.get(
             "use_knowledge_base", True
         )  # 默认启用知识库
-        similarity_threshold = request.data.get("similarity_threshold", 0.5)
+        similarity_threshold = request.data.get("similarity_threshold", 0.3)
         top_k = request.data.get("top_k", 5)
 
         # 提示词相关参数

@@ -74,6 +74,105 @@ from requirements.context_limits import (
 
 logger = logging.getLogger(__name__)
 
+_KB_PRIORITY_HINT = """
+# 知识库使用规则（强制）
+- 下方「知识库预检索结果」是服务端已根据用户问题检索到的资料，必须作为回答业务问题的主要依据。
+- 若预检索不足，再调用 knowledge_search 工具补充查询；不要跳过知识库去编造项目内业务事实。
+- 禁止用 get_projects / list_files 等平台管理工具代替知识库回答需求、规则、流程类问题。
+- 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
+""".strip()
+
+
+def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
+    try:
+        threshold = float(similarity_threshold) if similarity_threshold is not None else 0.3
+    except (TypeError, ValueError):
+        threshold = 0.3
+    threshold = min(max(threshold, 0.0), 1.0)
+    try:
+        k = int(top_k) if top_k is not None else 5
+    except (TypeError, ValueError):
+        k = 5
+    k = min(max(k, 1), 20)
+    return threshold, k
+
+
+def _prefetch_knowledge_context(
+    knowledge_base_id,
+    query: str,
+    similarity_threshold: float = 0.3,
+    top_k: int = 5,
+) -> str:
+    """服务端预检索知识库，避免模型不调工具导致「库里有材料却答得蠢」。"""
+    if not knowledge_base_id or not (query or "").strip():
+        return ""
+
+    from knowledge.models import KnowledgeBase, Document
+    from knowledge.services import KnowledgeBaseService, VectorStoreManager
+    from collections import Counter
+
+    try:
+        knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_id)
+        service = KnowledgeBaseService(knowledge_base)
+        results = service.enhanced_search(
+            query.strip(),
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+        )
+        if results:
+            parts = []
+            for i, item in enumerate(results[:top_k], 1):
+                content = (item.get("content") or "").strip()
+                if not content:
+                    continue
+                score = float(item.get("similarity_score") or 0.0)
+                meta = item.get("metadata") or {}
+                source = meta.get("source") or meta.get("title") or "未知来源"
+                parts.append(
+                    f"[预检索{i}] (相似度 {score * 100:.1f}%, 来源: {source})\n{content}"
+                )
+            if parts:
+                return (
+                    "## 知识库预检索结果\n"
+                    + "\n\n".join(parts)
+                    + "\n\n（如需更多资料，请继续调用 knowledge_search）"
+                )
+
+        counts = dict(
+            Counter(
+                Document.objects.filter(knowledge_base_id=knowledge_base_id).values_list(
+                    "status", flat=True
+                )
+            )
+        )
+        points = 0
+        try:
+            vm = VectorStoreManager(knowledge_base)
+            points = vm._collection_points_count(vm._get_collection_name())
+        except Exception:
+            points = -1
+
+        if not counts:
+            return "## 知识库预检索结果\n当前知识库没有文档，请先上传后再提问。"
+        if counts.get("completed", 0) == 0:
+            return (
+                "## 知识库预检索结果\n"
+                f"没有「已完成」文档（状态分布: {counts}）。请先在知识库中处理/重建索引。"
+            )
+        if points == 0:
+            return (
+                "## 知识库预检索结果\n"
+                "文档存在但向量索引为空（Qdrant 点数=0）。请在知识库详情执行「重建索引」。"
+            )
+        return (
+            "## 知识库预检索结果\n"
+            f"未命中足够相似的片段（阈值={similarity_threshold}, top_k={top_k}, 点数={points}）。"
+            "可换关键词，或调用 knowledge_search 换查询语句。"
+        )
+    except Exception as exc:
+        logger.warning("知识库预检索失败 kb=%s: %s", knowledge_base_id, exc)
+        return f"## 知识库预检索结果\n预检索失败: {exc}"
+
 
 def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:
     friendly_error = get_user_friendly_llm_error(exc)
@@ -856,6 +955,8 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        similarity_threshold: float = 0.3,
+        top_k: int = 5,
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -865,6 +966,9 @@ class AgentLoopStreamAPIView(View):
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
+        similarity_threshold, top_k = _normalize_kb_search_params(
+            similarity_threshold, top_k
+        )
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -957,9 +1061,16 @@ class AgentLoopStreamAPIView(View):
                 try:
                     from knowledge.langgraph_integration import create_knowledge_tool
 
-                    logger.info(f"AgentLoopStreamAPI: 正在创建知识库工具...")
+                    logger.info(
+                        "AgentLoopStreamAPI: 正在创建知识库工具 threshold=%s top_k=%s",
+                        similarity_threshold,
+                        top_k,
+                    )
                     kb_tool = await sync_to_async(create_knowledge_tool)(
-                        knowledge_base_id=knowledge_base_id, user=request.user
+                        knowledge_base_id=knowledge_base_id,
+                        user=request.user,
+                        similarity_threshold=similarity_threshold,
+                        top_k=top_k,
                     )
                     tools.append(kb_tool)
                     logger.info(
@@ -1020,6 +1131,26 @@ class AgentLoopStreamAPIView(View):
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user, prompt_id, project
             )
+
+            # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
+            if knowledge_base_id and use_knowledge_base:
+                kb_prefetch = await sync_to_async(_prefetch_knowledge_context)(
+                    knowledge_base_id,
+                    user_message,
+                    similarity_threshold,
+                    top_k,
+                )
+                effective_prompt = (
+                    (effective_prompt or "").rstrip()
+                    + "\n\n"
+                    + _KB_PRIORITY_HINT
+                    + "\n\n"
+                    + (kb_prefetch or "")
+                ).strip()
+                logger.info(
+                    "AgentLoopStreamAPI: 已注入知识库预检索 context_len=%s",
+                    len(kb_prefetch or ""),
+                )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令
             if generate_playwright_script:
@@ -1524,12 +1655,20 @@ class AgentLoopStreamAPIView(View):
         project_id = body_data.get("project_id")
         knowledge_base_id = body_data.get("knowledge_base_id")
         use_knowledge_base = body_data.get("use_knowledge_base", True)
+        similarity_threshold, top_k = _normalize_kb_search_params(
+            body_data.get("similarity_threshold", 0.3),
+            body_data.get("top_k", 5),
+        )
         prompt_id = body_data.get("prompt_id")
         file_ids = body_data.get("file_ids", [])
 
         # 调试日志：知识库参数
         logger.info(
-            f"AgentLoopStreamAPI: knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base}"
+            "AgentLoopStreamAPI: knowledge_base_id=%s use_knowledge_base=%s threshold=%s top_k=%s",
+            knowledge_base_id,
+            use_knowledge_base,
+            similarity_threshold,
+            top_k,
         )
         uploaded_images_base64 = _normalize_uploaded_image_base64_list(
             body_data.get("images"),
@@ -1617,6 +1756,8 @@ class AgentLoopStreamAPIView(View):
                     test_case_id,
                     use_pytest,
                     file_ids,
+                    similarity_threshold,
+                    top_k,
                 ):
                     yield chunk
 
@@ -1637,6 +1778,8 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+                similarity_threshold,
+                top_k,
             )
 
     async def _handle_non_stream_request(
@@ -1654,6 +1797,8 @@ class AgentLoopStreamAPIView(View):
         test_case_id: Optional[int] = None,
         use_pytest: bool = True,
         file_ids: Optional[List[int]] = None,
+        similarity_threshold: float = 0.3,
+        top_k: int = 5,
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -1685,6 +1830,8 @@ class AgentLoopStreamAPIView(View):
                 test_case_id,
                 use_pytest,
                 file_ids,
+                similarity_threshold,
+                top_k,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):
