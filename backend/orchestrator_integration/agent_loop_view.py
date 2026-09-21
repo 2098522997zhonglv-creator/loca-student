@@ -120,6 +120,8 @@ def _prefetch_knowledge_context(
             query.strip(),
             top_k=top_k,
             similarity_threshold=similarity_threshold,
+            # 预检索跳过 rewrite，避免双次嵌入+双次 Rerank 把首包拖到 40s+
+            enable_rewrite=False,
         )
         if results:
             parts = []
@@ -971,6 +973,20 @@ class AgentLoopStreamAPIView(View):
         similarity_threshold, top_k = _normalize_kb_search_params(
             similarity_threshold, top_k
         )
+
+        # 尽早推送 start，避免知识库预检索/Rerank 阻塞导致前端长时间无任何 SSE
+        yield create_sse_data(
+            {
+                "type": "start",
+                "session_id": session_id,
+                "thread_id": thread_id,
+                "project_id": project_id,
+                "display_message": user_message,
+                "mode": "agent_loop",
+                "created_at": None,
+            }
+        )
+
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -1148,6 +1164,12 @@ class AgentLoopStreamAPIView(View):
 
             # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
             if knowledge_base_id and use_knowledge_base:
+                yield create_sse_data(
+                    {
+                        "type": "status",
+                        "message": "正在检索知识库…",
+                    }
+                )
                 kb_prefetch = await sync_to_async(_prefetch_knowledge_context)(
                     knowledge_base_id,
                     user_message,
@@ -1164,6 +1186,12 @@ class AgentLoopStreamAPIView(View):
                 logger.info(
                     "AgentLoopStreamAPI: 已注入知识库预检索 context_len=%s",
                     len(kb_prefetch or ""),
+                )
+                yield create_sse_data(
+                    {
+                        "type": "status",
+                        "message": "知识库检索完成，正在生成回答…",
+                    }
                 )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令
@@ -1195,20 +1223,21 @@ class AgentLoopStreamAPIView(View):
             # 10. 获取工具名列表用于 HITL
             tool_names = [t.name for t in tools] if tools else None
 
-            # 11. 发送开始信号
-            yield create_sse_data(
-                {
-                    "type": "start",
-                    "session_id": session_id,
-                    "thread_id": thread_id,
-                    "project_id": project_id,
-                    "display_message": display_user_message,
-                    "mode": "agent_loop",
-                    "created_at": chat_session.created_at.isoformat()
-                    if chat_session and chat_session.created_at
-                    else None,
-                }
-            )
+            # 11. start 已在生成器开头推送；此处仅在有更准确的展示文案时补发一次会话元信息
+            if display_user_message and display_user_message != user_message:
+                yield create_sse_data(
+                    {
+                        "type": "start",
+                        "session_id": session_id,
+                        "thread_id": thread_id,
+                        "project_id": project_id,
+                        "display_message": display_user_message,
+                        "mode": "agent_loop",
+                        "created_at": chat_session.created_at.isoformat()
+                        if chat_session and chat_session.created_at
+                        else None,
+                    }
+                )
 
             # 12. 创建 Agent（LangChain v1 统一路径）
             async with get_async_checkpointer() as checkpointer:
@@ -1489,17 +1518,40 @@ class AgentLoopStreamAPIView(View):
                             # messages 模式返回元组 (token, metadata)
                             if isinstance(chunk, tuple) and len(chunk) >= 1:
                                 token = chunk[0]
-                                # 只发送 AI 消息，过滤掉 ToolMessage（工具结果已通过 tool_result 事件发送）
+                                meta = (
+                                    chunk[1]
+                                    if len(chunk) > 1 and isinstance(chunk[1], dict)
+                                    else {}
+                                )
+                                node = (
+                                    meta.get("langgraph_node")
+                                    or meta.get("checkpoint_ns")
+                                    or ""
+                                )
+                                if node and any(
+                                    skip in str(node)
+                                    for skip in ("tools", "ToolNode", "summarization")
+                                ):
+                                    continue
                                 if hasattr(token, "content") and token.content:
-                                    # 检查是否是 ToolMessage（通过类名或 type 属性）
                                     token_type = type(token).__name__
-                                    if "ToolMessage" not in token_type:
+                                    if "ToolMessage" in token_type:
+                                        continue
+                                    content = token.content
+                                    if isinstance(content, list):
+                                        content = "".join(
+                                            (
+                                                c.get("text", "")
+                                                if isinstance(c, dict)
+                                                else (c if isinstance(c, str) else "")
+                                            )
+                                            for c in content
+                                        )
+                                    if content:
                                         yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
+                                            {"type": "stream", "data": content}
                                         )
                             elif hasattr(chunk, "content") and chunk.content:
-                                # 兼容旧版本可能直接返回 message 的情况
-                                # 同样过滤掉 ToolMessage
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
                                     yield create_sse_data(
@@ -2392,17 +2444,40 @@ class AgentLoopResumeAPIView(View):
                             # messages 模式返回元组 (token, metadata)
                             if isinstance(chunk, tuple) and len(chunk) >= 1:
                                 token = chunk[0]
-                                # 只发送 AI 消息，过滤掉 ToolMessage（工具结果已通过 tool_result 事件发送）
+                                meta = (
+                                    chunk[1]
+                                    if len(chunk) > 1 and isinstance(chunk[1], dict)
+                                    else {}
+                                )
+                                node = (
+                                    meta.get("langgraph_node")
+                                    or meta.get("checkpoint_ns")
+                                    or ""
+                                )
+                                if node and any(
+                                    skip in str(node)
+                                    for skip in ("tools", "ToolNode", "summarization")
+                                ):
+                                    continue
                                 if hasattr(token, "content") and token.content:
-                                    # 检查是否是 ToolMessage（通过类名或 type 属性）
                                     token_type = type(token).__name__
-                                    if "ToolMessage" not in token_type:
+                                    if "ToolMessage" in token_type:
+                                        continue
+                                    content = token.content
+                                    if isinstance(content, list):
+                                        content = "".join(
+                                            (
+                                                c.get("text", "")
+                                                if isinstance(c, dict)
+                                                else (c if isinstance(c, str) else "")
+                                            )
+                                            for c in content
+                                        )
+                                    if content:
                                         yield create_sse_data(
-                                            {"type": "stream", "data": token.content}
+                                            {"type": "stream", "data": content}
                                         )
                             elif hasattr(chunk, "content") and chunk.content:
-                                # 兼容旧版本可能直接返回 message 的情况
-                                # 同样过滤掉 ToolMessage
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
                                     yield create_sse_data(

@@ -602,6 +602,24 @@ export async function sendChatMessageStream(
             });
           }
 
+          // 处理状态事件（如知识库预检索进度），不打断主回复流
+          if (parsed.type === 'status' && streamSessionId && activeStreams.value[streamSessionId]) {
+            const statusMessage = parsed.message || '';
+            if (statusMessage) {
+              const msgs = activeStreams.value[streamSessionId].messages;
+              const last = msgs[msgs.length - 1];
+              if (last && last.type === 'system' && last.content && String(last.content).startsWith('正在')) {
+                last.content = statusMessage;
+              } else {
+                msgs.push({
+                  content: statusMessage,
+                  type: 'system',
+                  time: formatStreamTime()
+                });
+              }
+            }
+          }
+
           // 处理 Agent Loop 步骤开始事件
           if (parsed.type === 'step_start' && streamSessionId && activeStreams.value[streamSessionId]) {
             const stepNumber = normalizeNumericField(parsed.step);

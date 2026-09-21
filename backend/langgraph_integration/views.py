@@ -326,7 +326,8 @@ def create_llm_instance(active_config, temperature=0.7, streaming=True):
                 "timeout": request_timeout,
                 "max_retries": max_retries,
                 "streaming": streaming,
-                "stream_usage": streaming,
+                # 同 openai_compatible：避免网关因 stream_options 缓冲整段响应
+                "stream_usage": False,
             }
             if api_key:
                 llm_kwargs["api_key"] = api_key
@@ -374,8 +375,11 @@ def create_llm_instance(active_config, temperature=0.7, streaming=True):
                 "timeout": request_timeout,  # 单次请求超时
                 "max_retries": max_retries,  # 自动重试次数
                 "streaming": streaming,
-                # 流式下不带该参数时上游不回传 usage，Token 统计会退化为估算
-                "stream_usage": streaming,
+                # 注意：stream_usage=True 会附加 stream_options.include_usage，
+                # 不少 OpenAI 兼容网关（LiteLLM 等）会因此把整段 SSE 缓冲后一次返回，
+                # 表现为「流式开关开了却整段蹦出」。Token 用量仍可从最终 message 的
+                # usage_metadata 读取，不必依赖流式 usage 块。
+                "stream_usage": False,
             }
             llm = ChatOpenAI(**llm_kwargs)
 
