@@ -75,38 +75,16 @@ from requirements.context_limits import (
 logger = logging.getLogger(__name__)
 
 _KB_PRIORITY_HINT = """
-# 知识库使用规则（强制）
-- 下方「知识库预检索结果」是服务端已根据用户问题检索到的资料，必须作为回答业务问题的主要依据。
-- 预检索已有可用片段时，直接基于预检索回答，不要再调用 knowledge_search（会重复检索并拖慢响应）。
-- 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询；不要跳过知识库去编造项目内业务事实。
-- 回答知识/业务问题时：不要调用 execute_skill_script / read_skill_content，也不要用 get_projects / list_modules / get_testcases 等平台动作代替知识库。
-- 系统没有 functional_test_case_save 这类工具名；写入功能用例必须通过 execute_skill_script 执行 loca-stude 的 add_testcase（先 read_skill_content 看用法）。
-- 仅当用户明确要求「保存/写入/入库用例、创建模块、执行自动化」时，才调用 Skill 工具；不要在仅问答时乱调平台脚本。
+# 知识库 + 用例生产规则（强制）
+- 开着知识库时：生成测试用例、影响面、回归范围必须优先依据下方「知识库预检索结果」和 knowledge_search，不要凭空编造项目业务规则。
+- 预检索已有可用片段时，直接基于预检索回答/出用例，不要再无故调用 knowledge_search（会重复检索并拖慢响应）。
+- 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询。
+- 推荐工作流：① 用知识库材料生成用例与影响面 → ② 用户确认后，再用 Skill 写入平台。
+- 系统没有 functional_test_case_save 这类工具名；写入功能用例必须：read_skill_content(loca-stude) → execute_skill_script 执行 add_testcase。
+- 纯问答、只生成文案、未要求落库时：不要调用 execute_skill_script / 不要 list_modules / get_testcases 代替知识库。
+- 用户明确要求「保存/写入/入库用例、创建模块」时：在已有用例内容基础上调用 loca-stude 写入，不要先关掉知识库。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
 """.strip()
-
-_PLATFORM_WRITE_HINT_KEYS = (
-    "保存用例",
-    "写入用例",
-    "入库",
-    "创建用例",
-    "新建用例",
-    "添加用例",
-    "落库",
-    "写入平台",
-    "保存到平台",
-    "创建模块",
-    "执行自动化",
-    "保存测试用例",
-    "写入测试用例",
-)
-
-
-def _message_requests_platform_write(message: str) -> bool:
-    text = (message or "").strip()
-    if not text:
-        return False
-    return any(k in text for k in _PLATFORM_WRITE_HINT_KEYS)
 
 
 def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
@@ -1128,31 +1106,21 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
                 )
 
-            # 6. 添加内置 Skill 工具
-            # 知识库问答默认不挂载，避免命中文档后乱调平台脚本；
-            # 用户明确要求写入/保存用例时放行。
+            # 6. 添加内置 Skill 工具（与知识库并存：检索出用例，Skill 负责落库）
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
-            allow_skills = (not kb_qa_mode) or generate_playwright_script or _message_requests_platform_write(
-                user_message
-            )
-            if not allow_skills:
-                logger.info(
-                    "AgentLoopStreamAPI: 知识库问答模式，跳过 Skill 工具挂载"
-                )
-            else:
-                from orchestrator_integration.builtin_tools import get_builtin_tools
+            from orchestrator_integration.builtin_tools import get_builtin_tools
 
-                builtin_tools = get_builtin_tools(
-                    user_id=request.user.id,
-                    project_id=int(project_id),
-                    test_case_id=test_case_id,
-                    chat_session_id=session_id,
-                )
-                tools.extend(builtin_tools)
-                logger.info(
-                    f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools"
-                    + (" (KB 模式因写入意图放行)" if kb_qa_mode else "")
-                )
+            builtin_tools = get_builtin_tools(
+                user_id=request.user.id,
+                project_id=int(project_id),
+                test_case_id=test_case_id,
+                chat_session_id=session_id,
+            )
+            tools.extend(builtin_tools)
+            logger.info(
+                f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools"
+                + (" (与知识库并存)" if kb_qa_mode else "")
+            )
 
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
             prompt_obj = None
@@ -1183,12 +1151,12 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: Created new ChatSession: {session_id}"
                 )
 
-            # 8. 获取系统提示词（KB 问答且无写入意图时不注入 Skills 元数据）
+            # 8. 获取系统提示词（注入 Skills，便于基于知识库生成后写入平台）
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user,
                 prompt_id,
                 project,
-                include_skills=allow_skills,
+                include_skills=True,
             )
 
             # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
@@ -2240,33 +2208,28 @@ class AgentLoopResumeAPIView(View):
                             f"AgentLoopResumeAPI: ❌ Knowledge tool creation failed: {e}"
                         )
 
-                # 加载内置工具（知识库问答默认跳过；用户明确要求写入平台时放行）
+                # 加载内置工具（与知识库并存，便于确认后落库）
                 kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
-                # resume 无新用户消息时保持安全默认：KB 模式不挂 Skill
-                if kb_qa_mode:
-                    logger.info(
-                        "AgentLoopResumeAPI: 知识库问答模式，跳过 Skill 工具挂载"
+                try:
+                    from orchestrator_integration.builtin_tools import (
+                        get_builtin_tools,
                     )
-                else:
-                    try:
-                        from orchestrator_integration.builtin_tools import (
-                            get_builtin_tools,
-                        )
 
-                        builtin_tools = get_builtin_tools(
-                            user_id=user.id,
-                            project_id=int(project_id) if project_id else 0,
-                            test_case_id=None,
-                            chat_session_id=session_id,
-                        )
-                        tools.extend(builtin_tools)
-                        logger.info(
-                            f"AgentLoopResumeAPI: Added {len(builtin_tools)} builtin tools"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"AgentLoopResumeAPI: Builtin tools loading failed: {e}"
-                        )
+                    builtin_tools = get_builtin_tools(
+                        user_id=user.id,
+                        project_id=int(project_id) if project_id else 0,
+                        test_case_id=None,
+                        chat_session_id=session_id,
+                    )
+                    tools.extend(builtin_tools)
+                    logger.info(
+                        f"AgentLoopResumeAPI: Added {len(builtin_tools)} builtin tools"
+                        + (" (与知识库并存)" if kb_qa_mode else "")
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"AgentLoopResumeAPI: Builtin tools loading failed: {e}"
+                    )
 
                 # 5. 获取工具名列表和中间件配置
                 # 尝试从 ChatSession 关联的 prompt 获取系统提示词，用于精确计算 overhead
