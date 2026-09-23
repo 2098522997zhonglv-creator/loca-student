@@ -79,11 +79,34 @@ _KB_PRIORITY_HINT = """
 - 下方「知识库预检索结果」是服务端已根据用户问题检索到的资料，必须作为回答业务问题的主要依据。
 - 预检索已有可用片段时，直接基于预检索回答，不要再调用 knowledge_search（会重复检索并拖慢响应）。
 - 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询；不要跳过知识库去编造项目内业务事实。
-- 本轮为知识库问答模式：禁止调用 execute_skill_script / read_skill_content，以及任何 loca-stude、requirement-review、api-automation、whart-test 等平台 Skill。
-- 禁止用 get_projects / list_modules / get_testcases / list_files 等平台管理动作代替知识库回答需求、规则、接口、流程类问题。
+- 回答知识/业务问题时：不要调用 execute_skill_script / read_skill_content，也不要用 get_projects / list_modules / get_testcases 等平台动作代替知识库。
+- 系统没有 functional_test_case_save 这类工具名；写入功能用例必须通过 execute_skill_script 执行 loca-stude 的 add_testcase（先 read_skill_content 看用法）。
+- 仅当用户明确要求「保存/写入/入库用例、创建模块、执行自动化」时，才调用 Skill 工具；不要在仅问答时乱调平台脚本。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
-- 用户若明确要求「写入用例 / 创建模块 / 执行自动化」等平台操作，请提示其关闭知识库问答或改用不带知识库的对话后再操作。
 """.strip()
+
+_PLATFORM_WRITE_HINT_KEYS = (
+    "保存用例",
+    "写入用例",
+    "入库",
+    "创建用例",
+    "新建用例",
+    "添加用例",
+    "落库",
+    "写入平台",
+    "保存到平台",
+    "创建模块",
+    "执行自动化",
+    "保存测试用例",
+    "写入测试用例",
+)
+
+
+def _message_requests_platform_write(message: str) -> bool:
+    text = (message or "").strip()
+    if not text:
+        return False
+    return any(k in text for k in _PLATFORM_WRITE_HINT_KEYS)
 
 
 def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
@@ -1106,9 +1129,13 @@ class AgentLoopStreamAPIView(View):
                 )
 
             # 6. 添加内置 Skill 工具
-            # 知识库问答模式下不挂载，避免模型在已命中文档后仍乱调平台脚本
+            # 知识库问答默认不挂载，避免命中文档后乱调平台脚本；
+            # 用户明确要求写入/保存用例时放行。
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
-            if kb_qa_mode and not generate_playwright_script:
+            allow_skills = (not kb_qa_mode) or generate_playwright_script or _message_requests_platform_write(
+                user_message
+            )
+            if not allow_skills:
                 logger.info(
                     "AgentLoopStreamAPI: 知识库问答模式，跳过 Skill 工具挂载"
                 )
@@ -1124,6 +1151,7 @@ class AgentLoopStreamAPIView(View):
                 tools.extend(builtin_tools)
                 logger.info(
                     f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools"
+                    + (" (KB 模式因写入意图放行)" if kb_qa_mode else "")
                 )
 
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
@@ -1155,23 +1183,20 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: Created new ChatSession: {session_id}"
                 )
 
-            # 8. 获取系统提示词（KB 问答模式不注入 Skills 元数据，减少干扰）
+            # 8. 获取系统提示词（KB 问答且无写入意图时不注入 Skills 元数据）
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user,
                 prompt_id,
                 project,
-                include_skills=not (kb_qa_mode and not generate_playwright_script),
+                include_skills=allow_skills,
             )
 
             # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
-            # 极短续写指令（如「继续」「继续生成」）跳过预检索，避免无意义 query + Rerank 超时
-            _skip_prefetch = (
-                kb_qa_mode
-                and len((user_message or "").strip()) <= 12
-                and any(
-                    k in (user_message or "").strip()
-                    for k in ("继续", "接着", "往下", "再写", "补充一下")
-                )
+            # 极短续写指令（如「继续」「继续生成」「继续生产」）跳过预检索，避免无意义 query + Rerank 超时
+            _msg_stripped = (user_message or "").strip()
+            _skip_prefetch = len(_msg_stripped) <= 16 and any(
+                k in _msg_stripped
+                for k in ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
             )
             if knowledge_base_id and use_knowledge_base and not _skip_prefetch:
                 yield create_sse_data(
@@ -2215,8 +2240,9 @@ class AgentLoopResumeAPIView(View):
                             f"AgentLoopResumeAPI: ❌ Knowledge tool creation failed: {e}"
                         )
 
-                # 加载内置工具（知识库问答模式跳过，避免绕开检索乱调 Skill）
+                # 加载内置工具（知识库问答默认跳过；用户明确要求写入平台时放行）
                 kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
+                # resume 无新用户消息时保持安全默认：KB 模式不挂 Skill
                 if kb_qa_mode:
                     logger.info(
                         "AgentLoopResumeAPI: 知识库问答模式，跳过 Skill 工具挂载"
