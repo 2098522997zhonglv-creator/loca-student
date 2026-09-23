@@ -781,10 +781,25 @@ def _resolve_steps_arg(args):
     steps_file = getattr(args, "steps_file", None)
     if steps_file:
         try:
-            with open(steps_file, "r", encoding="utf-8") as f:
-                content = f.read()
+            raw = open(steps_file, "rb").read()
         except OSError as e:
             return {"error": f"无法读取 steps_file={steps_file}: {e}"}
+        content = None
+        last_err = None
+        # Windows 下模型/编辑器常写成 GBK；优先 utf-8，再回退常见中文编码
+        for encoding in ("utf-8-sig", "utf-8", "gb18030", "gbk", "cp936"):
+            try:
+                content = raw.decode(encoding)
+                break
+            except UnicodeDecodeError as e:
+                last_err = e
+        if content is None:
+            return {
+                "error": (
+                    f"无法解码 steps_file={steps_file}: {last_err}。"
+                    "请用 UTF-8 保存 JSON 文件后重试。"
+                )
+            }
         return _parse_steps(content)
     return _parse_steps(getattr(args, "steps", None))
 

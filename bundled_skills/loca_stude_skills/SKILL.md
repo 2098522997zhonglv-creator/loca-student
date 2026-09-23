@@ -122,7 +122,7 @@ python loca_stude_tools.py --action add_testcase \
   --notes "冒烟测试"
 
 # 推荐（Windows / 多步骤 / 含中文引号）：先写 JSON 文件，再用 --steps_file，避免 shell 拆参
-# steps.json 内容示例：
+# steps.json 必须用 UTF-8（或系统默认 GBK，工具会自动回退解码）；内容只用英文双引号 "
 # [{"step_number":1,"description":"选择 Banana Pro","expected_result":"显示模型价格"}]
 python loca_stude_tools.py --action add_testcase \
   --project_id 1 \
