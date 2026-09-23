@@ -81,6 +81,7 @@ _KB_PRIORITY_HINT = """
 - 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询。
 - 推荐工作流：① 用知识库材料生成用例与影响面 → ② 用户确认后，再用 Skill 写入平台。
 - 系统没有 functional_test_case_save 这类工具名；写入功能用例必须：read_skill_content(loca-stude) → execute_skill_script 执行 add_testcase。
+- 写入多步骤/含中文引号的用例时：先把 steps JSON 写到文件，再用 --steps_file，禁止把大段 JSON 直接塞进 --steps（Windows shell 会拆参导致 unrecognized arguments）。
 - 纯问答、只生成文案、未要求落库时：不要调用 execute_skill_script / 不要 list_modules / get_testcases 代替知识库。
 - 用户明确要求「保存/写入/入库用例、创建模块」时：在已有用例内容基础上调用 loca-stude 写入，不要先关掉知识库。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。

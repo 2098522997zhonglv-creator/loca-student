@@ -735,6 +735,15 @@ def _parse_steps(steps_str):
     if not steps_str:
         return []
 
+    # 中文弯引号等会导致 JSON / shell 拆参失败，先归一成标准引号
+    steps_str = (
+        steps_str.replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\uff02", '"')
+    )
+
     # 先尝试直接解析
     try:
         parsed = json.loads(steps_str)
@@ -767,6 +776,19 @@ def _parse_steps(steps_str):
         return {"error": f"steps JSON 格式错误，无法解析: {str(e)}。正确格式: [{{\"step_number\":1,\"description\":\"...\",\"expected_result\":\"...\"}}]"}
 
 
+def _resolve_steps_arg(args):
+    """优先从 --steps_file 读 JSON，避免 Windows shell 把长 JSON 拆破。"""
+    steps_file = getattr(args, "steps_file", None)
+    if steps_file:
+        try:
+            with open(steps_file, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            return {"error": f"无法读取 steps_file={steps_file}: {e}"}
+        return _parse_steps(content)
+    return _parse_steps(getattr(args, "steps", None))
+
+
 # Action 路由
 ACTIONS = {
     "get_projects": lambda args: get_projects(),
@@ -776,20 +798,25 @@ ACTIONS = {
     "get_testcases": lambda args: get_testcases(args.project_id, args.module_id),
     "get_testcase_detail": lambda args: get_testcase_detail(args.project_id, args.case_id),
     "add_testcase": lambda args: (
-        _parse_steps(args.steps) if isinstance(_parse_steps(args.steps), dict) else
-        add_testcase(
-            args.project_id, args.module_id, args.name, args.level,
-            args.precondition or "", _parse_steps(args.steps), args.notes or "",
-            args.review_status or "pending_review", args.test_type or "functional"
-        )
+        (lambda steps: (
+            steps if isinstance(steps, dict) else
+            add_testcase(
+                args.project_id, args.module_id, args.name, args.level,
+                args.precondition or "", steps, args.notes or "",
+                args.review_status or "pending_review", args.test_type or "functional"
+            )
+        ))(_resolve_steps_arg(args))
     ),
     "edit_testcase": lambda args: (
-        _parse_steps(args.steps) if args.steps and isinstance(_parse_steps(args.steps), dict) else
-        edit_testcase(
-            args.project_id, args.case_id, args.name, args.level, args.module_id,
-            args.precondition, _parse_steps(args.steps) if args.steps else None, args.notes,
-            args.review_status, args.test_type, args.is_optimization
-        )
+        (lambda steps: (
+            steps if isinstance(steps, dict) and "error" in steps else
+            edit_testcase(
+                args.project_id, args.case_id, args.name, args.level, args.module_id,
+                args.precondition, None if steps == [] and not (args.steps or args.steps_file) else steps,
+                args.notes,
+                args.review_status, args.test_type, args.is_optimization
+            )
+        ))(_resolve_steps_arg(args) if (args.steps or getattr(args, "steps_file", None)) else [])
     ),
     "upload_screenshot": lambda args: upload_screenshot(
         args.project_id, args.case_id, args.file_path, args.title,
@@ -831,7 +858,8 @@ def main():
     parser.add_argument("--name", help="用例名称")
     parser.add_argument("--level", help="用例等级 (P0/P1/P2/P3)")
     parser.add_argument("--precondition", help="前置条件")
-    parser.add_argument("--steps", help="用例步骤 (JSON格式)")
+    parser.add_argument("--steps", help="用例步骤 (JSON格式)；复杂/中文步骤请改用 --steps_file")
+    parser.add_argument("--steps_file", help="用例步骤 JSON 文件路径（推荐，避免 shell 拆参）")
     parser.add_argument("--notes", help="备注")
     parser.add_argument("--file_path", help="文件路径（单张上传）")
     parser.add_argument("--file_paths", help="文件路径列表（批量上传，逗号分隔）")

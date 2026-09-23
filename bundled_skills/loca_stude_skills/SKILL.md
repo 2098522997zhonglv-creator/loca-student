@@ -33,8 +33,8 @@ python loca_stude_tools.py --action <action_name> [--参数名 参数值]
 | `get_levels` | 获取用例等级列表 | 无 |
 | `get_testcases` | 获取模块下的用例列表 | `--project_id`, `--module_id` |
 | `get_testcase_detail` | 获取用例详情 | `--project_id`, `--case_id` |
-| `add_testcase` | 新增测试用例 | `--project_id`, `--module_id`, `--name`, `--level`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type` |
-| `edit_testcase` | 编辑测试用例 | `--project_id`, `--case_id`, `--name`, `--level`, `--module_id`, `--precondition`, `--steps`, `--notes`, `--review_status`, `--test_type`, `--is_optimization` |
+| `add_testcase` | 新增测试用例 | `--project_id`, `--module_id`, `--name`, `--level`, `--precondition`, `--steps` 或 `--steps_file`, `--notes`, `--review_status`, `--test_type` |
+| `edit_testcase` | 编辑测试用例 | `--project_id`, `--case_id`, `--name`, `--level`, `--module_id`, `--precondition`, `--steps` 或 `--steps_file`, `--notes`, `--review_status`, `--test_type`, `--is_optimization` |
 
 ### 截图管理
 
@@ -120,6 +120,16 @@ python loca_stude_tools.py --action add_testcase \
   --precondition "用户已注册" \
   --steps '[{"step_number":1,"description":"输入用户名","expected_result":"用户名显示"}]' \
   --notes "冒烟测试"
+
+# 推荐（Windows / 多步骤 / 含中文引号）：先写 JSON 文件，再用 --steps_file，避免 shell 拆参
+# steps.json 内容示例：
+# [{"step_number":1,"description":"选择 Banana Pro","expected_result":"显示模型价格"}]
+python loca_stude_tools.py --action add_testcase \
+  --project_id 1 \
+  --module_id 5 \
+  --name "AI模型价格显示" \
+  --level P1 \
+  --steps_file steps.json
 
 # 上传单张截图
 python loca_stude_tools.py --action upload_screenshot \
