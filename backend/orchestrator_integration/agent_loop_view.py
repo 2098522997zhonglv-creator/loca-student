@@ -84,6 +84,8 @@ _KB_PRIORITY_HINT = """
 - 纯问答、只生成文案、未要求落库时：不要调用 execute_skill_script / 不要 list_modules / get_testcases 代替知识库。
 - 用户明确要求「保存/写入/入库用例、创建模块」时：在已有用例内容基础上调用 loca-stude 写入，不要先关掉知识库。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
+- 禁止编造不存在的「子代理 / 审批子代理 / functional_test_case_*」；本模式可用工具以实际挂载为准（knowledge_search、read_skill_content、execute_skill_script）。
+- 若下方已注入「知识库预检索结果」，总结里不得写「未使用知识库」；必须说明依据了哪些预检索来源。
 """.strip()
 
 
