@@ -77,7 +77,8 @@ logger = logging.getLogger(__name__)
 _KB_PRIORITY_HINT = """
 # 知识库使用规则（强制）
 - 下方「知识库预检索结果」是服务端已根据用户问题检索到的资料，必须作为回答业务问题的主要依据。
-- 若预检索不足，再调用 knowledge_search 工具补充查询；不要跳过知识库去编造项目内业务事实。
+- 预检索已有可用片段时，直接基于预检索回答，不要再调用 knowledge_search（会重复检索并拖慢响应）。
+- 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询；不要跳过知识库去编造项目内业务事实。
 - 本轮为知识库问答模式：禁止调用 execute_skill_script / read_skill_content，以及任何 loca-stude、requirement-review、api-automation、whart-test 等平台 Skill。
 - 禁止用 get_projects / list_modules / get_testcases / list_files 等平台管理动作代替知识库回答需求、规则、接口、流程类问题。
 - 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
@@ -1163,7 +1164,16 @@ class AgentLoopStreamAPIView(View):
             )
 
             # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
-            if knowledge_base_id and use_knowledge_base:
+            # 极短续写指令（如「继续」「继续生成」）跳过预检索，避免无意义 query + Rerank 超时
+            _skip_prefetch = (
+                kb_qa_mode
+                and len((user_message or "").strip()) <= 12
+                and any(
+                    k in (user_message or "").strip()
+                    for k in ("继续", "接着", "往下", "再写", "补充一下")
+                )
+            )
+            if knowledge_base_id and use_knowledge_base and not _skip_prefetch:
                 yield create_sse_data(
                     {
                         "type": "status",
@@ -1192,6 +1202,17 @@ class AgentLoopStreamAPIView(View):
                         "type": "status",
                         "message": "知识库检索完成，正在生成回答…",
                     }
+                )
+            elif knowledge_base_id and use_knowledge_base and _skip_prefetch:
+                effective_prompt = (
+                    (effective_prompt or "").rstrip()
+                    + "\n\n"
+                    + _KB_PRIORITY_HINT
+                    + "\n\n（本轮为续写指令，已跳过知识库预检索；请基于对话历史继续生成，无需再调 knowledge_search。）"
+                ).strip()
+                logger.info(
+                    "AgentLoopStreamAPI: 跳过知识库预检索（续写短指令） msg=%r",
+                    (user_message or "")[:20],
                 )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令

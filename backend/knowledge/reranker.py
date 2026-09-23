@@ -12,6 +12,7 @@ Supported service styles:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -20,6 +21,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "bge-reranker-v2-m3"
+# 超时后短暂熔断，避免同一次对话里连续 2～3 次各卡满超时
+_CIRCUIT_COOLDOWN_SEC = 60.0
+_circuit_open_until = 0.0
 SUPPORTED_SERVICES = (
     "none",
     "xinference",
@@ -194,8 +198,9 @@ def _extract_scored_indices(payload: Any, doc_count: int) -> List[Tuple[int, flo
 class SemanticReranker:
     """HTTP client that ranks documents with an external open-source rerank model."""
 
-    def __init__(self, endpoint: RerankerEndpoint, timeout: float = 120.0):
+    def __init__(self, endpoint: RerankerEndpoint, timeout: float = 15.0):
         self.endpoint = endpoint
+        # CPU 上 bge-reranker 偶发卡死；默认 15s 超时后回退稠密排序，避免单次问答卡满 120s×N
         self.timeout = timeout
 
     @classmethod
@@ -216,8 +221,15 @@ class SemanticReranker:
         return cls(endpoint)
 
     def rerank_texts(self, query: str, documents: Sequence[str], top_n: int) -> List[Tuple[int, float]]:
+        global _circuit_open_until
         if not documents:
             return []
+        now = time.monotonic()
+        if now < _circuit_open_until:
+            raise RuntimeError(
+                f"Reranker circuit open until +{_circuit_open_until - now:.0f}s "
+                "(previous timeout); skip to fallback ranking"
+            )
         top_n = max(1, min(int(top_n or len(documents)), len(documents)))
         body = _build_request_body(self.endpoint, query, documents, top_n)
         headers = _build_headers(self.endpoint.api_key)
@@ -225,19 +237,29 @@ class SemanticReranker:
         session = requests.Session()
         session.trust_env = False
         logger.info(
-            "RERANK request service=%s url=%s model=%s docs=%s top_n=%s",
+            "RERANK request service=%s url=%s model=%s docs=%s top_n=%s timeout=%.0fs",
             self.endpoint.service,
             self.endpoint.url,
             self.endpoint.model,
             len(documents),
             top_n,
+            self.timeout,
         )
-        response = session.post(
-            self.endpoint.url,
-            json=body,
-            headers=headers,
-            timeout=self.timeout,
-        )
+        try:
+            response = session.post(
+                self.endpoint.url,
+                json=body,
+                headers=headers,
+                timeout=self.timeout,
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            _circuit_open_until = time.monotonic() + _CIRCUIT_COOLDOWN_SEC
+            logger.warning(
+                "RERANK timeout/connect fail, circuit open %ss: %s",
+                _CIRCUIT_COOLDOWN_SEC,
+                exc,
+            )
+            raise RuntimeError(str(exc)) from exc
         if not response.ok:
             raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
 
@@ -246,6 +268,7 @@ class SemanticReranker:
         if not scored:
             raise RuntimeError(f"Unrecognized rerank response: {str(payload)[:300]}")
 
+        _circuit_open_until = 0.0
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[:top_n]
 
