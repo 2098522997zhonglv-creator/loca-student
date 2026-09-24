@@ -84,10 +84,19 @@ _KB_PRIORITY_HINT = """
 - 需要副作用时再调 Skill：读网页、浏览器自动化、保存/写入用例与模块、接口自动化资源操作等。
   正确路径：read_skill_content(skill_name) → execute_skill_script(skill_name, command=…)。
 - 无副作用的纯问答：优先知识库材料直接回答；不必为了「显得在干活」去调 Skill。
-- 用户明确要求保存/写入/入库/创建模块：在已有内容上走 loca-stude（read → execute），不要假装没有 Skill。
+- 用户明确要求保存/写入/入库/创建模块：在已有内容上走 loca-stude（read → 确认 → execute），不要假装没有 Skill。
 
-## 写入约定
+## 多工具顺序与组合
+- 有依赖时必须按序，不要同一轮并行打乱：先 read_skill_content，再只读 execute（如 get_/list_），再写入。
+- 多条写入或互有依赖的命令：用一次 execute_skill_script 的 commands 列表，且 parallel=false（默认），按列表顺序执行。
+- 仅互不依赖的只读命令才可 parallel=true。
+- 禁止：未读 SKILL.md 就 execute；先写入再查询依赖结果；把多个有序步骤拆成并行单次调用。
+
+## 写入约定（必须先问）
 - 没有 functional_test_case_save 这类工具；落库用 loca-stude 的 add_testcase 等脚本。
+- 凡会写入平台/数据库（add/create/update/delete/save 等）：先向用户说明将写入的字段与影响，得到明确同意后，再调用 execute_skill_script(..., user_confirmed=true)。
+- 未确认时工具会返回 needs_confirmation 且不落库；禁止擅自把 user_confirmed 设为 true。
+- 用户只是「看看 / 生成草稿 / 帮我想步骤」时：不要落库，只输出内容即可。
 - 多步骤或含中文引号的用例：steps 先写文件再用 --steps_file，勿把大段 JSON 塞进 --steps。
 
 ## 诚实与来源
@@ -118,12 +127,16 @@ def _record_tool_behavior_safe(
     content: str,
     project_id=None,
 ) -> None:
-    """工具结果落账号行为库；任何异常都吞掉，不影响主流程。"""
+    """工具结果落账号行为库；过滤噪声；异常吞掉，不影响主流程。"""
     try:
         from orchestrator_integration.behavior_memory import (
             extract_skill_meta_from_tool_message,
             record_tool_call_behavior,
+            should_record_tool_behavior,
         )
+
+        if not should_record_tool_behavior(tool_name or ""):
+            return
 
         skill_meta = extract_skill_meta_from_tool_message(
             tool_name or "", str(content or "")

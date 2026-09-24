@@ -358,6 +358,38 @@ class BehaviorMemoryTests(SimpleTestCase):
         self.assertIn("禁止把 Skill 名称", hint)
         self.assertIn("url-reader", hint)
         self.assertIn("由你按用户意图决定", hint)
+        self.assertIn("user_confirmed=true", hint)
+        self.assertIn("多工具顺序与组合", hint)
+        self.assertIn("parallel=false", hint)
+
+    def test_mutating_skill_command_detection(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            is_mutating_skill_command,
+        )
+
+        self.assertTrue(
+            is_mutating_skill_command(
+                "python loca_stude_tools.py --action add_testcase --name x"
+            )
+        )
+        self.assertTrue(
+            is_mutating_skill_command(
+                "python loca_stude_tools.py --action delete_module --id 1"
+            )
+        )
+        self.assertFalse(
+            is_mutating_skill_command(
+                "python loca_stude_tools.py --action get_projects"
+            )
+        )
+        self.assertFalse(is_mutating_skill_command("node scripts/read_url.js https://a.com"))
+
+    def test_should_record_tool_behavior_skips_noise(self):
+        from orchestrator_integration.behavior_memory import should_record_tool_behavior
+
+        self.assertFalse(should_record_tool_behavior("knowledge_search"))
+        self.assertFalse(should_record_tool_behavior("read_skill_content"))
+        self.assertTrue(should_record_tool_behavior("execute_skill_script"))
 
     def test_sanitize_redacts_secrets(self):
         from orchestrator_integration.behavior_memory import sanitize_behavior_text

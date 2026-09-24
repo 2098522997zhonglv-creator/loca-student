@@ -36,6 +36,25 @@ _CORRECTION_HINTS = (
     "搞错了",
 )
 
+# 高频只读工具不写入行为库，避免噪声淹没纠错/技能偏好
+_SKIP_TOOL_BEHAVIOR = frozenset(
+    {
+        "knowledge_search",
+        "read_skill_content",
+    }
+)
+
+
+def should_record_tool_behavior(tool_name: str) -> bool:
+    """是否应将本次工具调用写入账号行为库。"""
+    name = (tool_name or "").strip()
+    if not name:
+        return False
+    if name in _SKIP_TOOL_BEHAVIOR:
+        return False
+    # needs_confirmation 未真正落库，不记
+    return True
+
 
 def sanitize_behavior_text(text: str, max_len: int = 800) -> str:
     """脱敏并截断，避免把 Cookie/密钥写入行为库。"""
@@ -266,7 +285,13 @@ def record_tool_call_behavior(
     skill_name: Optional[str] = None,
     command: Optional[str] = None,
 ) -> None:
-    ok = not str(tool_output or "").lstrip().startswith("错误")
+    if not should_record_tool_behavior(tool_name):
+        return
+    out = str(tool_output or "")
+    # 写入确认门挡回，未产生真实副作用
+    if '"status": "needs_confirmation"' in out or '"status":"needs_confirmation"' in out:
+        return
+    ok = not out.lstrip().startswith("错误")
     cmd = sanitize_behavior_text(command or "", max_len=300)
     skill = skill_name or ""
     summary = (

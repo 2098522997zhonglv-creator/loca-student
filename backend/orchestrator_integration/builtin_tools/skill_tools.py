@@ -60,6 +60,44 @@ _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 平台/数据库写入类 action（loca-stude 等）；只读 get_/list_/search_ 不匹配
+_MUTATING_ACTION_RE = re.compile(
+    r"(?i)"
+    r"(?:--action\s+)(?P<a>add|create|update|delete|save|insert|remove|upsert|write|put|patch)[\w-]*"
+    r"|(?P<b>\b(?:add|create|update|delete|save|insert|remove|upsert)_[\w-]+)"
+)
+
+
+def is_mutating_skill_command(command: Optional[str]) -> bool:
+    """判断 skill 命令是否会写入平台/数据库（用于确认门与串行策略）。"""
+    if not command or not str(command).strip():
+        return False
+    return bool(_MUTATING_ACTION_RE.search(str(command)))
+
+
+def _needs_write_confirmation_payload(
+    *,
+    skill_name: Optional[str],
+    command: Optional[str],
+    pending_commands: Optional[list] = None,
+) -> str:
+    """返回需用户确认的结构化提示，不执行写入。"""
+    payload = {
+        "status": "needs_confirmation",
+        "message": (
+            "检测到平台/数据库写入操作，尚未得到用户确认。"
+            "请先用自然语言向用户说明将写入的内容与影响，"
+            "待用户明确同意后再调用 execute_skill_script(..., user_confirmed=true)。"
+            "禁止在未确认时把 user_confirmed 设为 true。"
+        ),
+        "pending": {
+            "skill_name": skill_name,
+            "command": command,
+            "commands": pending_commands,
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
 
 def _sanitize_runtime_path_segment(value: Optional[str], default: str) -> str:
     raw = (value or "").strip()
@@ -469,6 +507,7 @@ def get_skill_tools(
         读取指定 Skill 的完整 SKILL.md（按需加载说明与示例）。
 
         在需要执行 Skill 副作用前调用：落库/平台操作、读网页(url-reader)、浏览器自动化等。
+        必须先于 execute_skill_script；有依赖的多步不要与写入并行。
         业务文档问答请用 knowledge_search 或已注入的预检索，不要用本工具代替检索。
         注意：skill_name 是参数，不是顶层 tool 名；不要直接调用名为 url-reader 的 tool。
 
@@ -747,18 +786,28 @@ def get_skill_tools(
         command: Optional[str] = None,
         session_id: Optional[str] = None,
         commands: Optional[list[dict[str, str]]] = None,
-        parallel: bool = True,
+        parallel: bool = False,
         max_workers: int = 5,
+        user_confirmed: bool = False,
     ) -> str:
         """
         执行 Skill 脚本命令（单个或批量）。由模型按意图决定是否调用。
 
         适用：落库/平台 CRUD、url-reader 读网页、浏览器自动化、接口自动化资源操作等副作用。
         不适用：仅根据知识库回答业务事实——请用 knowledge_search 或预检索。
-        正确流程：先 read_skill_content(skill_name)，再本工具；禁止把 skill 名当 tool 名调用。
+
+        ## 调用顺序（重要）
+        1. 先 read_skill_content(skill_name)，再本工具；禁止把 skill 名当 tool 名调用。
+        2. 有依赖的多步必须按序：读文档 → 只读查询 →（问清用户）→ 写入；不要同一轮并行打乱顺序。
+        3. 多条互相独立的只读命令可用 commands + parallel=true；凡含写入或有先后依赖，必须 parallel=false（默认）。
+        4. 批量写入优先用一条 commands 列表串行组合，而不是多次并行单条调用。
+
+        ## 写入确认
+        含 add/create/update/delete/save 等落库 action 时，必须先征得用户明确同意，
+        再以 user_confirmed=true 调用；未确认会返回 needs_confirmation 且不执行。
 
         **单个执行模式**：传入 skill_name 和 command
-        **批量执行模式**：传入 commands 列表（自动并发，大幅提升效率）
+        **批量执行模式**：传入 commands 列表
 
         Args:
             skill_name: Skill 名称（单个执行时必填，如 loca-stude、url-reader）
@@ -769,27 +818,52 @@ def get_skill_tools(
                     {"skill_name": "loca-stude", "command": "python loca_stude_tools.py --action add_testcase ..."},
                     {"skill_name": "loca-stude", "command": "python loca_stude_tools.py --action add_testcase ..."}
                 ]
-            parallel: 批量模式下是否并发执行（默认 True）
-            max_workers: 批量模式下最大并发数（默认 5）
+            parallel: 批量是否并发；默认 False（串行）。含写入时即使传 True 也会强制串行。
+            max_workers: 批量并发上限（仅 parallel=true 时生效，默认 5）
+            user_confirmed: 写入类命令是否已获用户明确同意；未同意不得为 true
 
         Returns:
             单个模式返回命令输出；如执行中生成了文件，会追加可下载附件信息。
             Skills 可将导出文件写入 `SKILL_OUTPUT_DIR`（或 `ARTIFACT_DIR`）以便 Web 端直接下载。
-            批量模式返回 JSON 格式结果汇总
+            批量模式返回 JSON 格式结果汇总；写入未确认时返回 needs_confirmation
         """
-        import json
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from django.db import close_old_connections
 
         # 批量执行模式
         if commands:
-            logger.info(
-                f"[execute_skill_script] 批量模式: {len(commands)} 条命令, parallel={parallel}, max_workers={max_workers}"
-            )
-
             if not commands:
                 return json.dumps({"error": "命令列表为空"}, ensure_ascii=False)
+
+            mutating_cmds = [
+                c
+                for c in commands
+                if isinstance(c, dict) and is_mutating_skill_command(c.get("command"))
+            ]
+            if mutating_cmds and not user_confirmed:
+                logger.info(
+                    "[execute_skill_script] 批量写入未确认，拒绝执行 count=%s",
+                    len(mutating_cmds),
+                )
+                return _needs_write_confirmation_payload(
+                    skill_name=None,
+                    command=None,
+                    pending_commands=commands,
+                )
+
+            run_parallel = bool(parallel) and len(commands) > 1
+            if mutating_cmds and run_parallel:
+                logger.info(
+                    "[execute_skill_script] 批量含写入，强制串行（忽略 parallel=true）"
+                )
+                run_parallel = False
+
+            logger.info(
+                f"[execute_skill_script] 批量模式: {len(commands)} 条命令, "
+                f"parallel={run_parallel}, max_workers={max_workers}, "
+                f"user_confirmed={user_confirmed}"
+            )
 
             def execute_single(idx: int, cmd: dict[str, str]) -> dict[str, object]:
                 cmd_skill_name = cmd.get("skill_name")
@@ -826,7 +900,7 @@ def get_skill_tools(
 
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
 
-            if parallel and len(commands) > 1:
+            if run_parallel:
                 with ThreadPoolExecutor(
                     max_workers=min(max_workers, len(commands))
                 ) as executor:
@@ -858,7 +932,8 @@ def get_skill_tools(
                         "total": len(commands),
                         "success": success_count,
                         "error": error_count,
-                        "parallel": parallel,
+                        "parallel": run_parallel,
+                        "user_confirmed": user_confirmed,
                     },
                     "results": [r for r in results if r is not None],
                 },
@@ -869,6 +944,15 @@ def get_skill_tools(
         # 单个执行模式
         if not skill_name or not command:
             return "错误: 单个执行模式需要提供 skill_name 和 command 参数"
+
+        if is_mutating_skill_command(command) and not user_confirmed:
+            logger.info(
+                "[execute_skill_script] 写入未确认，拒绝执行 skill=%s", skill_name
+            )
+            return _needs_write_confirmation_payload(
+                skill_name=skill_name,
+                command=command,
+            )
 
         return _execute_single_skill_script(skill_name, command, session_id)
 
