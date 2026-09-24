@@ -573,6 +573,37 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertEqual(compact_skill_tool_output(payload), payload)
         self.assertIn("needs_confirmation", payload)
 
+    def test_prefer_url_reader_blocks_browser_use(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            prefer_url_reader_instead,
+        )
+
+        msg = prefer_url_reader_instead(
+            "browser-use",
+            'new_tab("http://192.168.12.216:8765/agent-test-report.html")',
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("url-reader", msg)
+        self.assertIn("read_url.py", msg)
+
+    def test_prefer_url_reader_blocks_playwright_html_report(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            prefer_url_reader_instead,
+        )
+
+        msg = prefer_url_reader_instead(
+            "playwright-skill",
+            "node run.js \"await page.goto('http://192.168.12.216:8765/agent-test-x.html')\"",
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("url-reader", msg)
+
+        ok = prefer_url_reader_instead(
+            "playwright-skill",
+            'node run.js "await page.goto(\'https://example.com/login\'); await page.fill(\'#user\', \'a\')"',
+        )
+        self.assertIsNone(ok)
+
 
 class BehaviorMemoryDBTests(TestCase):
     def test_record_creates_db_row_when_vector_upsert_fails(self):

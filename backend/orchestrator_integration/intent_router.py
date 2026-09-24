@@ -240,7 +240,8 @@ def build_intent_hint(decision: IntentDecision) -> str:
                 "- 内网 URL（192.168.*/10.*/127.0.0.1）必须先调用 url-reader，不要未调用就宣称「无法访问局域网」。",
                 "- url-reader 失败时：把错误原文告知用户；同一 URL 不要再连环试 playwright/browser-use/"
                 "换参重试超过 1 次。仅当错误明确是「需 JS 渲染 / 登录态」且用户同意时，才改用 playwright-skill。",
-                "- 禁止对 browser-use 使用无文档的裸命令（如 goto URL）。",
+                "- 禁止对 browser-use 使用裸命令（goto/new_tab/heredoc）；该类调用会被拦截并要求改用 url-reader。",
+                "- 禁止用 playwright 仅 page.goto 打开 HTML 报告；会被拦截并要求改用 url-reader。",
             ]
         )
     if INTENT_BROWSER in decision.intents:

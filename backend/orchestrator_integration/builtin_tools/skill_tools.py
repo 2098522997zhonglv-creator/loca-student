@@ -67,12 +67,61 @@ _MUTATING_ACTION_RE = re.compile(
     r"|(?P<b>\b(?:add|create|update|delete|save|insert|remove|upsert)_[\w-]+)"
 )
 
+_HTTP_URL_RE = re.compile(r"https?://[^\s\"'`<>]+", re.IGNORECASE)
+_BROWSER_NAV_HINT_RE = re.compile(
+    r"(?i)\b(goto|new_tab|page\.goto|navigate|chromium\.launch|wait_for_load|page_info)\b"
+)
+_BROWSER_SKILLS = frozenset(
+    {"browser-use", "playwright-skill", "playwright-cli"}
+)
+
 
 def is_mutating_skill_command(command: Optional[str]) -> bool:
     """判断 skill 命令是否会写入平台/数据库（用于确认门与串行策略）。"""
     if not command or not str(command).strip():
         return False
     return bool(_MUTATING_ACTION_RE.search(str(command)))
+
+
+def prefer_url_reader_instead(
+    skill_name: Optional[str], command: Optional[str]
+) -> Optional[str]:
+    """静态网页/报告误用浏览器 Skill 时，返回改走 url-reader 的提示；否则 None。"""
+    name = (skill_name or "").strip().lower()
+    cmd = command or ""
+    if name not in _BROWSER_SKILLS:
+        return None
+
+    urls = _HTTP_URL_RE.findall(cmd)
+    sample_url = urls[0] if urls else "https://example.com/page.html"
+
+    # browser-use 在本仓库几乎总被模型写成裸 API/heredoc，直接拦回 url-reader
+    if name == "browser-use":
+        return (
+            "错误: browser-use 不接受 goto/new_tab/heredoc 这类裸命令。"
+            "读取网页或 HTML 报告请改用 url-reader：\n"
+            f'python scripts/read_url.py "{sample_url}"\n'
+            "仅当用户明确要求点击/登录/填表等浏览器自动化时，才使用 playwright-skill。"
+        )
+
+    # playwright：明显只是打开 URL 读 HTML 报告 → 拦
+    looks_like_nav = bool(_BROWSER_NAV_HINT_RE.search(cmd))
+    is_html_report = any(
+        u.lower().endswith((".html", ".htm")) or "agent-test" in u.lower() for u in urls
+    )
+    has_interaction = bool(
+        re.search(
+            r"(?i)\b(click|fill|type|press|login|wait_for_selector|locator|get_by_)\b",
+            cmd,
+        )
+    )
+    if urls and (is_html_report or looks_like_nav) and not has_interaction:
+        return (
+            "错误: 读取静态网页/HTML 报告请使用 url-reader，不要用 playwright 打开：\n"
+            f'python scripts/read_url.py "{sample_url}"\n'
+            "playwright-skill 仅用于需要真实浏览器交互的场景。"
+        )
+    return None
 
 
 def compact_skill_tool_output(text: str, max_chars: int = 2500) -> str:
@@ -922,6 +971,19 @@ def get_skill_tools(
                         "error": "缺少 skill_name 或 command",
                     }
 
+                redirect = prefer_url_reader_instead(cmd_skill_name, cmd_command)
+                if redirect:
+                    logger.info(
+                        "[execute_skill_script] 拦截浏览器误用→url-reader skill=%s",
+                        cmd_skill_name,
+                    )
+                    return {
+                        "index": idx,
+                        "skill_name": cmd_skill_name,
+                        "command": cmd_command,
+                        "result": redirect,
+                    }
+
                 try:
                     result = _execute_single_skill_script(
                         cmd_skill_name, cmd_command, cmd_session_id
@@ -997,6 +1059,14 @@ def get_skill_tools(
                 skill_name=skill_name,
                 command=command,
             )
+
+        redirect = prefer_url_reader_instead(skill_name, command)
+        if redirect:
+            logger.info(
+                "[execute_skill_script] 拦截浏览器误用→url-reader skill=%s",
+                skill_name,
+            )
+            return redirect
 
         return _execute_single_skill_script(skill_name, command, session_id)
 
