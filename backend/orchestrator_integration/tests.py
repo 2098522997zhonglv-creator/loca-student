@@ -361,6 +361,7 @@ class BehaviorMemoryTests(SimpleTestCase):
         self.assertIn("user_confirmed=true", hint)
         self.assertIn("多工具顺序与组合", hint)
         self.assertIn("parallel=false", hint)
+        self.assertIn("本轮意图路由", hint)
 
     def test_mutating_skill_command_detection(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
@@ -424,6 +425,138 @@ class BehaviorMemoryTests(SimpleTestCase):
             ctx = prefetch_user_behavior_context(1, "Callieus生产地址", top_k=3)
         self.assertIn("账号行为偏好", ctx)
         self.assertIn("siteadmin.callie.com", ctx)
+
+    def test_rank_behavior_boosts_correction(self):
+        from orchestrator_integration.behavior_memory import rank_behavior_hits
+
+        ranked = rank_behavior_hits(
+            [
+                {"event_type": "tool_call", "score": 0.9, "summary_text": "t"},
+                {"event_type": "user_correction", "score": 0.8, "summary_text": "c"},
+            ]
+        )
+        self.assertEqual(ranked[0]["event_type"], "user_correction")
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+
+
+class AgentSmartnessTests(SimpleTestCase):
+    """意图路由 / 引用冲突 / 输出压缩 / 写入确认 — 最小回归。"""
+
+    class _FakeTool:
+        def __init__(self, name):
+            self.name = name
+
+    def test_classify_qa_vs_write_vs_web(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_QA,
+            INTENT_WEB,
+            INTENT_WRITE,
+            classify_user_intent,
+        )
+
+        qa = classify_user_intent("Callieus 生产后台地址是什么")
+        self.assertTrue(qa.pure_kb_qa)
+        self.assertEqual(qa.primary, INTENT_QA)
+
+        write = classify_user_intent("把上面用例保存入库")
+        self.assertIn(INTENT_WRITE, write.intents)
+
+        web = classify_user_intent("读取 https://example.com/docs 的内容")
+        self.assertIn(INTENT_WEB, web.intents)
+
+    def test_filter_drops_execute_on_pure_qa(self):
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            filter_tools_by_intent,
+        )
+
+        tools = [
+            self._FakeTool("knowledge_search"),
+            self._FakeTool("read_skill_content"),
+            self._FakeTool("execute_skill_script"),
+            self._FakeTool("playwright_navigate"),
+        ]
+        decision = classify_user_intent("生产环境地址是什么")
+        names = [t.name for t in filter_tools_by_intent(tools, decision)]
+        self.assertIn("knowledge_search", names)
+        self.assertIn("read_skill_content", names)
+        self.assertNotIn("execute_skill_script", names)
+        self.assertNotIn("playwright_navigate", names)
+
+    def test_filter_keeps_execute_on_write(self):
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            filter_tools_by_intent,
+        )
+
+        tools = [
+            self._FakeTool("knowledge_search"),
+            self._FakeTool("execute_skill_script"),
+            self._FakeTool("playwright_click"),
+        ]
+        decision = classify_user_intent("创建用例并保存到平台")
+        names = [t.name for t in filter_tools_by_intent(tools, decision)]
+        self.assertIn("execute_skill_script", names)
+        self.assertNotIn("playwright_click", names)
+
+    def test_write_intent_hint_has_playbook(self):
+        from orchestrator_integration.intent_router import (
+            build_intent_hint,
+            classify_user_intent,
+        )
+
+        hint = build_intent_hint(classify_user_intent("保存用例入库"))
+        self.assertIn("落库剧本", hint)
+        self.assertIn("user_confirmed=true", hint)
+
+    def test_prefetch_conflict_note_for_two_hosts(self):
+        note = agent_loop_view._build_prefetch_conflict_note(
+            [
+                (
+                    1,
+                    {
+                        "similarity_score": 0.9,
+                        "content": "后台地址 https://siteadmin.callie.com",
+                    },
+                ),
+                (
+                    2,
+                    {
+                        "similarity_score": 0.88,
+                        "content": "另一套后台 https://admin.bomiv.com",
+                    },
+                ),
+            ]
+        )
+        self.assertIn("来源冲突", note)
+        self.assertIn("callie.com", note)
+        self.assertIn("bomiv.com", note)
+
+    def test_citation_hint_present(self):
+        self.assertIn("标注来源", agent_loop_view._CITATION_HINT)
+
+    def test_compact_skill_output_truncates(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            compact_skill_tool_output,
+        )
+
+        long = "x" * 5000
+        out = compact_skill_tool_output(long, max_chars=2500)
+        self.assertLess(len(out), len(long))
+        self.assertIn("已截断", out)
+
+    def test_needs_confirmation_not_compacted_away(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            compact_skill_tool_output,
+            _needs_write_confirmation_payload,
+        )
+
+        payload = _needs_write_confirmation_payload(
+            skill_name="loca-stude",
+            command="python t.py --action add_testcase",
+        )
+        self.assertEqual(compact_skill_tool_output(payload), payload)
+        self.assertIn("needs_confirmation", payload)
 
 
 class BehaviorMemoryDBTests(TestCase):

@@ -249,6 +249,31 @@ class UserBehaviorStore:
             logger.warning("删除账号行为集合失败 %s: %s", collection, e)
 
 
+# 纠错/HITL 在展示与排序时加权，避免被普通 tool_call 淹没
+_EVENT_SCORE_BOOST = {
+    "user_correction": 1.35,
+    "hitl_decision": 1.15,
+    "tool_call": 1.0,
+}
+
+
+def rank_behavior_hits(hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """对检索命中按事件类型加权重排。"""
+    if not hits:
+        return []
+    ranked = []
+    for hit in hits:
+        et = hit.get("event_type") or "tool_call"
+        base = float(hit.get("score") or 0.0)
+        boost = float(_EVENT_SCORE_BOOST.get(et, 1.0))
+        item = dict(hit)
+        item["score"] = base * boost
+        item["_boost"] = boost
+        ranked.append(item)
+    ranked.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    return ranked
+
+
 def prefetch_user_behavior_context(
     user_id: int, query: str, top_k: int = 5
 ) -> str:
@@ -257,10 +282,15 @@ def prefetch_user_behavior_context(
         return ""
     try:
         store = UserBehaviorStore()
-        hits = store.search(user_id, query, top_k=top_k)
+        # 多取一些再加权截断，提高纠错命中率
+        hits = rank_behavior_hits(store.search(user_id, query, top_k=max(top_k * 2, 6)))
+        hits = hits[: max(1, min(int(top_k or 5), 8))]
         if not hits:
             return ""
-        lines = ["# 账号行为偏好（本地向量）", "以下为与本轮问题相关的历史习惯/纠正，事实仍以知识库为准："]
+        lines = [
+            "# 账号行为偏好（本地向量）",
+            "以下为与本轮问题相关的历史习惯/纠正（纠错已加权优先），事实仍以知识库为准：",
+        ]
         for i, hit in enumerate(hits, 1):
             et = hit.get("event_type") or "event"
             score = hit.get("score")

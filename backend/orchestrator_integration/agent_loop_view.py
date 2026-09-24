@@ -76,35 +76,45 @@ logger = logging.getLogger(__name__)
 
 _KB_PRIORITY_HINT = """
 # 工具选择（由你按用户意图决定）
-可用工具仅限实际挂载名：knowledge_search、read_skill_content、execute_skill_script（以及已配置的 MCP）。
+可用工具仅限本轮实际挂载名（见「本轮意图路由」）：通常为 knowledge_search、read_skill_content、execute_skill_script（以及已配置的 MCP）。
 禁止把 Skill 名称（如 url-reader、loca-stude、playwright-skill）当成 tool 名直接调用。
+若某工具未挂载，说明本轮意图不需要它——不要编造调用结果。
 
 ## 怎么选
 - 业务事实 / 环境地址 / 规则 / 流程 / 接口设计「文档里怎么写」：优先下方「知识库预检索结果」；不足时再调 knowledge_search。预检索已够用时不要重复 knowledge_search。
-- 需要副作用时再调 Skill：读网页、浏览器自动化、保存/写入用例与模块、接口自动化资源操作等。
+- 需要副作用时再调 Skill：读网页、浏览器自动化、保存/写入用例与模块等。
   正确路径：read_skill_content(skill_name) → execute_skill_script(skill_name, command=…)。
-- 无副作用的纯问答：优先知识库材料直接回答；不必为了「显得在干活」去调 Skill。
-- 用户明确要求保存/写入/入库/创建模块：在已有内容上走 loca-stude（read → 确认 → execute），不要假装没有 Skill。
+- 无副作用的纯问答：直接依据预检索回答并标注来源；不必为了「显得在干活」去调 Skill。
 
 ## 多工具顺序与组合
-- 有依赖时必须按序，不要同一轮并行打乱：先 read_skill_content，再只读 execute（如 get_/list_），再写入。
-- 多条写入或互有依赖的命令：用一次 execute_skill_script 的 commands 列表，且 parallel=false（默认），按列表顺序执行。
-- 仅互不依赖的只读命令才可 parallel=true。
-- 禁止：未读 SKILL.md 就 execute；先写入再查询依赖结果；把多个有序步骤拆成并行单次调用。
+- 有依赖时必须按序：先 read_skill_content，再只读 execute（get_/list_），再写入。
+- 多条写入：一次 commands + parallel=false；仅互不依赖的只读才可 parallel=true。
 
 ## 写入约定（必须先问）
-- 没有 functional_test_case_save 这类工具；落库用 loca-stude 的 add_testcase 等脚本。
-- 凡会写入平台/数据库（add/create/update/delete/save 等）：先向用户说明将写入的字段与影响，得到明确同意后，再调用 execute_skill_script(..., user_confirmed=true)。
-- 未确认时工具会返回 needs_confirmation 且不落库；禁止擅自把 user_confirmed 设为 true。
-- 用户只是「看看 / 生成草稿 / 帮我想步骤」时：不要落库，只输出内容即可。
-- 多步骤或含中文引号的用例：steps 先写文件再用 --steps_file，勿把大段 JSON 塞进 --steps。
+- 落库用 loca-stude 的 add_testcase 等；没有 functional_test_case_save。
+- 写入前必须展示摘要并获用户明确同意，再 user_confirmed=true；未确认会 needs_confirmation。
+- 「看看 / 生成草稿」只输出内容，不落库。
+- 多步骤或中文引号：steps 用 --steps_file。
 
-## 诚实与来源
-- 预检索提示索引为空或文档未完成：如实告知去重建索引，不要编造答案。
-- 禁止编造「子代理 / 审批子代理 / functional_test_case_*」。
-- 若已注入「知识库预检索结果」，总结里不得写「未使用知识库」，须说明依据了哪些来源。
-- 若已注入「账号行为偏好」，可参考用户常用 Skill/纠错习惯，但事实仍以知识库为准。
+## 引用与诚实
+- 事实结论必须带来源（[预检索N] 或文档名）；多来源冲突须并列说明，勿擅自二选一。
+- 预检索提示索引为空：如实告知重建索引，不要编造。
+- 禁止编造「子代理 / functional_test_case_*」。
+- 已注入预检索时，总结不得写「未使用知识库」。
+- 账号行为偏好仅作习惯参考，事实以知识库为准。
 """.strip()
+
+
+_CITATION_HINT = """
+## 引用与冲突约定
+- 回答中的关键事实（地址、账号、规则、接口路径）必须标注来源，如「根据[预检索2]…」。
+- 若下方出现「来源冲突」提示，必须把不同结论并列写出并标明各自来源，不得只保留其中一个。
+- 预检索不足时再 knowledge_search；仍无依据则明确说「知识库未找到」，禁止猜测。
+""".strip()
+
+_HOST_RE = re.compile(
+    r"(?i)\b(?:https?://)?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)\b"
+)
 
 
 def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
@@ -152,6 +162,41 @@ def _record_tool_behavior_safe(
         logger.debug("记录工具行为失败: %s", e)
 
 
+def _extract_hosts_from_text(text: str) -> set:
+    hosts = set()
+    for m in _HOST_RE.finditer(text or ""):
+        host = (m.group(1) or "").lower().rstrip(".")
+        if host.startswith("www."):
+            host = host[4:]
+        if host.count(".") >= 1 and not host.endswith(
+            (".png", ".jpg", ".css", ".js", ".svg")
+        ):
+            hosts.add(host)
+    return hosts
+
+
+def _build_prefetch_conflict_note(chunks: list) -> str:
+    """多高分片段指向不同主机时提示冲突（Callie vs Bomiv 类问题）。"""
+    host_to_refs = {}
+    for idx, item in chunks:
+        content = item.get("content") or ""
+        score = float(item.get("similarity_score") or 0.0)
+        if score < 0.35:
+            continue
+        for host in _extract_hosts_from_text(content):
+            host_to_refs.setdefault(host, []).append(f"预检索{idx}")
+    if len(host_to_refs) < 2:
+        return ""
+    detail = "；".join(
+        f"{h}←{','.join(refs)}" for h, refs in sorted(host_to_refs.items())
+    )
+    return (
+        f"## 来源冲突提示\n"
+        f"预检索命中多个不同站点/主机（{detail}）。"
+        f"回答时必须并列说明并标注来源，禁止只保留其中一个。\n"
+    )
+
+
 def _prefetch_knowledge_context(
     knowledge_base_id,
     query: str,
@@ -178,6 +223,7 @@ def _prefetch_knowledge_context(
         )
         if results:
             parts = []
+            scored_chunks = []
             for i, item in enumerate(results[:top_k], 1):
                 content = (item.get("content") or "").strip()
                 if not content:
@@ -188,10 +234,15 @@ def _prefetch_knowledge_context(
                 parts.append(
                     f"[预检索{i}] (相似度 {score * 100:.1f}%, 来源: {source})\n{content}"
                 )
+                scored_chunks.append((i, item))
             if parts:
+                conflict = _build_prefetch_conflict_note(scored_chunks)
                 return (
                     "## 知识库预检索结果\n"
                     + "\n\n".join(parts)
+                    + "\n\n"
+                    + conflict
+                    + _CITATION_HINT
                     + "\n\n（如需更多资料，请继续调用 knowledge_search）"
                 )
 
@@ -1173,6 +1224,19 @@ class AgentLoopStreamAPIView(View):
                 + (" (与知识库并存)" if kb_qa_mode else "")
             )
 
+            # 6.1 意图路由：按用户话术裁剪工具，减少误调
+            from orchestrator_integration.intent_router import apply_intent_routing
+
+            intent_decision, tools, intent_hint = apply_intent_routing(
+                user_message, tools
+            )
+            logger.info(
+                "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s tools=%s",
+                intent_decision.primary,
+                sorted(intent_decision.intents),
+                [getattr(t, "name", str(t)) for t in tools],
+            )
+
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
             prompt_obj = None
             if prompt_id:
@@ -1217,9 +1281,13 @@ class AgentLoopStreamAPIView(View):
                 for k in ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
             )
 
-            # 8.0 意图驱动工具选择提示（始终注入）
+            # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
             effective_prompt = (
-                (effective_prompt or "").rstrip() + "\n\n" + _KB_PRIORITY_HINT
+                (effective_prompt or "").rstrip()
+                + "\n\n"
+                + _KB_PRIORITY_HINT
+                + "\n\n"
+                + intent_hint
             ).strip()
 
             # 8.0a 账号行为偏好预检索（失败静默）

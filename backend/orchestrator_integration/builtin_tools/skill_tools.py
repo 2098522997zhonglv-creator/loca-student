@@ -75,6 +75,49 @@ def is_mutating_skill_command(command: Optional[str]) -> bool:
     return bool(_MUTATING_ACTION_RE.search(str(command)))
 
 
+def compact_skill_tool_output(text: str, max_chars: int = 2500) -> str:
+    """压缩过长 skill 输出，保留决策信息，避免撑爆上下文。"""
+    raw = text if isinstance(text, str) else str(text or "")
+    if not raw:
+        return raw
+    # 确认门与短结果原样返回
+    if "needs_confirmation" in raw or len(raw) <= max_chars:
+        return raw
+
+    # 批量 JSON：优先保留 summary + 每条 result 截断
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "summary" in data and "results" in data:
+            trimmed_results = []
+            for item in data.get("results") or []:
+                if not isinstance(item, dict):
+                    trimmed_results.append(item)
+                    continue
+                copy = dict(item)
+                if isinstance(copy.get("result"), str) and len(copy["result"]) > 800:
+                    body = copy["result"]
+                    copy["result"] = (
+                        body[:500]
+                        + f"\n…[已截断 {len(body) - 700} 字符]…\n"
+                        + body[-200:]
+                    )
+                trimmed_results.append(copy)
+            data["results"] = trimmed_results
+            data["_compacted"] = True
+            return json.dumps(data, ensure_ascii=False, indent=2)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    head = max_chars - 400
+    if head < 800:
+        head = 800
+    return (
+        raw[:head]
+        + f"\n\n…[skill 输出过长，已截断 {len(raw) - head - 200} 字符，完整日志见服务端]…\n\n"
+        + raw[-200:]
+    )
+
+
 def _needs_write_confirmation_payload(
     *,
     skill_name: Optional[str],
@@ -370,10 +413,11 @@ def _finalize_skill_result(
         artifacts_dir=artifacts_dir,
         artifacts_before=artifacts_before,
     )
+    compact = compact_skill_tool_output(result_output)
     if not artifacts:
-        return result_output
+        return compact
 
-    text_content = result_output.strip() if result_output and result_output.strip() else ""
+    text_content = compact.strip() if compact and compact.strip() else ""
     if not text_content:
         text_content = f"已生成 {len(artifacts)} 个文件，可直接下载。"
 
