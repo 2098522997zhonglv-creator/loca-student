@@ -115,6 +115,7 @@ def prefer_url_reader_instead(
             cmd,
         )
     )
+    # screenshot / waitForTimeout 不算「交互」——纯打开 HTML 报告仍应走 url-reader
     if urls and (is_html_report or looks_like_nav) and not has_interaction:
         return (
             "错误: 读取静态网页/HTML 报告请使用 url-reader，不要用 playwright 打开：\n"
@@ -663,6 +664,18 @@ def get_skill_tools(
 
             env = os.environ.copy()
             _prepend_interpreter_to_path(env)
+            # 内网 Skill（url-reader 等）勿走系统代理，否则 192.168.* 常被劫持失败
+            for proxy_key in (
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+            ):
+                env.pop(proxy_key, None)
+            env["NO_PROXY"] = "*"
+            env["no_proxy"] = "*"
             # 1) 运维配置 / 2) 当前用户有效 API Key / 3) 不注入（保留脚本默认）
             backend_url = _resolve_skill_runtime_backend_url()
             api_key, key_source = _resolve_skill_runtime_api_key(current_user_id)

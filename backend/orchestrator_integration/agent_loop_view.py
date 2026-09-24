@@ -347,10 +347,17 @@ def api_error_response(
 _MARKDOWN_IMAGE_URL_RE = re.compile(
     r"!\[[^\]]*?\]\((?P<url>https?://[^)\s]+)\)", re.IGNORECASE
 )
-_PLAIN_HTTP_URL_RE = re.compile(r'(?P<url>https?://[^\s<>"\']+)', re.IGNORECASE)
+# 停止于空白、引号、以及紧跟的中文/全角，避免 `xxx.html读这个` 粘连
+_PLAIN_HTTP_URL_RE = re.compile(
+    r'(?P<url>https?://[^\s<>"\'\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+)',
+    re.IGNORECASE,
+)
 _URL_LEADING_WRAP_CHARS = "([<{\"'“‘（【《「『"
 _URL_TRAILING_WRAP_CHARS = ")]}>\"'”’）】》」』.,;!?，。；！？、"
 _URL_HARD_STOP_CHARS = "\r\n\t ,;)}]>\"'，。；！？、：”’）】》」』"
+_IMAGE_URL_PATH_RE = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|bmp|svg|ico)(?:\?|#|$)", re.IGNORECASE
+)
 
 
 def _get_env_int(name: str, default: int, min_value: int = 1) -> int:
@@ -445,7 +452,9 @@ def _extract_linked_image_urls(text: str) -> List[str]:
             url = url[: min(index for index in hard_stop_indexes if index >= 0)]
         while url and url[-1] in _URL_TRAILING_WRAP_CHARS:
             url = url[:-1]
-        return url
+        # 再剥一层粘连中文（防御：正则未覆盖到的边界）
+        url = re.split(r"[\u4e00-\u9fff]", url, maxsplit=1)[0]
+        return url.rstrip("/").rstrip(".")
 
     for pattern in (_MARKDOWN_IMAGE_URL_RE, _PLAIN_HTTP_URL_RE):
         for match in pattern.finditer(text):
@@ -461,11 +470,23 @@ def _extract_linked_image_urls(text: str) -> List[str]:
                 continue
             if not parsed.netloc:
                 continue
+            # 仅图片扩展名才进入「拉图」管线，避免把 .html 报告当图片
+            path = parsed.path or ""
+            if not _IMAGE_URL_PATH_RE.search(path):
+                continue
 
             seen.add(url)
             urls.append(url)
 
     return urls
+
+
+def sanitize_prefetch_query(message: str) -> str:
+    """预检索 query：去掉 URL，避免把整段链接塞进向量检索。"""
+    text = message or ""
+    text = _PLAIN_HTTP_URL_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _is_linked_image_url_allowed(url: str) -> bool:
@@ -1294,6 +1315,7 @@ class AgentLoopStreamAPIView(View):
             ).strip()
 
             # 8.0a 账号行为偏好预检索（失败静默）
+            _prefetch_query = sanitize_prefetch_query(user_message)
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,
@@ -1305,10 +1327,10 @@ class AgentLoopStreamAPIView(View):
                     user_message,
                     project_id=int(project_id) if project_id else None,
                 )
-                if not _skip_prefetch:
+                if not _skip_prefetch and _prefetch_query:
                     behavior_prefetch = await sync_to_async(
                         prefetch_user_behavior_context
-                    )(request.user.id, user_message, 5)
+                    )(request.user.id, _prefetch_query, 5)
                     if behavior_prefetch:
                         effective_prompt = (
                             (effective_prompt or "").rstrip()
@@ -1323,7 +1345,18 @@ class AgentLoopStreamAPIView(View):
                 logger.warning("AgentLoopStreamAPI: 账号行为记忆跳过: %s", e)
 
             # 8.0b 启用知识库时：预检索并注入，避免模型不调工具就空答
-            if knowledge_base_id and use_knowledge_base and not _skip_prefetch:
+            # 纯读网页（query 去掉 URL 后几乎为空）时跳过 KB，避免无关命中干扰
+            _skip_kb_for_web = (
+                intent_decision.primary == "web"
+                and len(_prefetch_query) < 4
+            )
+            if (
+                knowledge_base_id
+                and use_knowledge_base
+                and not _skip_prefetch
+                and not _skip_kb_for_web
+                and _prefetch_query
+            ):
                 yield create_sse_data(
                     {
                         "type": "status",
@@ -1332,7 +1365,7 @@ class AgentLoopStreamAPIView(View):
                 )
                 kb_prefetch = await sync_to_async(_prefetch_knowledge_context)(
                     knowledge_base_id,
-                    user_message,
+                    _prefetch_query,
                     similarity_threshold,
                     top_k,
                 )
@@ -1359,6 +1392,10 @@ class AgentLoopStreamAPIView(View):
                 logger.info(
                     "AgentLoopStreamAPI: 跳过知识库预检索（续写短指令） msg=%r",
                     (user_message or "")[:20],
+                )
+            elif knowledge_base_id and use_knowledge_base and _skip_kb_for_web:
+                logger.info(
+                    "AgentLoopStreamAPI: 跳过知识库预检索（读网页主意图且无有效检索词）"
                 )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令

@@ -138,17 +138,32 @@ def classify_user_intent(message: str) -> IntentDecision:
     if not found:
         found.add(INTENT_QA)
 
+    # 「先读网页，总结后再问是否保存」——本轮主路径是读，不要当成立即落库
+    if INTENT_WEB in found and INTENT_WRITE in found:
+        if re.search(r"是否保存|问我是否|总结后.*问|先总结|问我要不要", text):
+            found.discard(INTENT_WRITE)
+
     # 有副作用意图时仍保留 qa，便于「查完再写」
     if found & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER}:
         found.add(INTENT_QA)
 
-    priority = (
-        INTENT_WRITE,
-        INTENT_BROWSER,
-        INTENT_WEB,
-        INTENT_SEARCH,
-        INTENT_QA,
-    )
+    # 同时有 web+write 时，优先 web（先读再写）
+    if INTENT_WEB in found and INTENT_WRITE in found:
+        priority = (
+            INTENT_WEB,
+            INTENT_WRITE,
+            INTENT_BROWSER,
+            INTENT_SEARCH,
+            INTENT_QA,
+        )
+    else:
+        priority = (
+            INTENT_WRITE,
+            INTENT_BROWSER,
+            INTENT_WEB,
+            INTENT_SEARCH,
+            INTENT_QA,
+        )
     primary = next((p for p in priority if p in found), INTENT_QA)
     reason = ",".join(sorted(found))
     return IntentDecision(intents=found, primary=primary, reason=reason)

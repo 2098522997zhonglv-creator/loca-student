@@ -598,11 +598,51 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertIsNotNone(msg)
         self.assertIn("url-reader", msg)
 
+        # 带 screenshot / waitForTimeout 仍应拦截（不是真正交互）
+        msg2 = prefer_url_reader_instead(
+            "playwright-skill",
+            "node run.js \"await page.goto('http://x/agent-test.html'); "
+            "await page.waitForTimeout(3000); await page.screenshot({path:'a.png'});\"",
+        )
+        self.assertIsNotNone(msg2)
+
         ok = prefer_url_reader_instead(
             "playwright-skill",
             'node run.js "await page.goto(\'https://example.com/login\'); await page.fill(\'#user\', \'a\')"',
         )
         self.assertIsNone(ok)
+
+    def test_linked_image_url_not_glue_chinese(self):
+        urls = agent_loop_view._extract_linked_image_urls(
+            "http://192.168.12.216:8765/agent-test-report.html读这个网页"
+        )
+        self.assertEqual(urls, [])
+
+        img = agent_loop_view._extract_linked_image_urls(
+            "看图 https://cdn.example.com/a.png 然后总结"
+        )
+        self.assertEqual(img, ["https://cdn.example.com/a.png"])
+
+    def test_sanitize_prefetch_query_strips_url(self):
+        q = agent_loop_view.sanitize_prefetch_query(
+            "http://192.168.12.216:8765/a.html读这个网页，总结后问我是否保存成用例"
+        )
+        self.assertNotIn("192.168", q)
+        self.assertIn("读这个网页", q)
+
+    def test_web_then_ask_save_not_write_primary(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_WEB,
+            INTENT_WRITE,
+            classify_user_intent,
+        )
+
+        d = classify_user_intent(
+            "http://192.168.12.216:8765/a.html读这个网页，总结后问我是否保存成用例"
+        )
+        self.assertIn(INTENT_WEB, d.intents)
+        self.assertNotIn(INTENT_WRITE, d.intents)
+        self.assertEqual(d.primary, INTENT_WEB)
 
 
 class BehaviorMemoryDBTests(TestCase):
