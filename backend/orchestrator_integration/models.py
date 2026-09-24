@@ -287,3 +287,49 @@ class AgentBlackboard(models.Model):
             self.history_summary = history[-10:]
             self.save(update_fields=['history_summary', 'updated_at'])
             return False
+
+class UserBehaviorEvent(models.Model):
+    """账号行为事件（配合 Qdrant user_behavior_{user_id} 向量记忆）"""
+
+    EVENT_TYPES = [
+        ("tool_call", "工具调用"),
+        ("user_correction", "用户纠正"),
+        ("hitl_decision", "HITL 审批"),
+    ]
+
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="behavior_events",
+        verbose_name="用户",
+    )
+    project = models.ForeignKey(
+        "projects.Project",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="behavior_events",
+        verbose_name="项目",
+    )
+    event_type = models.CharField(
+        max_length=32, choices=EVENT_TYPES, verbose_name="事件类型"
+    )
+    summary_text = models.TextField(verbose_name="摘要文本")
+    metadata = models.JSONField(default=dict, blank=True, verbose_name="元数据")
+    vector_id = models.CharField(
+        max_length=64, blank=True, default="", verbose_name="向量点 ID"
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="创建时间")
+
+    class Meta:
+        db_table = "orchestrator_user_behavior_event"
+        ordering = ["-created_at"]
+        verbose_name = "账号行为事件"
+        verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=["user", "-created_at"]),
+            models.Index(fields=["user", "event_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.event_type}:{self.summary_text[:40]}"

@@ -75,18 +75,26 @@ from requirements.context_limits import (
 logger = logging.getLogger(__name__)
 
 _KB_PRIORITY_HINT = """
-# 知识库 + 用例生产规则（强制）
-- 开着知识库时：生成测试用例、影响面、回归范围必须优先依据下方「知识库预检索结果」和 knowledge_search，不要凭空编造项目业务规则。
-- 预检索已有可用片段时，直接基于预检索回答/出用例，不要再无故调用 knowledge_search（会重复检索并拖慢响应）。
-- 仅当预检索明显跑题/为空，或用户改换了全新主题时，才调用 knowledge_search 补充查询。
-- 推荐工作流：① 用知识库材料生成用例与影响面 → ② 用户确认后，再用 Skill 写入平台。
-- 系统没有 functional_test_case_save 这类工具名；写入功能用例必须：read_skill_content(loca-stude) → execute_skill_script 执行 add_testcase。
-- 写入多步骤/含中文引号的用例时：先把 steps JSON 写到文件，再用 --steps_file，禁止把大段 JSON 直接塞进 --steps（Windows shell 会拆参导致 unrecognized arguments）。
-- 纯问答、只生成文案、未要求落库时：不要调用 execute_skill_script / 不要 list_modules / get_testcases 代替知识库。
-- 用户明确要求「保存/写入/入库用例、创建模块」时：在已有用例内容基础上调用 loca-stude 写入，不要先关掉知识库。
-- 若预检索明确提示索引为空或文档未完成，请如实告知用户去知识库重建索引，不要假装知道答案。
-- 禁止编造不存在的「子代理 / 审批子代理 / functional_test_case_*」；本模式可用工具以实际挂载为准（knowledge_search、read_skill_content、execute_skill_script）。
-- 若下方已注入「知识库预检索结果」，总结里不得写「未使用知识库」；必须说明依据了哪些预检索来源。
+# 工具选择（由你按用户意图决定）
+可用工具仅限实际挂载名：knowledge_search、read_skill_content、execute_skill_script（以及已配置的 MCP）。
+禁止把 Skill 名称（如 url-reader、loca-stude、playwright-skill）当成 tool 名直接调用。
+
+## 怎么选
+- 业务事实 / 环境地址 / 规则 / 流程 / 接口设计「文档里怎么写」：优先下方「知识库预检索结果」；不足时再调 knowledge_search。预检索已够用时不要重复 knowledge_search。
+- 需要副作用时再调 Skill：读网页、浏览器自动化、保存/写入用例与模块、接口自动化资源操作等。
+  正确路径：read_skill_content(skill_name) → execute_skill_script(skill_name, command=…)。
+- 无副作用的纯问答：优先知识库材料直接回答；不必为了「显得在干活」去调 Skill。
+- 用户明确要求保存/写入/入库/创建模块：在已有内容上走 loca-stude（read → execute），不要假装没有 Skill。
+
+## 写入约定
+- 没有 functional_test_case_save 这类工具；落库用 loca-stude 的 add_testcase 等脚本。
+- 多步骤或含中文引号的用例：steps 先写文件再用 --steps_file，勿把大段 JSON 塞进 --steps。
+
+## 诚实与来源
+- 预检索提示索引为空或文档未完成：如实告知去重建索引，不要编造答案。
+- 禁止编造「子代理 / 审批子代理 / functional_test_case_*」。
+- 若已注入「知识库预检索结果」，总结里不得写「未使用知识库」，须说明依据了哪些来源。
+- 若已注入「账号行为偏好」，可参考用户常用 Skill/纠错习惯，但事实仍以知识库为准。
 """.strip()
 
 
@@ -102,6 +110,33 @@ def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
         k = 5
     k = min(max(k, 1), 20)
     return threshold, k
+
+
+def _record_tool_behavior_safe(
+    user_id: int,
+    tool_name: str,
+    content: str,
+    project_id=None,
+) -> None:
+    """工具结果落账号行为库；任何异常都吞掉，不影响主流程。"""
+    try:
+        from orchestrator_integration.behavior_memory import (
+            extract_skill_meta_from_tool_message,
+            record_tool_call_behavior,
+        )
+
+        skill_meta = extract_skill_meta_from_tool_message(
+            tool_name or "", str(content or "")
+        )
+        record_tool_call_behavior(
+            user_id,
+            tool_name or "unknown",
+            str(content or "")[:500],
+            project_id=int(project_id) if project_id else None,
+            skill_name=skill_meta.get("skill_name"),
+        )
+    except Exception as e:
+        logger.debug("记录工具行为失败: %s", e)
 
 
 def _prefetch_knowledge_context(
@@ -1162,13 +1197,48 @@ class AgentLoopStreamAPIView(View):
                 include_skills=True,
             )
 
-            # 8.0 启用知识库时：预检索并强制注入，避免模型不调工具就空答
-            # 极短续写指令（如「继续」「继续生成」「继续生产」）跳过预检索，避免无意义 query + Rerank 超时
+            # 极短续写指令跳过向量预检索，避免无意义 query
             _msg_stripped = (user_message or "").strip()
             _skip_prefetch = len(_msg_stripped) <= 16 and any(
                 k in _msg_stripped
                 for k in ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
             )
+
+            # 8.0 意图驱动工具选择提示（始终注入）
+            effective_prompt = (
+                (effective_prompt or "").rstrip() + "\n\n" + _KB_PRIORITY_HINT
+            ).strip()
+
+            # 8.0a 账号行为偏好预检索（失败静默）
+            try:
+                from orchestrator_integration.behavior_memory import (
+                    prefetch_user_behavior_context,
+                    record_user_correction_behavior,
+                )
+
+                await sync_to_async(record_user_correction_behavior)(
+                    request.user.id,
+                    user_message,
+                    project_id=int(project_id) if project_id else None,
+                )
+                if not _skip_prefetch:
+                    behavior_prefetch = await sync_to_async(
+                        prefetch_user_behavior_context
+                    )(request.user.id, user_message, 5)
+                    if behavior_prefetch:
+                        effective_prompt = (
+                            (effective_prompt or "").rstrip()
+                            + "\n\n"
+                            + behavior_prefetch
+                        ).strip()
+                        logger.info(
+                            "AgentLoopStreamAPI: 已注入账号行为预检索 context_len=%s",
+                            len(behavior_prefetch),
+                        )
+            except Exception as e:
+                logger.warning("AgentLoopStreamAPI: 账号行为记忆跳过: %s", e)
+
+            # 8.0b 启用知识库时：预检索并注入，避免模型不调工具就空答
             if knowledge_base_id and use_knowledge_base and not _skip_prefetch:
                 yield create_sse_data(
                     {
@@ -1185,8 +1255,6 @@ class AgentLoopStreamAPIView(View):
                 effective_prompt = (
                     (effective_prompt or "").rstrip()
                     + "\n\n"
-                    + _KB_PRIORITY_HINT
-                    + "\n\n"
                     + (kb_prefetch or "")
                 ).strip()
                 logger.info(
@@ -1202,8 +1270,6 @@ class AgentLoopStreamAPIView(View):
             elif knowledge_base_id and use_knowledge_base and _skip_prefetch:
                 effective_prompt = (
                     (effective_prompt or "").rstrip()
-                    + "\n\n"
-                    + _KB_PRIORITY_HINT
                     + "\n\n（本轮为续写指令，已跳过知识库预检索；请基于对话历史继续生成，无需再调 knowledge_search。）"
                 ).strip()
                 logger.info(
@@ -1520,6 +1586,14 @@ class AgentLoopStreamAPIView(View):
                                                         "summary": summary,
                                                         "step": step_count,
                                                     }
+                                                )
+                                                await sync_to_async(
+                                                    _record_tool_behavior_safe
+                                                )(
+                                                    request.user.id,
+                                                    tool_name or "unknown",
+                                                    str(content or ""),
+                                                    project_id,
                                                 )
                                         # 步骤完成
                                         if step_count > 0:
@@ -2138,6 +2212,19 @@ class AgentLoopResumeAPIView(View):
         )
 
         try:
+            from orchestrator_integration.behavior_memory import (
+                record_hitl_decision_behavior,
+            )
+
+            await sync_to_async(record_hitl_decision_behavior)(
+                user.id,
+                decision_type,
+                project_id=int(project_id) if project_id else None,
+            )
+        except Exception as e:
+            logger.debug("记录 HITL 行为失败: %s", e)
+
+        try:
             async with get_async_checkpointer() as checkpointer:
                 # 3. 获取 LLM 配置
                 active_config = await sync_to_async(
@@ -2443,6 +2530,14 @@ class AgentLoopResumeAPIView(View):
                                                         "summary": summary,
                                                         "step": step_count,
                                                     }
+                                                )
+                                                await sync_to_async(
+                                                    _record_tool_behavior_safe
+                                                )(
+                                                    user.id,
+                                                    tool_name or "unknown",
+                                                    str(content or ""),
+                                                    project_id,
                                                 )
                                         if step_count > 0:
                                             yield create_sse_data(

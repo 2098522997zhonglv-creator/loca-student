@@ -466,13 +466,14 @@ def get_skill_tools(
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
         """
-        读取指定 Skill 的完整 SKILL.md 内容。
+        读取指定 Skill 的完整 SKILL.md（按需加载说明与示例）。
 
-        仅在需要**操作平台**（创建/查询用例、接口自动化、评审数据等）时使用。
-        回答需求文档、业务规则、接口设计「文档里怎么写」类问题请用 knowledge_search，不要读 Skill。
+        在需要执行 Skill 副作用前调用：落库/平台操作、读网页(url-reader)、浏览器自动化等。
+        业务文档问答请用 knowledge_search 或已注入的预检索，不要用本工具代替检索。
+        注意：skill_name 是参数，不是顶层 tool 名；不要直接调用名为 url-reader 的 tool。
 
         Args:
-            skill_name: Skill 名称
+            skill_name: Skill 名称（如 loca-stude、url-reader）
 
         Returns:
             SKILL.md 的完整内容，包含详细的使用说明和示例
@@ -750,16 +751,17 @@ def get_skill_tools(
         max_workers: int = 5,
     ) -> str:
         """
-        执行 Skill 命令，支持单个执行或批量并发执行。
+        执行 Skill 脚本命令（单个或批量）。由模型按意图决定是否调用。
 
-        仅用于**操作平台数据**（用例/模块/接口自动化/评审数据查询等）。
-        不要用本工具回答「需求文档/业务规则/接口在哪设置」——请用 knowledge_search。
+        适用：落库/平台 CRUD、url-reader 读网页、浏览器自动化、接口自动化资源操作等副作用。
+        不适用：仅根据知识库回答业务事实——请用 knowledge_search 或预检索。
+        正确流程：先 read_skill_content(skill_name)，再本工具；禁止把 skill 名当 tool 名调用。
 
         **单个执行模式**：传入 skill_name 和 command
         **批量执行模式**：传入 commands 列表（自动并发，大幅提升效率）
 
         Args:
-            skill_name: Skill 名称（单个执行时必填）
+            skill_name: Skill 名称（单个执行时必填，如 loca-stude、url-reader）
             command: shell 命令，如 "python loca_stude_tools.py --action get_projects"（单个执行时必填）
             session_id: 可选会话ID，用于 playwright-skill 保持浏览器会话
             commands: 批量命令列表，每个元素包含 skill_name、command、session_id（可选）

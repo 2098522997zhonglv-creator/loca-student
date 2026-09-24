@@ -350,3 +350,65 @@ class TerminalOutputSanitizerTests(SimpleTestCase):
         raw = "\x1b[32m✓\x1b[0m Browser closed"
 
         self.assertEqual(strip_terminal_control_sequences(raw), "✓ Browser closed")
+
+
+class BehaviorMemoryTests(SimpleTestCase):
+    def test_kb_priority_hint_forbids_skill_name_as_tool(self):
+        hint = agent_loop_view._KB_PRIORITY_HINT
+        self.assertIn("禁止把 Skill 名称", hint)
+        self.assertIn("url-reader", hint)
+        self.assertIn("由你按用户意图决定", hint)
+
+    def test_sanitize_redacts_secrets(self):
+        from orchestrator_integration.behavior_memory import sanitize_behavior_text
+
+        text = sanitize_behavior_text(
+            'python scripts/read_url.py --header "Cookie: session=abc123" --header "Authorization: Bearer tok"'
+        )
+        self.assertNotIn("abc123", text)
+        self.assertNotIn("tok", text)
+        self.assertIn("[REDACTED]", text)
+
+    def test_looks_like_user_correction(self):
+        from orchestrator_integration.behavior_memory import looks_like_user_correction
+
+        self.assertTrue(looks_like_user_correction("不对，应该是 siteadmin.callie.com"))
+        self.assertFalse(looks_like_user_correction("请帮我查一下生产地址"))
+
+    def test_prefetch_formats_hits(self):
+        from orchestrator_integration.behavior_memory import prefetch_user_behavior_context
+
+        with patch(
+            "orchestrator_integration.behavior_memory.UserBehaviorStore.search",
+            return_value=[
+                {
+                    "event_type": "user_correction",
+                    "score": 0.91,
+                    "summary_text": "用户纠正: Callie 后台是 siteadmin.callie.com",
+                    "metadata": {},
+                }
+            ],
+        ):
+            ctx = prefetch_user_behavior_context(1, "Callieus生产地址", top_k=3)
+        self.assertIn("账号行为偏好", ctx)
+        self.assertIn("siteadmin.callie.com", ctx)
+
+
+class BehaviorMemoryDBTests(TestCase):
+    def test_record_creates_db_row_when_vector_upsert_fails(self):
+        User = get_user_model()
+        user = User.objects.create_user(username="beh1", password="x")
+        from orchestrator_integration.behavior_memory import UserBehaviorStore
+        from orchestrator_integration.models import UserBehaviorEvent
+
+        store = UserBehaviorStore()
+        with patch(
+            "orchestrator_integration.behavior_memory._get_embeddings",
+            side_effect=RuntimeError("no emb"),
+        ):
+            store.record(user.id, "tool_call", "工具调用 tool=knowledge_search result=ok")
+
+        self.assertEqual(UserBehaviorEvent.objects.filter(user=user).count(), 1)
+        ev = UserBehaviorEvent.objects.get(user=user)
+        self.assertEqual(ev.event_type, "tool_call")
+        self.assertIn("knowledge_search", ev.summary_text)

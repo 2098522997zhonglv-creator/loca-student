@@ -623,8 +623,9 @@ def create_knowledge_tool(
     knowledge_search.name = "knowledge_search"
     knowledge_search.description = (
         "搜索当前绑定知识库中的需求/业务文档。"
-        "当用户询问功能规则、接口、流程、原型说明、测试点或任何项目内资料时，"
-        "必须优先调用本工具；不要用 get_projects 等平台工具代替知识库检索。"
+        "用户询问功能规则、接口、流程、环境地址、原型说明、测试点等项目资料时优先使用；"
+        "若系统已注入足够的预检索结果则可直接作答，无需重复调用。"
+        "不要用平台 Skill/get_projects 代替知识库检索来回答文档事实。"
     )
 
     return knowledge_search
