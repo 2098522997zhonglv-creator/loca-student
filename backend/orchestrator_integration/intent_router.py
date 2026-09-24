@@ -232,8 +232,15 @@ def build_intent_hint(decision: IntentDecision) -> str:
             ]
         )
     if INTENT_WEB in decision.intents:
-        lines.append(
-            "- 读网页：read_skill_content(url-reader) → execute_skill_script；禁止把 url-reader 当 tool 名。"
+        lines.extend(
+            [
+                "- 读网页：优先只走 url-reader：read_skill_content(url-reader) → "
+                "execute_skill_script(skill_name=url-reader, command=python scripts/read_url.py \"URL\")。",
+                "- 禁止把 url-reader / playwright-skill / browser-use 当 tool 名直接调用。",
+                "- url-reader 失败时：把错误原文告知用户；同一 URL 不要再连环试 playwright/browser-use/"
+                "换参重试超过 1 次。仅当错误明确是「需 JS 渲染 / 登录态」且用户同意时，才改用 playwright-skill。",
+                "- 禁止对 browser-use 使用无文档的裸命令（如 goto URL）。",
+            ]
         )
     if INTENT_BROWSER in decision.intents:
         lines.append(

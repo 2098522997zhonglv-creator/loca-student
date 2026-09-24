@@ -46,7 +46,9 @@ python scripts/read_url.py "https://example.com/private" --header "Authorization
 
 ## 失败处理
 
+- 内网地址（如 `192.168.*`）抓取失败：脚本默认**绕过系统代理直连**；若仍失败，在运行 Agent 的那台机器上用浏览器或 `curl` 确认该 URL 可达。
 - `401` / `403`: 页面需要鉴权。先请用户从浏览器开发者工具里复制 Cookie 或 Token，用 `--header` 重试；用户无法提供凭证时，再改用浏览器 skill 让用户先登录。
 - 只抓到前端壳页面: 改用浏览器读取运行后的页面，或从网络请求中找真实数据接口。
 - 内容被截断: 用 `--max-bytes` 增大抓取上限，或请求用户明确需要读取的页面范围。
 - 发现多个 OpenAPI 规格: 优先选择与用户给定 URL 同域、路径最接近、能成功解析且接口数量最多的规格。
+- 同一 URL 失败后不要连环换 playwright / browser-use；先把错误反馈给用户。

@@ -46,8 +46,10 @@ def fetch_url(
     if extra_headers:
         headers.update(extra_headers)
     request = urllib.request.Request(url, headers=headers)
+    # 内网/本机报告页常被系统 HTTP(S)_PROXY 劫持成 403/超时；默认直连。
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             body = response.read(max_bytes + 1)
             if len(body) > max_bytes:
                 body = body[:max_bytes]
