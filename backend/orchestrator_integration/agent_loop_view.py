@@ -218,8 +218,9 @@ def _prefetch_knowledge_context(
             query.strip(),
             top_k=top_k,
             similarity_threshold=similarity_threshold,
-            # 预检索跳过 rewrite，避免双次嵌入+双次 Rerank 把首包拖到 40s+
+            # 预检索跳过 rewrite + rerank，避免首包被 Reranker 超时拖到 15s+
             enable_rewrite=False,
+            enable_rerank=False,
         )
         if results:
             parts = []

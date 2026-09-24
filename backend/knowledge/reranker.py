@@ -24,6 +24,11 @@ DEFAULT_MODEL = "bge-reranker-v2-m3"
 # 超时后短暂熔断，避免同一次对话里连续 2～3 次各卡满超时
 _CIRCUIT_COOLDOWN_SEC = 60.0
 _circuit_open_until = 0.0
+
+
+def is_reranker_circuit_open() -> bool:
+    """熔断开启时返回 True，调用方可直接跳过重排。"""
+    return time.monotonic() < _circuit_open_until
 SUPPORTED_SERVICES = (
     "none",
     "xinference",

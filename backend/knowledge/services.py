@@ -2574,7 +2574,11 @@ class VectorStoreManager:
         return points_after > 0
 
     def similarity_search(
-        self, query: str, k: int = 5, score_threshold: float = 0.1
+        self,
+        query: str,
+        k: int = 5,
+        score_threshold: float = 0.1,
+        enable_rerank: bool = True,
     ) -> List[Dict[str, Any]]:
         """相似度搜索（支持稠密+稀疏混合检索）"""
         embedding_type = type(self.embeddings).__name__
@@ -2582,15 +2586,20 @@ class VectorStoreManager:
         logger.info(f"   📝 查询: '{query}'")
         logger.info(f"   🤖 使用嵌入模型: {embedding_type}")
         logger.info(f"   🎯 返回数量: {k}, 相似度阈值: {score_threshold}")
+        logger.info(f"   🎚️ Rerank: {'on' if enable_rerank else 'off'}")
 
         self._ensure_collection_for_search()
 
         def _run():
             if self.sparse_encoder:
                 logger.info("   🔀 使用混合检索（BM25 + 稠密向量）")
-                return self._hybrid_similarity_search(query, k, score_threshold)
+                return self._hybrid_similarity_search(
+                    query, k, score_threshold, enable_rerank=enable_rerank
+                )
             logger.info("   📊 使用纯稠密向量检索")
-            return self._dense_similarity_search(query, k, score_threshold)
+            return self._dense_similarity_search(
+                query, k, score_threshold, enable_rerank=enable_rerank
+            )
 
         results = _run()
         # 集合存在但搜不到：多为空壳/向量名不兼容，强制重建后再搜一次
@@ -2599,14 +2608,33 @@ class VectorStoreManager:
             results = _run()
         return results
 
+    def _should_use_reranker(self, enable_rerank: bool) -> bool:
+        if not enable_rerank:
+            return False
+        if self._get_reranker_url() is None:
+            return False
+        try:
+            from .reranker import is_reranker_circuit_open
+
+            if is_reranker_circuit_open():
+                logger.info("Reranker 熔断中，本轮跳过精排")
+                return False
+        except Exception:
+            pass
+        return True
+
     def _dense_similarity_search(
-        self, query: str, k: int, score_threshold: float
+        self,
+        query: str,
+        k: int,
+        score_threshold: float,
+        enable_rerank: bool = True,
     ) -> List[Dict[str, Any]]:
         """纯稠密向量检索（可选外接语义重排）"""
         try:
             dense_vector = self.embeddings.embed_query(query)
             collection_name = self._get_collection_name()
-            reranker_enabled = self._get_reranker_url() is not None
+            reranker_enabled = self._should_use_reranker(enable_rerank)
             limit = max(k * 3, 15) if reranker_enabled else k
 
             results = self.qdrant_client.search(
@@ -2643,13 +2671,17 @@ class VectorStoreManager:
             raise
 
     def _hybrid_similarity_search(
-        self, query: str, k: int, score_threshold: float
+        self,
+        query: str,
+        k: int,
+        score_threshold: float,
+        enable_rerank: bool = True,
     ) -> List[Dict[str, Any]]:
         """混合检索（RRF 融合稠密+稀疏 + Reranker 精排）"""
         try:
             collection_name = self._get_collection_name()
             # Reranker 需要更多候选，增加召回量
-            reranker_enabled = self._get_reranker_url() is not None
+            reranker_enabled = self._should_use_reranker(enable_rerank)
             per_source_limit = max(k * 5, 20) if reranker_enabled else max(k * 3, 10)
 
             # 计算稠密向量
@@ -2685,9 +2717,22 @@ class VectorStoreManager:
                     with_payload=True,
                 )
 
+            sparse_nnz = 0
+            try:
+                indices = getattr(sparse_query, "indices", None)
+                if indices is not None:
+                    sparse_nnz = int(len(indices))
+            except Exception:
+                sparse_nnz = 0
             logger.info(
                 f"🔍 稠密候选: {len(dense_results)}, 稀疏候选: {len(sparse_results)}"
+                f" (query_nnz={sparse_nnz})"
             )
+            if sparse_nnz > 0 and len(sparse_results) == 0:
+                logger.warning(
+                    "BM25 查询有 token 但稀疏命中为 0，索引可能仍是旧分词；"
+                    "请对该知识库执行「重建索引」"
+                )
 
             # RRF 融合（取更多候选用于 Reranker）
             fusion_limit = k * 3 if reranker_enabled else k
@@ -2713,7 +2758,9 @@ class VectorStoreManager:
             logger.error(f"混合搜索失败: {e}")
             # 降级为纯稠密检索
             logger.warning("⚠️ 降级为纯稠密检索")
-            return self._dense_similarity_search(query, k, score_threshold)
+            return self._dense_similarity_search(
+                query, k, score_threshold, enable_rerank=enable_rerank
+            )
 
     def _rrf_fusion(
         self, dense_results, sparse_results, limit: int
@@ -3119,16 +3166,23 @@ class KnowledgeBaseService:
         top_k: int = 5,
         similarity_threshold: float = 0.5,
         enable_rewrite: bool = True,
+        enable_rerank: bool = True,
     ) -> List[Dict[str, Any]]:
         """统一检索增强入口：原始检索 + Query Rewrite 二次检索 + 多维度去重"""
         results = self.vector_manager.similarity_search(
-            query_text, k=top_k, score_threshold=similarity_threshold
+            query_text,
+            k=top_k,
+            score_threshold=similarity_threshold,
+            enable_rerank=enable_rerank,
         )
         if enable_rewrite:
             rewritten = self._rewrite_query(query_text)
             if rewritten:
                 rewrite_results = self.vector_manager.similarity_search(
-                    rewritten, k=top_k, score_threshold=similarity_threshold
+                    rewritten,
+                    k=top_k,
+                    score_threshold=similarity_threshold,
+                    enable_rerank=enable_rerank,
                 )
                 seen = set()
                 for r in results:

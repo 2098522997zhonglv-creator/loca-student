@@ -532,12 +532,13 @@ def create_knowledge_tool(
             knowledge_base = KnowledgeBase.objects.get(id=knowledge_base_id)
             service = KnowledgeBaseService(knowledge_base)
 
-            # 工具侧关闭 Query Rewrite：预检索已做过检索，二次 rewrite+rerank 易叠加超时
+            # 工具侧关闭 rewrite/rerank：预检索已检索；显式再搜时优先低延迟，避免 Reranker 卡死对话
             search_results = service.enhanced_search(
                 query,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 enable_rewrite=False,
+                enable_rerank=False,
             )
 
             if not search_results:
