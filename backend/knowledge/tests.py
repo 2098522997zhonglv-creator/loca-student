@@ -224,3 +224,35 @@ class SemanticRerankerEndpointTests(TestCase):
         _, kwargs = mock_post.call_args
         self.assertEqual(kwargs["json"]["texts"], ["doc-a", "doc-b"])
         self.assertNotIn("documents", kwargs["json"])
+
+
+class Bm25ChinesePreprocessTests(TestCase):
+    """BM25 中文预处理：连续中文需切开，否则稀疏 overlap 为 0。"""
+
+    def test_pure_ascii_unchanged(self):
+        from .services import preprocess_text_for_bm25
+
+        text = "Callie release callie_test"
+        self.assertEqual(preprocess_text_for_bm25(text), text)
+
+    def test_chinese_query_is_tokenized_with_spaces(self):
+        from .services import preprocess_text_for_bm25
+
+        prepared = preprocess_text_for_bm25("Callieus生产地址")
+        parts = [p for p in prepared.split() if p]
+        self.assertGreaterEqual(len(parts), 2, prepared)
+        # 至少应拆出可与文档共享的中文词/字
+        joined = "".join(parts)
+        self.assertIn("生产", joined)
+        self.assertIn("地址", joined)
+
+    def test_query_and_doc_share_tokens_after_preprocess(self):
+        from .services import preprocess_text_for_bm25
+
+        q = set(preprocess_text_for_bm25("Callieus生产地址").split())
+        d = set(
+            preprocess_text_for_bm25(
+                "Callie前后端分离 | 各环境配置地址 | 生产环境"
+            ).split()
+        )
+        self.assertTrue(q & d, f"expected overlap, q={q}, d={d}")

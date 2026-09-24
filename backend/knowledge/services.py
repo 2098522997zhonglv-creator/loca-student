@@ -7,6 +7,7 @@ import concurrent.futures
 import hashlib
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -101,8 +102,64 @@ def _init_fastembed():
                 os.environ[var] = val
 
 
+# CJK 统一表意文字（中日韩）—— Qdrant/bm25 默认按空白切词，中文连续字不会拆开
+_CJK_CHAR_RE = re.compile(r"[\u4e00-\u9fff]")
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+_jieba_cutter = None
+_jieba_load_attempted = False
+
+
+def _get_jieba_cutter():
+    """懒加载 jieba；不可用时返回 None。"""
+    global _jieba_cutter, _jieba_load_attempted
+    if _jieba_load_attempted:
+        return _jieba_cutter
+    _jieba_load_attempted = True
+    try:
+        import jieba
+
+        # 禁用语料加载日志刷屏
+        jieba.setLogLevel(logging.WARNING)
+        _jieba_cutter = jieba
+        logger.info("BM25 中文分词: 使用 jieba")
+    except ImportError:
+        _jieba_cutter = None
+        logger.warning(
+            "未安装 jieba，BM25 中文回退为按字插入空格；建议: pip install jieba"
+        )
+    return _jieba_cutter
+
+
+def _cjk_char_spacing_fallback(text: str) -> str:
+    """无 jieba 时：CJK 连续段按字插空格，便于 BM25 产生可重叠 token。"""
+
+    def _split_run(match: re.Match) -> str:
+        return " ".join(match.group(0))
+
+    return _CJK_RUN_RE.sub(_split_run, text)
+
+
+def preprocess_text_for_bm25(text: str) -> str:
+    """入库/查询共用的 BM25 文本预处理。
+
+    Qdrant/bm25 基本只按空白与标点切词；中文连续串会被当成 1 个 token，
+    导致「Callieus生产地址」与文档词项 overlap=0。对含 CJK 的文本先分词再空格拼接。
+    """
+    if not text:
+        return ""
+    if not _CJK_CHAR_RE.search(text):
+        return text
+
+    jieba = _get_jieba_cutter()
+    if jieba is not None:
+        tokens = [t.strip() for t in jieba.cut(text, cut_all=False) if t and t.strip()]
+        return " ".join(tokens) if tokens else text
+
+    return _cjk_char_spacing_fallback(text)
+
+
 class SparseBM25Encoder:
-    """基于 FastEmbed 的 BM25 稀疏编码器"""
+    """基于 FastEmbed 的 BM25 稀疏编码器（中文经 preprocess_text_for_bm25 后再编码）"""
 
     DEFAULT_MODEL = "Qdrant/bm25"
 
@@ -174,12 +231,14 @@ class SparseBM25Encoder:
                         os.environ[var] = val
 
     def encode_documents(self, texts: List[str]) -> List:
-        """编码文档列表"""
-        return list(self._encoder.embed(texts))
+        """编码文档列表（含中文分词预处理）"""
+        prepared = [preprocess_text_for_bm25(t) for t in texts]
+        return list(self._encoder.embed(prepared))
 
     def encode_query(self, text: str):
-        """编码查询"""
-        results = list(self._encoder.query_embed(text))
+        """编码查询（含中文分词预处理）"""
+        prepared = preprocess_text_for_bm25(text)
+        results = list(self._encoder.query_embed(prepared))
         return results[0] if results else None
 
 

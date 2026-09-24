@@ -30,6 +30,7 @@ mcp>=1.9.2,<2.0.0
 langchain-qdrant==1.0.0
 qdrant-client==1.11.3
 fastembed>=0.7.0,<1.0
+jieba>=0.42.1
 httpx==0.28.1
 requests>=2.31
 PyYAML==6.0.2

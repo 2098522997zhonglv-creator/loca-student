@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
-    help = '修复知识库向量存储,重建损坏的索引'
+    help = (
+        '修复知识库向量存储并重建索引；'
+        'BM25 中文分词变更后也需对本命令重建，否则稀疏检索仍用旧 token'
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
