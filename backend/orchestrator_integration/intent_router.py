@@ -237,6 +237,7 @@ def build_intent_hint(decision: IntentDecision) -> str:
                 "- 读网页：优先只走 url-reader：read_skill_content(url-reader) → "
                 "execute_skill_script(skill_name=url-reader, command=python scripts/read_url.py \"URL\")。",
                 "- 禁止把 url-reader / playwright-skill / browser-use 当 tool 名直接调用。",
+                "- 内网 URL（192.168.*/10.*/127.0.0.1）必须先调用 url-reader，不要未调用就宣称「无法访问局域网」。",
                 "- url-reader 失败时：把错误原文告知用户；同一 URL 不要再连环试 playwright/browser-use/"
                 "换参重试超过 1 次。仅当错误明确是「需 JS 渲染 / 登录态」且用户同意时，才改用 playwright-skill。",
                 "- 禁止对 browser-use 使用无文档的裸命令（如 goto URL）。",

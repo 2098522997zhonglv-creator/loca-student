@@ -362,6 +362,7 @@ class BehaviorMemoryTests(SimpleTestCase):
         self.assertIn("多工具顺序与组合", hint)
         self.assertIn("parallel=false", hint)
         self.assertIn("本轮意图路由", hint)
+        self.assertIn("读不了局域网", hint)
 
     def test_mutating_skill_command_detection(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
@@ -508,6 +509,20 @@ class AgentSmartnessTests(SimpleTestCase):
         hint = build_intent_hint(classify_user_intent("保存用例入库"))
         self.assertIn("落库剧本", hint)
         self.assertIn("user_confirmed=true", hint)
+
+    def test_web_intent_forbids_lan_hallucination(self):
+        from orchestrator_integration.intent_router import (
+            build_intent_hint,
+            classify_user_intent,
+        )
+
+        hint = build_intent_hint(
+            classify_user_intent(
+                "读 http://192.168.12.216:8765/agent-test-report.html 并总结"
+            )
+        )
+        self.assertIn("url-reader", hint)
+        self.assertIn("无法访问局域网", hint)
 
     def test_prefetch_conflict_note_for_two_hosts(self):
         note = agent_loop_view._build_prefetch_conflict_note(
