@@ -16,7 +16,7 @@ import json
 import time
 import mimetypes
 import re
-from typing import Optional
+from typing import Optional, Union
 
 from langchain_core.tools import tool as langchain_tool
 from django.conf import settings
@@ -96,6 +96,25 @@ def detect_user_write_approval(message: Optional[str]) -> bool:
     if _WRITE_REJECT_RE.search(text):
         return False
     return len(text) <= _SHORT_APPROVAL_MAX_CHARS and bool(_SHORT_APPROVAL_RE.match(text))
+
+
+def normalize_commands_arg(raw: str) -> list[dict[str, str]]:
+    """把 JSON 字符串形式的 commands 解析为列表；单个对象包装成单元素列表。"""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"commands 必须是列表（JSON 数组），解析失败: {exc}。"
+            '正确示例: commands=[{"skill_name": "loca-stude", "command": "python ..."}]'
+        ) from exc
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not all(isinstance(c, dict) for c in data):
+        raise ValueError("commands 必须是由 {skill_name, command} 对象组成的列表")
+    return data
 
 
 def _write_allowed(user_confirmed: bool, user_write_approved: Optional[bool]) -> bool:
@@ -930,7 +949,7 @@ def get_skill_tools(
         skill_name: Optional[str] = None,
         command: Optional[str] = None,
         session_id: Optional[str] = None,
-        commands: Optional[list[dict[str, str]]] = None,
+        commands: Optional[Union[list[dict[str, str]], str]] = None,
         parallel: bool = False,
         max_workers: int = 5,
         user_confirmed: bool = False,
@@ -975,6 +994,13 @@ def get_skill_tools(
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from django.db import close_old_connections
+
+        # 部分模型会把 commands 序列化成 JSON 字符串传入
+        if isinstance(commands, str):
+            try:
+                commands = normalize_commands_arg(commands)
+            except ValueError as exc:
+                return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
         # 批量执行模式
         if commands:

@@ -623,6 +623,31 @@ class AgentSmartnessTests(SimpleTestCase):
         decision, kept, _ = apply_intent_routing("先生成一条给我看看", tools)
         self.assertNotIn("execute_skill_script", [t.name for t in kept])
 
+    def test_commands_accepts_json_string(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            get_skill_tools,
+            normalize_commands_arg,
+        )
+
+        self.assertEqual(
+            normalize_commands_arg('{"skill_name": "a", "command": "python x.py"}'),
+            [{"skill_name": "a", "command": "python x.py"}],
+        )
+        with self.assertRaises(ValueError):
+            normalize_commands_arg("not json")
+
+        tools = {
+            t.name: t
+            for t in get_skill_tools(user_id=1, project_id=1, user_write_approved=False)
+        }
+        out = tools["execute_skill_script"].invoke(
+            {
+                "commands": '[{"skill_name": "whart-test", "command": "python whart_tools.py --action add_testcase --project_id 2"}]',
+                "parallel": False,
+            }
+        )
+        self.assertIn("needs_confirmation", out)
+
     def test_detect_user_write_approval(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
             detect_user_write_approval,
