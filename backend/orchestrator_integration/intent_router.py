@@ -288,6 +288,11 @@ def build_intent_hint(decision: IntentDecision) -> str:
             "- 查询平台数据：read_skill_content(loca-stude) → execute_skill_script 执行 get_/list_ 只读命令，"
             "无需确认；查到后直接汇总给用户，不要顺手写入。"
         )
+        lines.append(
+            "- 必须本轮实际调用工具拿到真实数据再回答；不要凭对话历史推测，"
+            "也不要沿用历史里「工具不可用/调用失败」的结论（问题可能已修复）。"
+            "若用户所说「已生成的用例」可能指本对话草稿，需同时说明：草稿（未保存）与平台已保存用例（查询结果）。"
+        )
     if INTENT_BROWSER in decision.intents:
         lines.append(
             "- 浏览器自动化：read_skill_content(playwright-skill) → execute_skill_script，多步共用 session_id。"
