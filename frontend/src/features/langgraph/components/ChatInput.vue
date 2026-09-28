@@ -512,6 +512,10 @@ const isDuplicateImageFile = (file: File) => {
 };
 
 const handleKeyDown = (event: KeyboardEvent) => {
+  // 输入法组字中的回车用于上屏（Safari 下 isComposing 为 false，但 keyCode 为 229）
+  if (event.isComposing || event.keyCode === 229) {
+    return;
+  }
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     void handleSendMessage();
