@@ -72,10 +72,11 @@ _MUTATING_FUNC_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:batch_)?(?:add|create|update|edit|delete|save|insert|remove|upsert)_[\w-]+"
 )
 
+_NO_ASK_APPROVAL_RE = re.compile(r"(不用|无需|不需要|不要|别)(再)?(问我|确认|询问)")
 _EXPLICIT_WRITE_APPROVAL_RE = re.compile(
     r"(确认|同意|允许|可以|直接)(写入|入库|落库|保存|创建|提交|执行写入)"
-    r"|(不用|无需|不需要|别)(再)?(问我|确认|询问)"
     r"|直接(写|存|建|保存|入库)"
+    r"|(继续|接着|剩下的?|其余的?)(也|都)?(更新|修改|改|编辑|写入|保存|创建|添加|新增|处理)"
 )
 # 肯定词后须紧跟标点/空白/结尾，避免“可以帮我执行用例35吗”被当成同意
 _SHORT_APPROVAL_RE = re.compile(
@@ -92,10 +93,12 @@ def detect_user_write_approval(message: Optional[str]) -> bool:
     text = (message or "").strip()
     if not text:
         return False
-    if _EXPLICIT_WRITE_APPROVAL_RE.search(text):
+    if _NO_ASK_APPROVAL_RE.search(text):
         return True
     if _WRITE_REJECT_RE.search(text):
         return False
+    if _EXPLICIT_WRITE_APPROVAL_RE.search(text):
+        return True
     return len(text) <= _SHORT_APPROVAL_MAX_CHARS and bool(_SHORT_APPROVAL_RE.match(text))
 
 

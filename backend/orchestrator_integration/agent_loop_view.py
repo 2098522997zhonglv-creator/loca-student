@@ -96,6 +96,8 @@ _KB_PRIORITY_HINT = """
   用户下一条消息明确同意后才执行（user_confirmed=true）。服务端按用户原话判定，
   用户本轮没同意时写入必被拒（needs_confirmation），不要自行重试，直接停下来问用户。
 - 只读查询（get_/list_）和浏览器操作不需要确认，可先做完再汇总写入计划。
+- 写入内容里的系统地址、账号、密码、测试数据必须来自用户或知识库原文；没有就写「待补充：xxx」，
+  禁止编造 example.com 地址、示例账号或密码来“补充细节”。
 - 「看看 / 生成草稿」只输出内容，不落库。
 - 多步骤或中文引号：steps 用 --steps_file。
 
@@ -1264,7 +1266,7 @@ class AgentLoopStreamAPIView(View):
             from orchestrator_integration.intent_router import apply_intent_routing
 
             intent_decision, tools, intent_hint = apply_intent_routing(
-                user_message, tools
+                user_message, tools, kb_active=kb_qa_mode
             )
             logger.info(
                 "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s tools=%s",

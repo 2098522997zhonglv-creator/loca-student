@@ -628,6 +628,11 @@ class AgentSmartnessTests(SimpleTestCase):
         decision, kept, _ = apply_intent_routing("先生成一条给我看看", tools)
         self.assertNotIn("execute_skill_script", [t.name for t in kept])
 
+        # 未挂知识库时，纯问答也不裁执行工具
+        _, kept, hint = apply_intent_routing("帮我优化一下", tools, kb_active=False)
+        self.assertIn("execute_skill_script", [t.name for t in kept])
+        self.assertNotIn("未挂载 execute_skill_script", hint)
+
     def test_commands_accepts_json_string(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
             get_skill_tools,
@@ -658,12 +663,17 @@ class AgentSmartnessTests(SimpleTestCase):
             detect_user_write_approval,
         )
 
-        for text in ("确认", "好的", "可以，写入吧", "ok", "同意写入", "直接保存，不用问我", "执行吧"):
+        for text in (
+            "确认", "好的", "可以，写入吧", "ok", "同意写入", "直接保存，不用问我", "执行吧",
+            "继续更新", "接着改", "剩下的也更新", "不要问我，直接写",
+        ):
             self.assertTrue(detect_user_write_approval(text), text)
         for text in (
             "执行ID为35的测试用例，并生成UI自动化用例",
             "可以帮我执行用例35吗",
             "先不要写入",
+            "先不要继续更新",
+            "其他更新了什么",
             "取消",
             "帮我看看这个页面",
             "",

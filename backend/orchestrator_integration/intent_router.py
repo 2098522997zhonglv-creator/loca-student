@@ -203,12 +203,16 @@ def _tool_name(tool: Any) -> str:
 def filter_tools_by_intent(
     tools: Sequence[Any],
     decision: IntentDecision,
+    kb_active: bool = True,
 ) -> List[Any]:
-    """按意图裁剪工具列表；未知工具默认保留（安全偏保守）。"""
+    """按意图裁剪工具列表；未知工具默认保留（安全偏保守）。
+
+    未挂知识库时纯问答无处可答，不裁 execute_skill_script（写入另有服务端确认门）。
+    """
     if not tools:
         return []
 
-    keep_execute = decision.needs_skills_execute
+    keep_execute = decision.needs_skills_execute or not kb_active
     keep_playwright = decision.needs_playwright
     # 纯问答也保留 read_skill_content，便于偶尔查 Skill 说明；去掉 execute 与浏览器
     out: List[Any] = []
@@ -243,14 +247,14 @@ def filter_tools_by_intent(
     return out
 
 
-def build_intent_hint(decision: IntentDecision) -> str:
+def build_intent_hint(decision: IntentDecision, kb_active: bool = True) -> str:
     """注入到 system prompt 的本轮意图补充。"""
     lines = [
         "# 本轮意图路由",
         f"- 识别意图: {', '.join(sorted(decision.intents)) or 'qa'}（主意图: {decision.primary}）",
     ]
 
-    if decision.pure_kb_qa:
+    if decision.pure_kb_qa and kb_active:
         lines.extend(
             [
                 "- 本轮以知识库问答为主：优先用预检索/knowledge_search 回答，须标注来源。",
@@ -309,9 +313,10 @@ def build_intent_hint(decision: IntentDecision) -> str:
 def apply_intent_routing(
     message: str,
     tools: Optional[Sequence[Any]] = None,
+    kb_active: bool = True,
 ) -> tuple[IntentDecision, List[Any], str]:
     """一站式：分类 → 裁工具 → 提示词。"""
     decision = classify_user_intent(message)
-    filtered = filter_tools_by_intent(list(tools or []), decision)
-    hint = build_intent_hint(decision)
+    filtered = filter_tools_by_intent(list(tools or []), decision, kb_active=kb_active)
+    hint = build_intent_hint(decision, kb_active=kb_active)
     return decision, filtered, hint
