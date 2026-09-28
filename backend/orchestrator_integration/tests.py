@@ -589,11 +589,16 @@ class AgentSmartnessTests(SimpleTestCase):
             "python ui_automation_tools.py --action set_step_details --step_id 1",
             "python ui_automation_tools.py --action set_case_steps --testcase_id 1",
             "python whart_tools.py --action upload_screenshots --case_id 35",
+            "python loca_stude_tools.py --action edit_testcase --project_id 2 --case_id 102",
+            "python loca_stude_tools.py --action approve_review --id 1",
         ):
             self.assertTrue(is_mutating_skill_command(cmd), cmd)
         for cmd in (
             "python ui_automation_tools.py --action get_ui_modules --project_id 1",
             "python ui_automation_tools.py --action get_testcase --testcase_id 1",
+            "python loca_stude_tools.py --action get_testcase_detail --project_id 2 --case_id 102",
+            "python loca_stude_tools.py --action list_modules --project_id 2",
+            "python ui_automation_tools.py --action execute_testcase --testcase_id 1",
             "python scripts/read_url.py http://192.168.1.1/a.html",
         ):
             self.assertFalse(is_mutating_skill_command(cmd), cmd)

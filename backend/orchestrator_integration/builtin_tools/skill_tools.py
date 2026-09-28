@@ -60,15 +60,16 @@ _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 平台/数据库写入类 action（loca-stude 等）；只读 get_/list_/search_ 不匹配
-_MUTATING_VERBS = (
-    r"add|create|update|delete|save|insert|remove|upsert|write|put|patch"
-    r"|set|upload|import|bind|assign|move|copy|rename|clear|reset"
+# --action 采用只读白名单：不在白名单里的 action 一律视为写入，避免 edit_/approve_ 等新动词漏网。
+# execute_/run_ 触发用例执行，不改用例数据，放行。
+_ACTION_RE = re.compile(r"(?i)--action[\s=]+['\"]?(?P<action>[\w-]+)")
+_READONLY_ACTION_RE = re.compile(
+    r"(?i)^(?:get|list|search|query|find|read|view|show|count|describe|detail|check|fetch"
+    r"|download|export|preview|validate|help|stat|stats|execute|run)(?:[_-]|$)"
 )
-_MUTATING_ACTION_RE = re.compile(
-    r"(?i)"
-    rf"(?:--action\s+)(?:batch[_-])?(?P<a>{_MUTATING_VERBS})[\w-]*"
-    r"|(?P<b>(?<![A-Za-z0-9])(?:batch_)?(?:add|create|update|delete|save|insert|remove|upsert)_[\w-]+)"
+# 无 --action 的脚本：只识别明显的写入函数名
+_MUTATING_FUNC_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:batch_)?(?:add|create|update|edit|delete|save|insert|remove|upsert)_[\w-]+"
 )
 
 _EXPLICIT_WRITE_APPROVAL_RE = re.compile(
@@ -137,7 +138,11 @@ def is_mutating_skill_command(command: Optional[str]) -> bool:
     """判断 skill 命令是否会写入平台/数据库（用于确认门与串行策略）。"""
     if not command or not str(command).strip():
         return False
-    return bool(_MUTATING_ACTION_RE.search(str(command)))
+    text = str(command)
+    actions = [m.group("action") for m in _ACTION_RE.finditer(text)]
+    if actions:
+        return any(not _READONLY_ACTION_RE.match(a) for a in actions)
+    return bool(_MUTATING_FUNC_RE.search(text))
 
 
 def prefer_url_reader_instead(
