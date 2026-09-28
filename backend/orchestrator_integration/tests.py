@@ -84,9 +84,14 @@ class LLMFriendlyErrorTests(SimpleTestCase):
 
 class LinkedImageUrlExtractionTests(SimpleTestCase):
     def test_extract_plain_http_url_stops_before_chinese_description(self):
-        text = "请访问 https://localhost:8080，准备注册信息：用户名testuser010、密码abcdef123"
+        text = "请看 https://localhost:8080/a.png，准备注册信息：用户名testuser010、密码abcdef123"
 
-        self.assertEqual(_extract_linked_image_urls(text), ["https://localhost:8080"])
+        self.assertEqual(_extract_linked_image_urls(text), ["https://localhost:8080/a.png"])
+
+    def test_plain_page_url_is_not_treated_as_image(self):
+        text = "https://test-design.local.bomiv.com/#/home 这是测试地址"
+
+        self.assertEqual(_extract_linked_image_urls(text), [])
 
     def test_extract_markdown_image_url_trims_wrapping_punctuation(self):
         text = "参考截图 ![image](https://example.com/demo.png)，然后继续分析"
@@ -97,14 +102,14 @@ class LinkedImageUrlExtractionTests(SimpleTestCase):
         )
 
     def test_extract_invalid_unicode_netloc_does_not_raise(self):
-        text = "异常链接 https://localhost:8080：准备注册信息：用户名testuser014"
+        text = "异常链接 https://localhost:8080/b.jpg：准备注册信息：用户名testuser014"
 
-        self.assertEqual(_extract_linked_image_urls(text), ["https://localhost:8080"])
+        self.assertEqual(_extract_linked_image_urls(text), ["https://localhost:8080/b.jpg"])
 
     def test_extract_plain_http_url_stops_before_ascii_comma_description(self):
-        text = "Open http://localhost:8080,then fill the registration form"
+        text = "Open http://localhost:8080/c.png,then fill the registration form"
 
-        self.assertEqual(_extract_linked_image_urls(text), ["http://localhost:8080"])
+        self.assertEqual(_extract_linked_image_urls(text), ["http://localhost:8080/c.png"])
 
     def test_extract_plain_http_url_stops_before_closing_parenthesis_text(self):
         text = "查看截图 https://example.com/demo.png)后继续分析"
@@ -592,6 +597,31 @@ class AgentSmartnessTests(SimpleTestCase):
             "python scripts/read_url.py http://192.168.1.1/a.html",
         ):
             self.assertFalse(is_mutating_skill_command(cmd), cmd)
+
+    def test_platform_read_and_approval_keep_execute_tool(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_PLATFORM,
+            INTENT_WRITE,
+            apply_intent_routing,
+        )
+
+        class _T:
+            def __init__(self, name):
+                self.name = name
+
+        tools = [_T("read_skill_content"), _T("execute_skill_script")]
+        for text, intent in (
+            ("查看已有用例", INTENT_PLATFORM),
+            ("项目里有哪些模块", INTENT_PLATFORM),
+            ("确认", INTENT_WRITE),
+            ("好的，写入吧", INTENT_WRITE),
+        ):
+            decision, kept, _ = apply_intent_routing(text, tools)
+            self.assertIn(intent, decision.intents, text)
+            self.assertIn("execute_skill_script", [t.name for t in kept], text)
+
+        decision, kept, _ = apply_intent_routing("先生成一条给我看看", tools)
+        self.assertNotIn("execute_skill_script", [t.name for t in kept])
 
     def test_detect_user_write_approval(self):
         from orchestrator_integration.builtin_tools.skill_tools import (

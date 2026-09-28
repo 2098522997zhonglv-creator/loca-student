@@ -14,6 +14,7 @@ INTENT_SEARCH = "search"
 INTENT_WEB = "web"
 INTENT_WRITE = "write"
 INTENT_BROWSER = "browser"
+INTENT_PLATFORM = "platform"
 
 _ALL_INTENTS = (
     INTENT_QA,
@@ -21,6 +22,15 @@ _ALL_INTENTS = (
     INTENT_WEB,
     INTENT_WRITE,
     INTENT_BROWSER,
+    INTENT_PLATFORM,
+)
+
+# 平台数据只读查询：动词 + 平台实体同时出现
+_PLATFORM_READ_VERB_RE = re.compile(
+    r"查看|查询|查一下|查下|查查|看看|看下|看一下|列出|列一下|有哪些|已有|现有|多少|统计|详情|打开"
+)
+_PLATFORM_ENTITY_RE = re.compile(
+    r"用例|模块|项目|需求|套件|执行记录|执行历史|测试结果|评审|缺陷|页面步骤|元素|ui自动化|UI自动化|截图|附件|文件"
 )
 
 _WRITE_HINTS = (
@@ -99,7 +109,7 @@ class IntentDecision:
     def needs_skills_execute(self) -> bool:
         return bool(
             self.intents
-            & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER}
+            & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER, INTENT_PLATFORM}
         )
 
     @property
@@ -126,6 +136,17 @@ def classify_user_intent(message: str) -> IntentDecision:
     ):
         found.add(INTENT_WRITE)
 
+    # 对上一轮「是否确认写入？」的同意回复，必须保留执行工具
+    from orchestrator_integration.builtin_tools.skill_tools import (
+        detect_user_write_approval,
+    )
+
+    if detect_user_write_approval(text):
+        found.add(INTENT_WRITE)
+
+    if _PLATFORM_READ_VERB_RE.search(text) and _PLATFORM_ENTITY_RE.search(text):
+        found.add(INTENT_PLATFORM)
+
     if any(h in text for h in _WEB_HINTS) or _URL_RE.search(text):
         found.add(INTENT_WEB)
 
@@ -144,7 +165,7 @@ def classify_user_intent(message: str) -> IntentDecision:
             found.discard(INTENT_WRITE)
 
     # 有副作用意图时仍保留 qa，便于「查完再写」
-    if found & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER}:
+    if found & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER, INTENT_PLATFORM}:
         found.add(INTENT_QA)
 
     # 同时有 web+write 时，优先 web（先读再写）
@@ -153,6 +174,7 @@ def classify_user_intent(message: str) -> IntentDecision:
             INTENT_WEB,
             INTENT_WRITE,
             INTENT_BROWSER,
+            INTENT_PLATFORM,
             INTENT_SEARCH,
             INTENT_QA,
         )
@@ -161,6 +183,7 @@ def classify_user_intent(message: str) -> IntentDecision:
             INTENT_WRITE,
             INTENT_BROWSER,
             INTENT_WEB,
+            INTENT_PLATFORM,
             INTENT_SEARCH,
             INTENT_QA,
         )
@@ -259,6 +282,11 @@ def build_intent_hint(decision: IntentDecision) -> str:
                 "- 禁止对 browser-use 使用裸命令（goto/new_tab/heredoc）；该类调用会被拦截并要求改用 url-reader。",
                 "- 禁止用 playwright 仅 page.goto 打开 HTML 报告；会被拦截并要求改用 url-reader。",
             ]
+        )
+    if INTENT_PLATFORM in decision.intents and INTENT_WRITE not in decision.intents:
+        lines.append(
+            "- 查询平台数据：read_skill_content(loca-stude) → execute_skill_script 执行 get_/list_ 只读命令，"
+            "无需确认；查到后直接汇总给用户，不要顺手写入。"
         )
     if INTENT_BROWSER in decision.intents:
         lines.append(
