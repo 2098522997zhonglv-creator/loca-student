@@ -573,6 +573,72 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertEqual(compact_skill_tool_output(payload), payload)
         self.assertIn("needs_confirmation", payload)
 
+    def test_mutating_detection_covers_ui_automation_actions(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            is_mutating_skill_command,
+        )
+
+        for cmd in (
+            "python ui_automation_tools.py --action create_ui_module --name x",
+            "python ui_automation_tools.py --action batch_create_elements --page_id 1",
+            "python ui_automation_tools.py --action set_step_details --step_id 1",
+            "python ui_automation_tools.py --action set_case_steps --testcase_id 1",
+            "python whart_tools.py --action upload_screenshots --case_id 35",
+        ):
+            self.assertTrue(is_mutating_skill_command(cmd), cmd)
+        for cmd in (
+            "python ui_automation_tools.py --action get_ui_modules --project_id 1",
+            "python ui_automation_tools.py --action get_testcase --testcase_id 1",
+            "python scripts/read_url.py http://192.168.1.1/a.html",
+        ):
+            self.assertFalse(is_mutating_skill_command(cmd), cmd)
+
+    def test_detect_user_write_approval(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            detect_user_write_approval,
+        )
+
+        for text in ("确认", "好的", "可以，写入吧", "ok", "同意写入", "直接保存，不用问我", "执行吧"):
+            self.assertTrue(detect_user_write_approval(text), text)
+        for text in (
+            "执行ID为35的测试用例，并生成UI自动化用例",
+            "可以帮我执行用例35吗",
+            "先不要写入",
+            "取消",
+            "帮我看看这个页面",
+            "",
+        ):
+            self.assertFalse(detect_user_write_approval(text), text)
+
+    def test_model_cannot_self_confirm_write(self):
+        from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
+
+        tools = {
+            t.name: t
+            for t in get_skill_tools(user_id=1, project_id=1, user_write_approved=False)
+        }
+        out = tools["execute_skill_script"].invoke(
+            {
+                "skill_name": "ui-automation",
+                "command": "python ui_automation_tools.py --action create_ui_module --name x",
+                "user_confirmed": True,
+            }
+        )
+        self.assertIn("needs_confirmation", out)
+
+        out = tools["execute_skill_script"].invoke(
+            {
+                "commands": [
+                    {
+                        "skill_name": "ui-automation",
+                        "command": "python ui_automation_tools.py --action set_case_steps --testcase_id 1",
+                    }
+                ],
+                "user_confirmed": True,
+            }
+        )
+        self.assertIn("needs_confirmation", out)
+
     def test_prefer_url_reader_blocks_browser_use(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
             prefer_url_reader_instead,

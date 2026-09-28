@@ -19,6 +19,7 @@ def get_builtin_tools(
     project_id: int,
     test_case_id: int = None,
     chat_session_id: str = None,
+    user_write_approved: bool = None,
 ) -> list:
     """获取所有内置工具"""
     tools = []
@@ -28,6 +29,7 @@ def get_builtin_tools(
         project_id=project_id,
         test_case_id=test_case_id,
         chat_session_id=chat_session_id,
+        user_write_approved=user_write_approved,
     )
     tools.extend(skill_tools)
     logger.info(f"[BuiltinTools] 加载 {len(skill_tools)} 个 Skill 工具")

@@ -92,7 +92,10 @@ _KB_PRIORITY_HINT = """
 
 ## 写入约定（必须先问）
 - 落库用 loca-stude 的 add_testcase 等；没有 functional_test_case_save。
-- 写入前必须展示摘要并获用户明确同意，再 user_confirmed=true；未确认会 needs_confirmation。
+- 写入（create/add/update/delete/set/upload 等）前，先在回复中列出将写入的内容，以「是否确认写入？」结束本轮；
+  用户下一条消息明确同意后才执行（user_confirmed=true）。服务端按用户原话判定，
+  用户本轮没同意时写入必被拒（needs_confirmation），不要自行重试，直接停下来问用户。
+- 只读查询（get_/list_）和浏览器操作不需要确认，可先做完再汇总写入计划。
 - 「看看 / 生成草稿」只输出内容，不落库。
 - 多步骤或中文引号：steps 用 --steps_file。
 
@@ -1235,12 +1238,21 @@ class AgentLoopStreamAPIView(View):
             # 6. 添加内置 Skill 工具（与知识库并存：检索出用例，Skill 负责落库）
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
             from orchestrator_integration.builtin_tools import get_builtin_tools
+            from orchestrator_integration.builtin_tools.skill_tools import (
+                detect_user_write_approval,
+            )
 
+            user_write_approved = detect_user_write_approval(user_message)
+            logger.info(
+                "AgentLoopStreamAPI: 本轮写入授权=%s（按用户原话判定）",
+                user_write_approved,
+            )
             builtin_tools = get_builtin_tools(
                 user_id=request.user.id,
                 project_id=int(project_id),
                 test_case_id=test_case_id,
                 chat_session_id=session_id,
+                user_write_approved=user_write_approved,
             )
             tools.extend(builtin_tools)
             logger.info(
@@ -2431,6 +2443,7 @@ class AgentLoopResumeAPIView(View):
                         project_id=int(project_id) if project_id else 0,
                         test_case_id=None,
                         chat_session_id=session_id,
+                        user_write_approved=decision_type == "approve",
                     )
                     tools.extend(builtin_tools)
                     logger.info(

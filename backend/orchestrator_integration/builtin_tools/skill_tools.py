@@ -61,11 +61,49 @@ _QUOTED_ARTIFACT_TOKEN_RE = re.compile(
 )
 
 # 平台/数据库写入类 action（loca-stude 等）；只读 get_/list_/search_ 不匹配
+_MUTATING_VERBS = (
+    r"add|create|update|delete|save|insert|remove|upsert|write|put|patch"
+    r"|set|upload|import|bind|assign|move|copy|rename|clear|reset"
+)
 _MUTATING_ACTION_RE = re.compile(
     r"(?i)"
-    r"(?:--action\s+)(?P<a>add|create|update|delete|save|insert|remove|upsert|write|put|patch)[\w-]*"
-    r"|(?P<b>\b(?:add|create|update|delete|save|insert|remove|upsert)_[\w-]+)"
+    rf"(?:--action\s+)(?:batch[_-])?(?P<a>{_MUTATING_VERBS})[\w-]*"
+    r"|(?P<b>(?<![A-Za-z0-9])(?:batch_)?(?:add|create|update|delete|save|insert|remove|upsert)_[\w-]+)"
 )
+
+_EXPLICIT_WRITE_APPROVAL_RE = re.compile(
+    r"(确认|同意|允许|可以|直接)(写入|入库|落库|保存|创建|提交|执行写入)"
+    r"|(不用|无需|不需要|别)(再)?(问我|确认|询问)"
+    r"|直接(写|存|建|保存|入库)"
+)
+# 肯定词后须紧跟标点/空白/结尾，避免“可以帮我执行用例35吗”被当成同意
+_SHORT_APPROVAL_RE = re.compile(
+    r"^\s*(?:(?:确认|同意|可以|好的?|好滴|行|是的?|对的?|没问题|ok|okay|yes|y)(?:$|[\s。.!！~，,、;；])"
+    r"|(?:执行|写入|保存|继续|开始|写)吧?\s*[。.!！~]*\s*$)",
+    re.IGNORECASE,
+)
+_SHORT_APPROVAL_MAX_CHARS = 20
+_WRITE_REJECT_RE = re.compile(r"不要|不用了|别写|先不|暂不|取消|不同意|不确认|不可以|不行|算了")
+
+
+def detect_user_write_approval(message: Optional[str]) -> bool:
+    """按用户原话判定本轮是否明确同意写入。"""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if _EXPLICIT_WRITE_APPROVAL_RE.search(text):
+        return True
+    if _WRITE_REJECT_RE.search(text):
+        return False
+    return len(text) <= _SHORT_APPROVAL_MAX_CHARS and bool(_SHORT_APPROVAL_RE.match(text))
+
+
+def _write_allowed(user_confirmed: bool, user_write_approved: Optional[bool]) -> bool:
+    """user_write_approved 为 None 时（无用户原话可判定）沿用模型的 user_confirmed；
+    否则只认服务端按用户原话的判定，模型无法自行放行。"""
+    if user_write_approved is None:
+        return bool(user_confirmed)
+    return user_write_approved
 
 _HTTP_URL_RE = re.compile(r"https?://[^\s\"'`<>]+", re.IGNORECASE)
 _BROWSER_NAV_HINT_RE = re.compile(
@@ -178,10 +216,10 @@ def _needs_write_confirmation_payload(
     payload = {
         "status": "needs_confirmation",
         "message": (
-            "检测到平台/数据库写入操作，尚未得到用户确认。"
-            "请先用自然语言向用户说明将写入的内容与影响，"
-            "待用户明确同意后再调用 execute_skill_script(..., user_confirmed=true)。"
-            "禁止在未确认时把 user_confirmed 设为 true。"
+            "检测到平台/数据库写入操作，用户本轮消息没有明确同意写入，已拒绝执行。"
+            "服务端按用户原话判定，本轮内任何写入重试（包括 user_confirmed=true）都会被拒绝。"
+            "请立即停止调用写入命令，用自然语言向用户列出将要写入的内容与影响，"
+            "以“是否确认写入？”结束本轮回复，等待用户下一条消息回复“确认”后再执行。"
         ),
         "pending": {
             "skill_name": skill_name,
@@ -588,6 +626,7 @@ def get_skill_tools(
     project_id: Optional[int] = None,
     test_case_id: Optional[int] = None,
     chat_session_id: Optional[str] = None,
+    user_write_approved: Optional[bool] = None,
 ) -> list[object]:
     """获取 Skill 工具列表（Skills 全局共享，不限制项目）"""
     current_user_id = user_id
@@ -947,7 +986,7 @@ def get_skill_tools(
                 for c in commands
                 if isinstance(c, dict) and is_mutating_skill_command(c.get("command"))
             ]
-            if mutating_cmds and not user_confirmed:
+            if mutating_cmds and not _write_allowed(user_confirmed, user_write_approved):
                 logger.info(
                     "[execute_skill_script] 批量写入未确认，拒绝执行 count=%s",
                     len(mutating_cmds),
@@ -1064,7 +1103,7 @@ def get_skill_tools(
         if not skill_name or not command:
             return "错误: 单个执行模式需要提供 skill_name 和 command 参数"
 
-        if is_mutating_skill_command(command) and not user_confirmed:
+        if is_mutating_skill_command(command) and not _write_allowed(user_confirmed, user_write_approved):
             logger.info(
                 "[execute_skill_script] 写入未确认，拒绝执行 skill=%s", skill_name
             )

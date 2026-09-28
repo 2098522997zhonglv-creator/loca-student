@@ -241,9 +241,10 @@ def build_intent_hint(decision: IntentDecision) -> str:
                 "- 落库剧本（必须按序）：",
                 "  1) read_skill_content(loca-stude)",
                 "  2) 必要时只读 get_/list_ 查现有数据",
-                "  3) 向用户展示将写入的字段摘要并征求确认",
-                "  4) 用户明确同意后 execute_skill_script(..., user_confirmed=true, commands=[...], parallel=false)",
-                "- 禁止未确认写入；多条写入用一条 commands 串行组合。",
+                "  3) 向用户展示将写入的字段摘要，以「是否确认写入？」结束本轮回复",
+                "  4) 用户下一条消息回复「确认」后，再 execute_skill_script(..., user_confirmed=true, commands=[...], parallel=false)",
+                "- 是否放行由服务端按用户原话判定，本轮用户没说同意时任何写入都会被拒，不要自行重试。",
+                "- 多条写入用一条 commands 串行组合。",
             ]
         )
     if INTENT_WEB in decision.intents:
