@@ -17,7 +17,7 @@
 | 用例管理、套件、执行、思维导图 | `testcases`, `testcase_templates` | 用例管理（含脑图）/套件/执行历史/模板 |
 | UI 自动化（页面/步骤/执行记录） | `ui_automation` | UI自动化（WebSocket 需 Daphne） |
 
-接口自动化、定时任务中心和微信插件仍不属于本项目运行边界。UI 自动化的远程浏览器执行依赖独立 Actuator 客户端。
+接口自动化、定时任务中心和微信插件仍不属于本项目运行边界。UI 自动化的浏览器执行依赖独立 Actuator 客户端，源码在 `loca_stude_Actuator/`（通过 `ws/ui/actuator/` 连接后端，启动方式见其 README）。
 
 ## 数据层级
 
