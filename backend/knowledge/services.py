@@ -139,6 +139,26 @@ def _cjk_char_spacing_fallback(text: str) -> str:
     return _CJK_RUN_RE.sub(_split_run, text)
 
 
+# 团队文档里同一环境有多种叫法；只用于扩展 BM25 查询，稠密向量仍用原问题。
+_QUERY_SYNONYM_GROUPS = (
+    ("生产", "线上", "正式", "prod", "production"),
+    ("验收", "release"),
+    ("后台", "管理后台", "admin"),
+)
+
+
+def expand_query_synonyms(query: str) -> str:
+    """命中某组任一词时，把同组其余词追加到查询末尾。"""
+    if not query:
+        return query
+    lowered = query.lower()
+    extra: List[str] = []
+    for group in _QUERY_SYNONYM_GROUPS:
+        if any(term in lowered for term in group):
+            extra.extend(t for t in group if t not in lowered and t not in extra)
+    return f"{query} {' '.join(extra)}" if extra else query
+
+
 def preprocess_text_for_bm25(text: str) -> str:
     """入库/查询共用的 BM25 文本预处理。
 
@@ -2690,7 +2710,7 @@ class VectorStoreManager:
             dense_vector = self.embeddings.embed_query(query)
 
             # 计算稀疏向量
-            sparse_query = self.sparse_encoder.encode_query(query)
+            sparse_query = self.sparse_encoder.encode_query(expand_query_synonyms(query))
 
             # 稠密向量检索
             dense_results = self.qdrant_client.search(

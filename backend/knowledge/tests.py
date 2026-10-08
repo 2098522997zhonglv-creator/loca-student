@@ -288,3 +288,24 @@ class KnowledgeBackendHealthTests(TestCase):
             self.assertEqual(describe_qdrant_target(), "远程 Qdrant 服务 http://127.0.0.1:6333")
         with patch.dict("os.environ", {"QDRANT_URL": ""}):
             self.assertEqual(describe_qdrant_target(), "本地嵌入式 Qdrant")
+
+
+class QuerySynonymExpansionTests(TestCase):
+    """「生产地址」要能用关键词命中文档里的「线上地址」。"""
+
+    def test_expands_environment_synonyms(self):
+        from .services import expand_query_synonyms
+
+        expanded = expand_query_synonyms("商品中心生产地址是什么")
+        self.assertTrue(expanded.startswith("商品中心生产地址是什么"))
+        for term in ("线上", "正式", "prod"):
+            self.assertIn(term, expanded)
+
+        self.assertIn("admin", expand_query_synonyms("商品中心后台地址"))
+        self.assertIn("release", expand_query_synonyms("验收环境地址"))
+
+    def test_leaves_unrelated_query_untouched(self):
+        from .services import expand_query_synonyms
+
+        self.assertEqual(expand_query_synonyms("如何新建商品"), "如何新建商品")
+        self.assertEqual(expand_query_synonyms(""), "")
