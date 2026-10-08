@@ -498,12 +498,24 @@ def _extract_linked_image_urls(text: str) -> List[str]:
     return urls
 
 
-def sanitize_prefetch_query(message: str) -> str:
-    """预检索 query：去掉 URL，避免把整段链接塞进向量检索。"""
+def sanitize_prefetch_query(message: str, keep_hosts: bool = True) -> str:
+    """预检索 query：整段 URL 换成域名，避免长链接污染向量检索，同时保留「这个地址是什么」的关键词。"""
     text = message or ""
-    text = _PLAIN_HTTP_URL_RE.sub(" ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    hosts: List[str] = []
+
+    def _replace(match: re.Match) -> str:
+        if keep_hosts:
+            try:
+                host = (urlparse(match.group("url")).hostname or "").lower()
+            except ValueError:
+                host = ""
+            if host and host not in hosts:
+                hosts.append(host)
+                return f" {host} "
+        return " "
+
+    text = _PLAIN_HTTP_URL_RE.sub(_replace, text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _is_linked_image_url_allowed(url: str) -> bool:
@@ -668,9 +680,7 @@ async def _prepare_agent_loop_human_message(
                 len(linked_image_urls),
             )
     elif "http://" in display_message.lower() or "https://" in display_message.lower():
-        logger.warning(
-            "AgentLoopStreamAPI: Message contains URL text but extractor found 0 valid URLs"
-        )
+        logger.debug("AgentLoopStreamAPI: 消息中的 URL 均非图片链接，不做多模态拉图")
 
     multimodal_image_data_urls = requirement_doc_image_data_urls + linked_image_data_urls
 
@@ -1374,7 +1384,7 @@ class AgentLoopStreamAPIView(View):
             # 纯读网页（query 去掉 URL 后几乎为空）时跳过 KB，避免无关命中干扰
             _skip_kb_for_web = (
                 intent_decision.primary == "web"
-                and len(_prefetch_query) < 4
+                and len(sanitize_prefetch_query(user_message, keep_hosts=False)) < 4
             )
             if (
                 knowledge_base_id

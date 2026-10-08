@@ -287,6 +287,12 @@ def build_intent_hint(decision: IntentDecision, kb_active: bool = True) -> str:
                 "- 禁止用 playwright 仅 page.goto 打开 HTML 报告；会被拦截并要求改用 url-reader。",
             ]
         )
+        if kb_active:
+            lines.append(
+                "- 用户问某个地址/域名「是什么、哪个环境、做什么用」时，先看知识库预检索里有没有这个域名："
+                "有就以知识库说明为准并标注文档名，网页内容只作补充；预检索没有再 knowledge_search 搜域名，"
+                "仍没有才明确说「知识库未收录」并读网页。"
+            )
     if INTENT_PLATFORM in decision.intents and INTENT_WRITE not in decision.intents:
         lines.append(
             "- 查询平台数据：read_skill_content(loca-stude) → execute_skill_script 执行 get_/list_ 只读命令，"

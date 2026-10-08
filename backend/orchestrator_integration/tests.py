@@ -763,8 +763,18 @@ class AgentSmartnessTests(SimpleTestCase):
         q = agent_loop_view.sanitize_prefetch_query(
             "http://192.168.12.216:8765/a.html读这个网页，总结后问我是否保存成用例"
         )
-        self.assertNotIn("192.168", q)
+        self.assertNotIn("a.html", q)
+        self.assertNotIn("8765", q)
+        self.assertIn("192.168.12.216", q)
         self.assertIn("读这个网页", q)
+
+        q = agent_loop_view.sanitize_prefetch_query("https://admin.ps.callie.cc 这个是什么地址")
+        self.assertEqual(q, "admin.ps.callie.cc 这个是什么地址")
+
+        q = agent_loop_view.sanitize_prefetch_query(
+            "https://admin.ps.callie.cc/login", keep_hosts=False
+        )
+        self.assertEqual(q, "")
 
     def test_web_then_ask_save_not_write_primary(self):
         from orchestrator_integration.intent_router import (

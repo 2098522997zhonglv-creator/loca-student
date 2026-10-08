@@ -61,6 +61,7 @@ $script:PidFile = Join-Path $script:LogDir "django.pid"
 $script:OutLog = Join-Path $script:LogDir "django.out.log"
 $script:ErrLog = Join-Path $script:LogDir "django.err.log"
 $script:UpdateLog = Join-Path $script:LogDir "auto_update.log"
+$script:RunningCommitFile = Join-Path $script:LogDir "running.commit"
 $script:WorkerPidFile = Join-Path $script:LogDir "celery.pid"
 $script:WorkerOutLog = Join-Path $script:LogDir "celery.out.log"
 $script:WorkerErrLog = Join-Path $script:LogDir "celery.err.log"
@@ -80,6 +81,21 @@ function Write-UpdateLog {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
     Add-Content -Path $script:UpdateLog -Value $line -Encoding UTF8
     Write-Host $line
+}
+
+function Get-HeadCommit {
+    try {
+        return (git -C $script:RepoRoot rev-parse HEAD 2>$null).Trim()
+    } catch {
+        return ""
+    }
+}
+
+function Get-RunningCommit {
+    if (-not (Test-Path $script:RunningCommitFile)) { return "" }
+    $saved = Get-Content $script:RunningCommitFile -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $saved) { return "" }
+    return $saved.Trim()
 }
 
 function Get-SavedPythonPid {
@@ -161,7 +177,9 @@ function Start-KnowledgeCenter {
         -PassThru
 
     Set-Content -Path $script:PidFile -Value $proc.Id -Encoding ASCII
-    Write-UpdateLog "Started Daphne PID=$($proc.Id) at http://$($script:BindHost):$($script:Port)/"
+    $head = Get-HeadCommit
+    if ($head) { Set-Content -Path $script:RunningCommitFile -Value $head -Encoding ASCII }
+    Write-UpdateLog "Started Daphne PID=$($proc.Id) at http://$($script:BindHost):$($script:Port)/ commit=$head"
 }
 
 function Get-WorkerPid {

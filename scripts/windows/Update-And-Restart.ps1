@@ -22,15 +22,25 @@ git pull --ff-only $script:Remote $script:Branch
 if ($LASTEXITCODE -ne 0) { throw "git pull failed" }
 
 $after = (git rev-parse HEAD).Trim()
-$changed = $before -ne $after
-Write-UpdateLog "After pull HEAD=$after changed=$changed"
+
+# 和「正在运行的服务」比，而不是只和本轮拉取前比：手动 git pull 后也要重启。
+$running = Get-RunningCommit
+$serviceUp = (Get-ListenPids -Port $script:Port).Count -gt 0
+$runningUnknown = $serviceUp -and -not $running
+$base = if ($running) { $running } else { $before }
+$changed = ($base -ne $after) -or $runningUnknown
+Write-UpdateLog "After pull HEAD=$after running=$(if ($running) { $running } else { 'unknown' }) changed=$changed"
 
 $needFrontendBuild = $false
 $needPipInstall = $false
 $needMigrate = $false
 
-if ($changed) {
-    $diffFiles = git diff --name-only "$before" "$after"
+if ($runningUnknown) {
+    # 服务由旧版脚本启动、没有记录提交：无法算差异，按全量更新处理一次。
+    $needFrontendBuild = $true
+    $needMigrate = $true
+} elseif ($changed) {
+    $diffFiles = git diff --name-only "$base" "$after"
     if ($diffFiles | Select-String -Pattern '^(frontend/|package-lock\.json)') {
         $needFrontendBuild = $true
     }
