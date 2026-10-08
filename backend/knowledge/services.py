@@ -2096,7 +2096,9 @@ class VectorStoreManager:
         """获取 Qdrant 客户端"""
         if self._qdrant_client is None:
             self._qdrant_client = self._new_qdrant_client()
-            logger.info("已连接本地嵌入式 Qdrant")
+            from .health import describe_qdrant_target
+
+            logger.info("已创建 Qdrant 客户端: %s", describe_qdrant_target())
         return self._qdrant_client
 
     @property

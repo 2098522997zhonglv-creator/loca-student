@@ -256,3 +256,35 @@ class Bm25ChinesePreprocessTests(TestCase):
             ).split()
         )
         self.assertTrue(q & d, f"expected overlap, q={q}, d={d}")
+
+
+class KnowledgeBackendHealthTests(TestCase):
+    """检索依赖服务挂掉时，要点名具体服务并禁止模型编造答案。"""
+
+    def test_detects_connection_errors(self):
+        from .health import is_connection_error
+
+        self.assertTrue(
+            is_connection_error(OSError("[WinError 10061] 由于目标计算机积极拒绝，无法连接。"))
+        )
+        self.assertTrue(is_connection_error(ConnectionRefusedError("refused")))
+        self.assertFalse(is_connection_error(ValueError("Collection kb_x not found")))
+
+    def test_unavailable_message_names_down_service(self):
+        from . import health
+
+        with patch.dict("os.environ", {"QDRANT_URL": "http://127.0.0.1:6333"}), patch.object(
+            health, "_port_open", side_effect=lambda url, timeout=1.0: "6333" not in url
+        ):
+            msg = health.build_kb_unavailable_message(OSError("10061"))
+        self.assertIn("Qdrant 向量库（http://127.0.0.1:6333）", msg)
+        self.assertNotIn("Embedding 服务", msg)
+        self.assertIn("禁止用通用知识编造答案", msg)
+
+    def test_qdrant_target_description(self):
+        from .health import describe_qdrant_target
+
+        with patch.dict("os.environ", {"QDRANT_URL": "http://127.0.0.1:6333"}):
+            self.assertEqual(describe_qdrant_target(), "远程 Qdrant 服务 http://127.0.0.1:6333")
+        with patch.dict("os.environ", {"QDRANT_URL": ""}):
+            self.assertEqual(describe_qdrant_target(), "本地嵌入式 Qdrant")

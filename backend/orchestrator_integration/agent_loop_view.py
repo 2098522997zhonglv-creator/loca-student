@@ -268,6 +268,10 @@ def _prefetch_knowledge_context(
         except Exception:
             points = -1
 
+        if points < 0:
+            from knowledge.health import build_kb_unavailable_message
+
+            return "## 知识库预检索结果\n" + build_kb_unavailable_message()
         if not counts:
             return "## 知识库预检索结果\n当前知识库没有文档，请先上传后再提问。"
         if counts.get("completed", 0) == 0:
@@ -286,8 +290,10 @@ def _prefetch_knowledge_context(
             "可换关键词，或调用 knowledge_search 换查询语句。"
         )
     except Exception as exc:
+        from knowledge.health import build_kb_unavailable_message
+
         logger.warning("知识库预检索失败 kb=%s: %s", knowledge_base_id, exc)
-        return f"## 知识库预检索结果\n预检索失败: {exc}"
+        return "## 知识库预检索结果\n" + build_kb_unavailable_message(exc)
 
 
 def _build_sse_error_event(exc: Exception) -> Dict[str, Any]:

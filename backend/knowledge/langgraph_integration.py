@@ -566,6 +566,10 @@ def create_knowledge_tool(
                     counts,
                     points,
                 )
+                if points < 0:
+                    from .health import build_kb_unavailable_message
+
+                    return build_kb_unavailable_message()
                 if not counts:
                     return "当前知识库没有文档，请先上传或同步文档后再查询。"
                 if counts.get("completed", 0) == 0:
@@ -603,12 +607,12 @@ def create_knowledge_tool(
 
             return result_text
 
-        except ValueError as e:
-            # 处理向量索引损坏的错误
-            logger.error(f"知识库工具调用失败: {e}")
-            return f"知识库搜索失败: {str(e)}"
         except Exception as e:
+            from .health import build_kb_unavailable_message, is_connection_error
+
             logger.error(f"知识库工具调用失败: {e}")
+            if is_connection_error(e):
+                return build_kb_unavailable_message(e)
             err = str(e)
             # Collection 不存在：清理缓存并给出可操作提示
             if "does not exist" in err or "not found" in err.lower() or "Collection" in err:
@@ -618,7 +622,7 @@ def create_knowledge_tool(
                     "知识库向量索引暂不可用（集合缺失或未重建）。"
                     "请在知识库中重新处理文档，或执行重建索引。"
                 )
-            return f"知识库搜索失败: {err}"
+            return build_kb_unavailable_message(e)
 
     # 设置工具的名称和描述
     knowledge_search.name = "knowledge_search"
