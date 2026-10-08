@@ -102,7 +102,7 @@ _KB_PRIORITY_HINT = """
 - 多步骤或中文引号：steps 用 --steps_file。
 
 ## 引用与诚实
-- 事实结论必须带来源（[预检索N] 或文档名）；多来源冲突须并列说明，勿擅自二选一。
+- 事实结论必须用文档名标注来源，禁止在回答里输出 [预检索N]/[结果N] 等内部编号；多来源冲突须并列说明，勿擅自二选一。
 - 预检索提示索引为空：如实告知重建索引，不要编造。
 - 禁止编造「子代理 / functional_test_case_*」。
 - 已注入预检索时，总结不得写「未使用知识库」。
@@ -114,8 +114,10 @@ _KB_PRIORITY_HINT = """
 
 _CITATION_HINT = """
 ## 引用与冲突约定
-- 回答中的关键事实（地址、账号、规则、接口路径）必须标注来源，如「根据[预检索2]…」。
-- 若下方出现「来源冲突」提示，必须把不同结论并列写出并标明各自来源，不得只保留其中一个。
+- [预检索N]、[结果N] 是内部编号，用户看不到对应内容，回答里禁止出现这类编号。
+- 关键事实（地址、账号、规则、接口路径）必须标注来源，用片段的「来源」文档名，格式为「（来源：《文档名》）」。
+- 同一段落或列表出自同一文档时只在段末标注一次；不要逐行标注，也不要插在句子中间。
+- 若下方出现「来源冲突」提示，必须把不同结论并列写出并标明各自的文档名，不得只保留其中一个。
 - 预检索不足时再 knowledge_search；仍无依据则明确说「知识库未找到」，禁止猜测。
 """.strip()
 
@@ -190,8 +192,12 @@ def _build_prefetch_conflict_note(chunks: list) -> str:
         score = float(item.get("similarity_score") or 0.0)
         if score < 0.35:
             continue
+        meta = item.get("metadata") or {}
+        source = meta.get("source") or meta.get("title") or f"预检索{idx}"
         for host in _extract_hosts_from_text(content):
-            host_to_refs.setdefault(host, []).append(f"预检索{idx}")
+            refs = host_to_refs.setdefault(host, [])
+            if f"《{source}》" not in refs:
+                refs.append(f"《{source}》")
     if len(host_to_refs) < 2:
         return ""
     detail = "；".join(

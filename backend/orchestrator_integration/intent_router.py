@@ -305,7 +305,7 @@ def build_intent_hint(decision: IntentDecision, kb_active: bool = True) -> str:
         lines.append("- 用户要求再检索：可调用 knowledge_search，避免重复相同 query。")
 
     lines.append(
-        "- 事实类结论必须带来源（预检索编号或文档名）；多来源冲突时并列说明，勿擅自二选一。"
+        "- 事实类结论必须用文档名标注来源，不要输出预检索/结果编号；多来源冲突时并列说明，勿擅自二选一。"
     )
     return "\n".join(lines)
 

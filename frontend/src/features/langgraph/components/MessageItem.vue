@@ -564,6 +564,8 @@ const handlePreviewHtml = () => {
 const REQUIREMENT_DOC_ID_RE = /(?:需求文档ID|Requirement Document ID)[:：]\s*([0-9a-fA-F-]{36})/;
 const CODE_LANG_CLASS_RE = /\blanguage-([a-zA-Z0-9_+-]+)\b/;
 const MARKDOWN_IMAGE_RE = /!\[[^\]]*?\]\((?:docimg:\/\/|\/api\/requirements\/documents\/|https?:\/\/)[^)]+\)/;
+// 模型偶尔仍会输出给它看的检索编号，用户侧无对应内容，渲染时去掉
+const INTERNAL_CITATION_RE = /\s*\[(?:预检索|结果)\d+\]/g;
 
 const replaceDocImgPlaceholders = (content: string): string => {
   if (!content || !content.includes('docimg://')) return content;
@@ -727,6 +729,7 @@ const formattedContent = computed(() => {
 
     // 对于AI消息，处理Markdown渲染
     if (props.message.messageType === 'ai') {
+      processedContent = processedContent.replace(INTERNAL_CITATION_RE, '');
       // 如果是流式输出或者已完成的AI消息，都需要处理代码块
       if (props.message.isStreaming || !props.message.isLoading) {
         processedContent = handleStreamingMarkdown(processedContent);
