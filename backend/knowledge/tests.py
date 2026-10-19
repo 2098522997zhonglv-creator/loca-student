@@ -367,3 +367,15 @@ class DingTalkFolderImportGuardTests(TestCase):
         )
         self.assertIsNotNone(msg)
         self.assertIn("文件夹", msg)
+
+
+class DingTalkTemporaryErrorTests(TestCase):
+    def test_temporary_failure_message_is_detected(self):
+        from .dingtalk_client import DingTalkAPIError
+
+        err = DingTalkAPIError(
+            "The request has failed due to a temporary failure of the server."
+        )
+        self.assertTrue(err.is_temporary)
+        self.assertFalse(DingTalkAPIError("The docKey is not a valid encoded docKey").is_temporary)
+        self.assertTrue(DingTalkAPIError("x", status_code=503).is_temporary)

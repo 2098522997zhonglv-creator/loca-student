@@ -420,6 +420,7 @@ class DocumentProcessor:
     def _load_from_dingtalk(self, document: Document) -> List[LangChainDocument]:
         """通过钉钉官方 API 拉取在线文档正文。"""
         from .dingtalk_client import DingTalkClient, DingTalkAPIError
+        from .dingtalk_sync import DingTalkFolderImported, import_folder_from_node
 
         client = DingTalkClient()
         node = None
@@ -429,6 +430,14 @@ class DocumentProcessor:
             except DingTalkAPIError:
                 node = None
         if node:
+            # 重新处理「误导入的文件夹」时：展开同步子文档，而不是当正文失败
+            if (node.get("type") or "").upper() == "FOLDER":
+                report = import_folder_from_node(
+                    knowledge_base=document.knowledge_base,
+                    folder_node=node,
+                    uploader=document.uploader,
+                )
+                raise DingTalkFolderImported(report)
             unsupported = DingTalkClient.describe_unsupported_content(
                 node, document.url or ""
             )
@@ -3013,6 +3022,29 @@ class KnowledgeBaseService:
             return True
 
         except Exception as e:
+            from .dingtalk_sync import DingTalkFolderImported
+
+            if isinstance(e, DingTalkFolderImported):
+                report = e.report
+                msg = (
+                    f"已识别为文件夹「{report.get('folder_name')}」，"
+                    f"子文档：新建 {report.get('created', 0)}，"
+                    f"更新 {report.get('updated', 0)}，"
+                    f"跳过 {report.get('skipped', 0)}，"
+                    f"失败 {report.get('failed', 0)}，"
+                    f"忽略 {report.get('ignored', 0)}"
+                )
+                Document.objects.filter(pk=document.pk).update(
+                    status="completed",
+                    error_message=msg[:1000],
+                    is_archived=True,
+                    processed_at=timezone.now(),
+                )
+                logger.info(
+                    "钉钉文件夹文档已展开导入 doc_id=%s %s", document.id, msg
+                )
+                return True
+
             # 更新状态为失败
             document.status = "failed"
             document.error_message = str(e)

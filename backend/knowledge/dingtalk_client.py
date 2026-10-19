@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import unquote, urlparse
@@ -15,6 +16,19 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.dingtalk.com"
 OAPI_BASE = "https://oapi.dingtalk.com"
+_TEMPORARY_ERROR_HINTS = (
+    "temporary failure",
+    "temporarily unavailable",
+    "service unavailable",
+    "try again",
+    "too many requests",
+    "throttl",
+    "rate limit",
+    "timeout",
+    "timed out",
+    "connection reset",
+    "connection aborted",
+)
 
 # /i/nodes/{dentryUuid}；分享短链 /i/p/ 不能直接当 docKey。
 _NODES_UUID_RE = re.compile(r"/i/nodes/([^/?#]+)", re.IGNORECASE)
@@ -44,6 +58,13 @@ class DingTalkAPIError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.payload = payload
+
+    @property
+    def is_temporary(self) -> bool:
+        if self.status_code in (408, 429, 500, 502, 503, 504):
+            return True
+        text = str(self).lower()
+        return any(hint in text for hint in _TEMPORARY_ERROR_HINTS)
 
 
 class DingTalkClient:
@@ -345,11 +366,14 @@ class DingTalkClient:
             raise DingTalkAPIError("缺少文档 ID，无法拉取正文")
 
         errors: List[str] = []
+        saw_temporary = False
         for key in keys:
             try:
                 blocks = self.get_document_blocks(key)
             except DingTalkAPIError as e:
                 errors.append(f"{key}: {e}")
+                if e.is_temporary:
+                    saw_temporary = True
                 logger.warning("blocks 拉取失败 docKey=%s: %s", key, e)
                 continue
             md = blocks_to_markdown(blocks)
@@ -365,17 +389,20 @@ class DingTalkClient:
             else:
                 errors.append(f"{key}: 文档块为空")
 
-        hint = (
-            "请确认：1) 链接是 /i/nodes/ 节点地址而非 /i/p/ 分享短链；"
-            "2) 目标是钉钉富文本文档（.adoc）而非表格/脑图/附件；"
-            "3) 应用已开通「企业存储文件读权限 Storage.File.Read」，"
-            "且操作人能打开该文档。"
-        )
+        if saw_temporary:
+            hint = "钉钉接口暂时失败，请稍后对该文档点「重新处理」；批量导入时也可稍后再试。"
+        else:
+            hint = (
+                "请确认：1) 链接是 /i/nodes/ 节点地址而非 /i/p/ 分享短链；"
+                "2) 目标是钉钉富文本文档（.adoc）而非表格/脑图/附件；"
+                "3) 应用已开通「企业存储文件读权限 Storage.File.Read」，"
+                "且操作人能打开该文档。"
+            )
         raise DingTalkAPIError(
             f"无法获取文档正文；{'；'.join(errors)}。{hint}"
         )
 
-    def get_document_blocks(self, doc_key: str) -> List[Dict[str, Any]]:
+    def get_document_blocks(self, doc_key: str, *, retries: int = 3) -> List[Dict[str, Any]]:
         token = self.get_access_token()
         operator_id = self.get_operator_union_id()
         blocks: List[Dict[str, Any]] = []
@@ -383,17 +410,14 @@ class DingTalkClient:
         page_size = 50
         while True:
             end_index = start_index + page_size
-            resp = requests.get(
-                f"{API_BASE}/v1.0/doc/suites/documents/{doc_key}/blocks",
-                headers=self._headers(token),
-                params={
-                    "operatorId": operator_id,
-                    "startIndex": start_index,
-                    "endIndex": end_index,
-                },
-                timeout=60,
+            data = self._request_blocks_page(
+                doc_key,
+                token=token,
+                operator_id=operator_id,
+                start_index=start_index,
+                end_index=end_index,
+                retries=retries,
             )
-            data = self._parse_json(resp, expect_ok=True)
             batch = self._extract_blocks_list(data)
             if not batch:
                 break
@@ -402,6 +426,56 @@ class DingTalkClient:
                 break
             start_index = end_index
         return blocks
+
+    def _request_blocks_page(
+        self,
+        doc_key: str,
+        *,
+        token: str,
+        operator_id: str,
+        start_index: int,
+        end_index: int,
+        retries: int = 3,
+    ) -> Dict[str, Any]:
+        last_error: Exception | None = None
+        attempts = max(1, retries)
+        for attempt in range(1, attempts + 1):
+            try:
+                resp = requests.get(
+                    f"{API_BASE}/v1.0/doc/suites/documents/{doc_key}/blocks",
+                    headers=self._headers(token),
+                    params={
+                        "operatorId": operator_id,
+                        "startIndex": start_index,
+                        "endIndex": end_index,
+                    },
+                    timeout=60,
+                )
+                return self._parse_json(resp, expect_ok=True)
+            except (DingTalkAPIError, requests.RequestException) as e:
+                last_error = e
+                temporary = (
+                    e.is_temporary
+                    if isinstance(e, DingTalkAPIError)
+                    else True
+                )
+                if not temporary or attempt >= attempts:
+                    if isinstance(e, DingTalkAPIError):
+                        raise
+                    raise DingTalkAPIError(str(e)) from e
+                sleep_s = min(8.0, 1.5 * attempt)
+                logger.warning(
+                    "blocks 临时失败，%ss 后重试 %s/%s docKey=%s: %s",
+                    sleep_s,
+                    attempt,
+                    attempts,
+                    doc_key,
+                    e,
+                )
+                time.sleep(sleep_s)
+                # 临时失败时刷新 token，避免过期令牌连错
+                token = self.get_access_token(force_refresh=(attempt >= 2))
+        raise DingTalkAPIError(str(last_error) if last_error else "blocks 请求失败")
 
     @staticmethod
     def _extract_blocks_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:

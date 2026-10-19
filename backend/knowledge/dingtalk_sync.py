@@ -17,6 +17,16 @@ from .services import KnowledgeBaseService
 logger = logging.getLogger(__name__)
 
 
+class DingTalkFolderImported(Exception):
+    """处理链路中识别到文件夹并已完成子文档同步。"""
+
+    def __init__(self, report: Dict[str, Any]):
+        self.report = report or {}
+        super().__init__(
+            f"folder_imported:{self.report.get('folder_name') or self.report.get('folder_node_id')}"
+        )
+
+
 def archive_document(document: Document) -> None:
     """软归档：删向量并标记 is_archived。"""
     if document.is_archived:
@@ -355,6 +365,11 @@ def import_folder_from_node(
                 report["documents"].append(
                     {"id": str(doc.id), "title": doc.title, "action": action}
                 )
+            # 批量拉正文时给钉钉一点间隔，降低 temporary failure
+            if action in ("created", "updated"):
+                import time
+
+                time.sleep(0.4)
         except Exception as e:
             report["failed"] += 1
             msg = f"{node.get('name') or node.get('nodeId')}: {e}"
