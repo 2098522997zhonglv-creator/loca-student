@@ -422,33 +422,50 @@ class DocumentProcessor:
         from .dingtalk_client import DingTalkClient, DingTalkAPIError
 
         client = DingTalkClient()
-        doc_key = document.external_id
-        if not doc_key and document.url:
+        node = None
+        if document.url:
             try:
                 node = client.get_node_by_url(document.url)
-                doc_key = node.get("nodeId")
-                if doc_key and not document.external_id:
-                    document.external_id = doc_key
-                    document.external_workspace_id = (
-                        node.get("workspaceId") or document.external_workspace_id
-                    )
-                    document.external_url = node.get("url") or document.url
-                    if not document.title and node.get("name"):
-                        document.title = node.get("name")[:200]
-                    document.save(
-                        update_fields=[
-                            "external_id",
-                            "external_workspace_id",
-                            "external_url",
-                            "title",
-                        ]
-                    )
             except DingTalkAPIError:
-                raise
-        if not doc_key:
-            raise ValueError("钉钉文档缺少 external_id / url，无法加载正文")
+                node = None
+        if node:
+            unsupported = DingTalkClient.describe_unsupported_content(
+                node, document.url or ""
+            )
+            if unsupported:
+                raise ValueError(unsupported)
+            doc_key = DingTalkClient.resolve_document_key(
+                node, document.url or ""
+            )
+            update_fields = []
+            if not document.external_id:
+                document.external_id = node.get("nodeId") or doc_key
+                update_fields.append("external_id")
+            if node.get("workspaceId") and not document.external_workspace_id:
+                document.external_workspace_id = node.get("workspaceId")
+                update_fields.append("external_workspace_id")
+            resolved_url = node.get("url") or document.url
+            if resolved_url and resolved_url != document.external_url:
+                document.external_url = resolved_url
+                document.url = resolved_url
+                update_fields.extend(["external_url", "url"])
+            if node.get("name") and (
+                not document.title or document.title == document.external_id
+            ):
+                document.title = node.get("name")[:200]
+                update_fields.append("title")
+            if update_fields:
+                document.save(update_fields=list(dict.fromkeys(update_fields)))
+        else:
+            doc_key = document.external_id
+            if not doc_key and document.url:
+                doc_key = DingTalkClient.extract_dentry_uuid_from_url(document.url)
+            if not doc_key:
+                raise ValueError("钉钉文档缺少 external_id / url，无法加载正文")
 
-        markdown = client.get_document_markdown(doc_key)
+        markdown = client.get_document_markdown(
+            doc_key, hint_url=document.url or document.external_url or ""
+        )
         # 缓存最近正文，便于排错与离线查看
         Document.objects.filter(pk=document.pk).update(content=markdown)
         document.content = markdown

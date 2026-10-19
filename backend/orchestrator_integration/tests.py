@@ -81,6 +81,24 @@ class LLMFriendlyErrorTests(SimpleTestCase):
         self.assertEqual(result["error_code"], "model_cooldown")
         self.assertIn("冷却中", result["message"])
 
+    def test_unsupported_model_is_friendly_and_not_retried(self):
+        exc = Exception(
+            "Error code: 400 - {'error': {'message': 'model `qwen3-max-2026-01-23` is not supported.', "
+            "'type': 'invalid_request_error', 'param': '', 'code': 'invalid_parameter_error'}}"
+        )
+
+        result = get_user_friendly_llm_error(exc)
+
+        if result is None:
+            raise AssertionError("expected friendly unsupported-model payload")
+        self.assertEqual(result["error_code"], "model_unsupported")
+        self.assertEqual(result["model"], "qwen3-max-2026-01-23")
+        self.assertIn("LLM 配置", result["message"])
+        self.assertFalse(_model_retry_should_retry(exc))
+
+    def test_ordinary_bad_request_is_not_unsupported_model(self):
+        self.assertIsNone(get_user_friendly_llm_error(Exception("Error code: 400 - invalid tool schema")))
+
 
 class LinkedImageUrlExtractionTests(SimpleTestCase):
     def test_extract_plain_http_url_stops_before_chinese_description(self):

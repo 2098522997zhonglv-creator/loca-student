@@ -234,9 +234,44 @@ def _format_retry_after_hint(
     return "".join(parts) or "稍后"
 
 
+_MODEL_UNSUPPORTED_HINTS = (
+    "is not supported",
+    "model_not_found",
+    "does not exist",
+    "unknown model",
+    "invalid model",
+    "no such model",
+)
+_MODEL_NAME_IN_ERROR_RE = re.compile(r"model\s+[`'\"]([^`'\"]+)[`'\"]", re.IGNORECASE)
+
+
+def _is_model_unsupported_error(exc: BaseException) -> bool:
+    if _extract_http_status_code(exc) not in (400, 404, None):
+        return False
+    text = str(exc).lower()
+    return "model" in text and any(hint in text for hint in _MODEL_UNSUPPORTED_HINTS)
+
+
 def get_user_friendly_llm_error(
     exc: Exception, error_field: str = "llm_interaction"
 ) -> Optional[Dict[str, Any]]:
+    if _is_model_unsupported_error(exc):
+        match = _MODEL_NAME_IN_ERROR_RE.search(str(exc))
+        model = match.group(1) if match else None
+        message = (
+            f"模型服务不支持「{model or '当前模型'}」（可能已下线或改名）。"
+            "请到「LLM 配置」把模型名称改为服务当前支持的模型后重试。"
+        )
+        return {
+            "status_code": 400,
+            "message": message,
+            "errors": {error_field: [message]},
+            "error_code": "model_unsupported",
+            "model": model,
+            "reset_seconds": None,
+            "reset_time": None,
+        }
+
     if _is_content_audit_error(exc):
         return {
             "status_code": 400,
@@ -336,6 +371,12 @@ def _model_retry_should_retry(exc: Exception) -> bool:
     if friendly_error and friendly_error.get("error_code") == "model_cooldown":
         logger.warning(
             "ModelRetryMiddleware: 模型冷却中，不重试。error=%s",
+            _fix_mojibake(error_text),
+        )
+        return False
+    if friendly_error and friendly_error.get("error_code") == "model_unsupported":
+        logger.error(
+            "ModelRetryMiddleware: 模型服务不支持当前模型名，不重试，请修改 LLM 配置。error=%s",
             _fix_mojibake(error_text),
         )
         return False

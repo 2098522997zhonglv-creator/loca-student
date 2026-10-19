@@ -393,7 +393,9 @@ export class KnowledgeService {
   /**
    * 上传文档
    */
-  static async uploadDocument(data: UploadDocumentRequest): Promise<Document> {
+  static async uploadDocument(
+    data: UploadDocumentRequest
+  ): Promise<Document | { folder_sync: true; message: string; imported?: number }> {
     const formData = new FormData();
     formData.append('knowledge_base', data.knowledge_base);
     formData.append('title', data.title);
@@ -409,7 +411,9 @@ export class KnowledgeService {
       formData.append('url', data.url);
     }
 
-    const response = await request<Document | Document[]>({
+    const response = await request<
+      Document | Document[] | { folder_sync?: boolean; message?: string; imported?: number }
+    >({
       url: `${API_BASE_URL}/documents/`,
       method: 'POST',
       data: formData,
@@ -424,10 +428,16 @@ export class KnowledgeService {
       if (Array.isArray(responseData)) {
         // 如果返回的是数组，取第一个元素
         return responseData[0];
-      } else {
-        // 如果返回的是单个对象
-        return responseData;
       }
+      if (
+        responseData &&
+        typeof responseData === 'object' &&
+        'folder_sync' in responseData &&
+        (responseData as { folder_sync?: boolean }).folder_sync
+      ) {
+        return responseData as { folder_sync: true; message: string; imported?: number };
+      }
+      return responseData as Document;
     } else {
       throw new Error(response.error || 'Failed to upload document');
     }

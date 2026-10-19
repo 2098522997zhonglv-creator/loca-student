@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone as dt_timezone
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 from django.utils import timezone
@@ -14,6 +15,26 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.dingtalk.com"
 OAPI_BASE = "https://oapi.dingtalk.com"
+
+# /i/nodes/{dentryUuid}；分享短链 /i/p/ 不能直接当 docKey。
+_NODES_UUID_RE = re.compile(r"/i/nodes/([^/?#]+)", re.IGNORECASE)
+_SHARE_SHORT_RE = re.compile(r"/i/p/", re.IGNORECASE)
+# blocks 接口只覆盖钉钉富文本文档；表格/脑图等要用别的能力。
+_UNSUPPORTED_CONTENT_EXTENSIONS = {
+    "axsheet",
+    "xlsx",
+    "xls",
+    "csv",
+    "mindmap",
+    "whiteboard",
+    "able",
+    "flippage",
+    "ppt",
+    "pptx",
+    "pdf",
+    "doc",
+    "docx",
+}
 
 
 class DingTalkAPIError(Exception):
@@ -167,7 +188,75 @@ class DingTalkClient:
                 return ws
         raise DingTalkAPIError(f"未找到钉钉知识库: {workspace_id}")
 
+    @staticmethod
+    def extract_dentry_uuid_from_url(url: str) -> Optional[str]:
+        """从 /i/nodes/{uuid} 链接提取 dentryUuid；分享短链 /i/p/ 返回 None。"""
+        if not url:
+            return None
+        text = unquote(url.strip())
+        if _SHARE_SHORT_RE.search(text):
+            return None
+        match = _NODES_UUID_RE.search(text)
+        if match:
+            return match.group(1).strip() or None
+        # document/edit?dentryKey=... 不是 blocks 可用的 docKey，交给 queryByUrl 解析
+        return None
+
+    @staticmethod
+    def is_share_short_url(url: str) -> bool:
+        return bool(url and _SHARE_SHORT_RE.search(unquote(url)))
+
+    @classmethod
+    def resolve_document_key(cls, node: Dict[str, Any], fallback_url: str = "") -> str:
+        """正文接口优先用 URL 里的 dentryUuid，其次用 wiki 的 nodeId。"""
+        for candidate in (
+            cls.extract_dentry_uuid_from_url(node.get("url") or ""),
+            cls.extract_dentry_uuid_from_url(fallback_url),
+            (node.get("nodeId") or "").strip(),
+        ):
+            if candidate:
+                return candidate
+        raise DingTalkAPIError("节点缺少可用的文档 ID（dentryUuid / nodeId）")
+
+    @classmethod
+    def describe_unsupported_content(cls, node: Dict[str, Any], url: str = "") -> Optional[str]:
+        """若节点不是可拉取正文的钉钉富文本，返回原因；否则返回 None。"""
+        category = (node.get("category") or "").upper()
+        node_type = (node.get("type") or "").upper()
+        extension = (node.get("extension") or "").lower().lstrip(".")
+        name = node.get("name") or node.get("nodeId") or "该节点"
+
+        if cls.is_share_short_url(url) and not cls.extract_dentry_uuid_from_url(
+            node.get("url") or ""
+        ):
+            return (
+                f"「{name}」链接是钉钉分享短链（/i/p/）。请改用知识库里的节点链接"
+                "（形如 https://alidocs.dingtalk.com/i/nodes/xxxxx）后再导入。"
+            )
+
+        if node_type == "FOLDER":
+            return (
+                f"「{name}」是文件夹，不能按文档导入正文。"
+                "请绑定目录同步，或贴单个文档链接。"
+            )
+
+        if extension in _UNSUPPORTED_CONTENT_EXTENSIONS:
+            return (
+                f"「{name}」类型为 .{extension}，当前只支持钉钉富文本文档（.adoc）。"
+                "表格请导出为 xlsx 后上传；脑图/白板请导出为文本或截图说明后再导入。"
+            )
+
+        if category and category not in ("ALIDOC",):
+            return (
+                f"「{name}」类别为 {category}，不是钉钉在线文档（ALIDOC）。"
+                "本地附件/图片等请下载后上传到知识库。"
+            )
+        return None
+
     def get_node_by_url(self, url: str) -> Dict[str, Any]:
+        if self.is_share_short_url(url):
+            # 短链有时仍能解析，但失败时错误会更明确；先尝试 API。
+            logger.info("钉钉链接为分享短链，尝试 queryByUrl: %s", url[:120])
         token = self.get_access_token()
         operator_id = self.get_operator_union_id()
         resp = requests.post(
@@ -181,6 +270,9 @@ class DingTalkClient:
         node = data.get("node") or data
         if not node.get("nodeId"):
             raise DingTalkAPIError("通过链接未解析到节点", resp.status_code, data)
+        if not node.get("url"):
+            node = dict(node)
+            node["url"] = url
         return node
 
     def get_node(self, node_id: str) -> Dict[str, Any]:
@@ -236,67 +328,51 @@ class DingTalkClient:
             if (node.get("type") or "").upper() == "FOLDER" or node.get("hasChildren"):
                 yield from self.walk_nodes(node["nodeId"], path)
 
-    def get_document_markdown(self, doc_key: str) -> str:
-        """拉取文档正文并转为 Markdown。优先 blocks，失败再尝试 content API。"""
-        blocks_error: Exception | None = None
-        try:
-            blocks = self.get_document_blocks(doc_key)
+    def get_document_markdown(self, doc_key: str, hint_url: str = "") -> str:
+        """拉取文档正文并转为 Markdown。
+
+        钉钉开放平台没有「GET /content 读 Markdown」接口；
+        /content 是写入（POST）。正文只能走 blocks。
+        """
+        keys: List[str] = []
+        for candidate in (
+            self.extract_dentry_uuid_from_url(hint_url),
+            (doc_key or "").strip(),
+        ):
+            if candidate and candidate not in keys:
+                keys.append(candidate)
+        if not keys:
+            raise DingTalkAPIError("缺少文档 ID，无法拉取正文")
+
+        errors: List[str] = []
+        for key in keys:
+            try:
+                blocks = self.get_document_blocks(key)
+            except DingTalkAPIError as e:
+                errors.append(f"{key}: {e}")
+                logger.warning("blocks 拉取失败 docKey=%s: %s", key, e)
+                continue
             md = blocks_to_markdown(blocks)
             if md.strip():
                 return md
             if blocks:
-                # 有块但转不出文本，仍返回空串标记，继续尝试 content
                 logger.warning(
                     "blocks 非空但转 Markdown 为空 docKey=%s count=%s",
-                    doc_key,
+                    key,
                     len(blocks),
                 )
-        except DingTalkAPIError as e:
-            blocks_error = e
-            logger.warning("blocks 拉取失败，尝试 content API: %s", e)
+                errors.append(f"{key}: 有块但无法提取文本（可能是表格/脑图等非正文块）")
+            else:
+                errors.append(f"{key}: 文档块为空")
 
-        token = self.get_access_token()
-        operator_id = self.get_operator_union_id()
-        resp = requests.get(
-            f"{API_BASE}/v1.0/doc/suites/documents/{doc_key}/content",
-            headers=self._headers(token),
-            params={"operatorId": operator_id, "formatType": "markdown"},
-            timeout=60,
+        hint = (
+            "请确认：1) 链接是 /i/nodes/ 节点地址而非 /i/p/ 分享短链；"
+            "2) 目标是钉钉富文本文档（.adoc）而非表格/脑图/附件；"
+            "3) 应用已开通「企业存储文件读权限 Storage.File.Read」，"
+            "且操作人能打开该文档。"
         )
-        if resp.status_code == 200:
-            data = self._parse_json(resp)
-            content = data.get("content") or data.get("data")
-            result = data.get("result")
-            if content in (None, "") and isinstance(result, dict):
-                content = (
-                    result.get("content")
-                    or result.get("markdown")
-                    or result.get("data")
-                )
-            if isinstance(content, dict):
-                content = content.get("markdown") or content.get("text") or str(content)
-            if content and str(content).strip():
-                return str(content)
-        # 汇总真实错误，避免只看到笼统的 dockey
-        detail_parts = []
-        if blocks_error:
-            detail_parts.append(f"blocks: {blocks_error}")
-        try:
-            err_body = resp.json() if resp.content else {}
-        except ValueError:
-            err_body = {"raw": (resp.text or "")[:500]}
-        content_msg = (
-            err_body.get("message")
-            or err_body.get("errmsg")
-            or err_body.get("code")
-            or (resp.text or "")[:300]
-            or f"HTTP {resp.status_code}"
-        )
-        detail_parts.append(f"content: {content_msg}")
         raise DingTalkAPIError(
-            f"无法获取文档正文 docKey={doc_key}；" + "；".join(detail_parts),
-            getattr(resp, "status_code", None),
-            err_body,
+            f"无法获取文档正文；{'；'.join(errors)}。{hint}"
         )
 
     def get_document_blocks(self, doc_key: str) -> List[Dict[str, Any]]:

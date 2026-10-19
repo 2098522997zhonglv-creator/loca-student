@@ -697,7 +697,7 @@ class DocumentViewSet(BaseModelViewSet):
             url = serializer.validated_data["url"]
             title = serializer.validated_data.get("title") or ""
             try:
-                document = import_from_url(
+                result = import_from_url(
                     kb, url, title=title, uploader=request.user
                 )
             except DingTalkAPIError as e:
@@ -707,7 +707,29 @@ class DocumentViewSet(BaseModelViewSet):
                 return Response(
                     {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
-            out = DocumentSerializer(document, context={"request": request})
+            if isinstance(result, dict) and result.get("kind") == "folder_sync":
+                imported = (
+                    result.get("created", 0)
+                    + result.get("updated", 0)
+                    + result.get("skipped", 0)
+                )
+                return Response(
+                    {
+                        "folder_sync": True,
+                        "message": (
+                            f"已导入文件夹「{result.get('folder_name')}」下的文档："
+                            f"新建 {result.get('created', 0)}，"
+                            f"更新 {result.get('updated', 0)}，"
+                            f"跳过 {result.get('skipped', 0)}，"
+                            f"失败 {result.get('failed', 0)}，"
+                            f"忽略非文档 {result.get('ignored', 0)}。"
+                        ),
+                        "imported": imported,
+                        **result,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            out = DocumentSerializer(result, context={"request": request})
             return Response(out.data, status=status.HTTP_201_CREATED)
         return super().create(request, *args, **kwargs)
 

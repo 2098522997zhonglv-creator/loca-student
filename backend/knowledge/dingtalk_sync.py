@@ -265,8 +265,124 @@ def sync_binding(binding_id: str, uploader=None) -> Dict[str, Any]:
         raise
 
 
-def import_from_url(knowledge_base, url: str, title: str = "", uploader=None) -> Document:
-    """贴链接导入：解析节点后 upsert 并处理。"""
+def _is_importable_alidoc_node(node: Dict[str, Any]) -> bool:
+    """与目录绑定同步一致：只导入钉钉富文本文档。"""
+    node_type = (node.get("type") or "").upper()
+    category = (node.get("category") or "").upper()
+    if not node.get("nodeId"):
+        return False
+    if node_type == "FOLDER":
+        return False
+    if category and category != "ALIDOC":
+        return False
+    if node_type and node_type != "FILE":
+        return False
+    extension = (node.get("extension") or "").lower().lstrip(".")
+    if extension in {
+        "axsheet",
+        "xlsx",
+        "xls",
+        "csv",
+        "mindmap",
+        "whiteboard",
+        "able",
+        "flippage",
+        "ppt",
+        "pptx",
+        "pdf",
+        "doc",
+        "docx",
+    }:
+        return False
+    return True
+
+
+def import_folder_from_node(
+    *,
+    knowledge_base,
+    folder_node: Dict[str, Any],
+    uploader=None,
+) -> Dict[str, Any]:
+    """把文件夹下的钉钉富文本文档全部 upsert 进知识库。"""
+    client = DingTalkClient()
+    folder_id = folder_node.get("nodeId")
+    folder_name = folder_node.get("name") or folder_id or "文件夹"
+    if not folder_id:
+        raise DingTalkAPIError("文件夹缺少 nodeId")
+
+    # 若之前误把文件夹本身建成了 Document，清掉这条无效记录
+    bogus = Document.objects.filter(
+        knowledge_base=knowledge_base,
+        document_type="dingtalk",
+        external_id=folder_id,
+    ).first()
+    if bogus:
+        try:
+            archive_document(bogus)
+        except Exception as e:
+            logger.warning("归档误导入的文件夹文档失败 doc=%s: %s", bogus.id, e)
+
+    report: Dict[str, Any] = {
+        "kind": "folder_sync",
+        "folder_name": folder_name,
+        "folder_node_id": folder_id,
+        "created": 0,
+        "updated": 0,
+        "skipped": 0,
+        "failed": 0,
+        "ignored": 0,
+        "errors": [],
+        "documents": [],
+    }
+    for node in client.walk_nodes(folder_id, path_prefix=folder_name):
+        if not _is_importable_alidoc_node(node):
+            if (node.get("type") or "").upper() != "FOLDER":
+                report["ignored"] += 1
+            continue
+        try:
+            doc, action = upsert_dingtalk_document(
+                knowledge_base=knowledge_base,
+                node=node,
+                uploader=uploader,
+                path=node.get("_path") or "",
+                process=True,
+            )
+            if action in ("created", "updated", "skipped"):
+                report[action] += 1
+            else:
+                report["failed"] += 1
+            if doc is not None:
+                report["documents"].append(
+                    {"id": str(doc.id), "title": doc.title, "action": action}
+                )
+        except Exception as e:
+            report["failed"] += 1
+            msg = f"{node.get('name') or node.get('nodeId')}: {e}"
+            report["errors"].append(msg[:300])
+            logger.exception("文件夹导入节点失败: %s", msg)
+
+    imported = report["created"] + report["updated"] + report["skipped"]
+    if imported == 0 and report["failed"] == 0:
+        raise DingTalkAPIError(
+            f"文件夹「{folder_name}」下没有可导入的钉钉富文本文档"
+            f"（已忽略 {report['ignored']} 个非文档节点）。"
+            "表格/脑图请导出后上传，或贴单篇 .adoc 文档链接。"
+        )
+    logger.info(
+        "钉钉文件夹导入 kb=%s folder=%s created=%s updated=%s skipped=%s failed=%s ignored=%s",
+        knowledge_base.id,
+        folder_id,
+        report["created"],
+        report["updated"],
+        report["skipped"],
+        report["failed"],
+        report["ignored"],
+    )
+    return report
+
+
+def import_from_url(knowledge_base, url: str, title: str = "", uploader=None):
+    """贴链接导入：单篇文档返回 Document；文件夹返回同步报告 dict。"""
     client = DingTalkClient()
     client.ensure_enabled()
     node = client.get_node_by_url(url)
@@ -276,6 +392,17 @@ def import_from_url(knowledge_base, url: str, title: str = "", uploader=None) ->
     if not node.get("url"):
         node = dict(node)
         node["url"] = url
+
+    if (node.get("type") or "").upper() == "FOLDER":
+        return import_folder_from_node(
+            knowledge_base=knowledge_base,
+            folder_node=node,
+            uploader=uploader,
+        )
+
+    unsupported = DingTalkClient.describe_unsupported_content(node, url)
+    if unsupported:
+        raise DingTalkAPIError(unsupported)
     doc, action = upsert_dingtalk_document(
         knowledge_base=knowledge_base,
         node=node,

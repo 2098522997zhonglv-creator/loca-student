@@ -138,8 +138,8 @@ const text = computed(() => (
         webLink: 'Web link',
         dingtalkDoc: 'DingTalk doc',
         dingtalkLink: 'DingTalk link',
-        dingtalkLinkPlaceholder: 'Paste alidocs.dingtalk.com link',
-        dingtalkHint: 'Requires DingTalk sync config (AppKey / AppSecret / operator). Duplicate links update the existing document.',
+        dingtalkLinkPlaceholder: 'Paste alidocs.dingtalk.com doc or folder link',
+        dingtalkHint: 'Requires DingTalk sync config. Paste a document link, or a folder link to import all rich-text docs under it. Spreadsheets/mind maps are skipped — export and upload those separately.',
         documentTitle: 'Document title',
         documentTitlePlaceholder: 'Enter document title',
         selectFile: 'Select file',
@@ -170,8 +170,8 @@ const text = computed(() => (
         webLink: '网页链接',
         dingtalkDoc: '钉钉文档',
         dingtalkLink: '钉钉文档链接',
-        dingtalkLinkPlaceholder: '粘贴 alidocs.dingtalk.com 文档链接',
-        dingtalkHint: '需先在「钉钉配置」中填写 AppKey / AppSecret / 操作人。同一链接重复导入会更新已有文档。',
+        dingtalkLinkPlaceholder: '粘贴 alidocs.dingtalk.com 文档或文件夹链接',
+        dingtalkHint: '需先配置钉钉同步。可贴单篇文档，也可贴文件夹链接以导入其下全部富文本文档。表格/脑图会被跳过，请导出后单独上传。',
         documentTitle: '文档标题',
         documentTitlePlaceholder: '请输入文档标题',
         selectFile: '选择文件',
@@ -417,9 +417,19 @@ const handleSubmit = async () => {
       }
     }, 200);
 
-    await KnowledgeService.uploadDocument(uploadData);
+    const uploaded = await KnowledgeService.uploadDocument(uploadData);
 
     uploadProgress.value = 100;
+    if (
+      uploaded &&
+      typeof uploaded === 'object' &&
+      'folder_sync' in uploaded &&
+      (uploaded as { folder_sync?: boolean }).folder_sync
+    ) {
+      Message.success(
+        (uploaded as { message?: string }).message || '文件夹导入完成'
+      );
+    }
 
     setTimeout(() => {
       emit('submit');

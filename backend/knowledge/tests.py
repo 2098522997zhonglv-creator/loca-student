@@ -309,3 +309,61 @@ class QuerySynonymExpansionTests(TestCase):
 
         self.assertEqual(expand_query_synonyms("如何新建商品"), "如何新建商品")
         self.assertEqual(expand_query_synonyms(""), "")
+
+
+class DingTalkDocKeyHelpersTests(TestCase):
+    def test_extract_dentry_uuid_from_nodes_url(self):
+        from .dingtalk_client import DingTalkClient
+
+        self.assertEqual(
+            DingTalkClient.extract_dentry_uuid_from_url(
+                "https://alidocs.dingtalk.com/i/nodes/7NkDwLng8ZM50DoEfx1BP5vBJKMEvZBY?doc_type=wiki_doc"
+            ),
+            "7NkDwLng8ZM50DoEfx1BP5vBJKMEvZBY",
+        )
+        self.assertIsNone(
+            DingTalkClient.extract_dentry_uuid_from_url(
+                "https://alidocs.dingtalk.com/i/p/Y7kmbokZp3pgGLq2"
+            )
+        )
+
+    def test_describe_unsupported_spreadsheet(self):
+        from .dingtalk_client import DingTalkClient
+
+        msg = DingTalkClient.describe_unsupported_content(
+            {"name": "地址表", "type": "FILE", "category": "ALIDOC", "extension": "axsheet"},
+            "https://alidocs.dingtalk.com/i/nodes/abc",
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("axsheet", msg)
+
+    def test_alidoc_is_supported(self):
+        from .dingtalk_client import DingTalkClient
+
+        self.assertIsNone(
+            DingTalkClient.describe_unsupported_content(
+                {"name": "说明", "type": "FILE", "category": "ALIDOC", "extension": "adoc"},
+                "https://alidocs.dingtalk.com/i/nodes/abc",
+            )
+        )
+
+
+class DingTalkFolderImportGuardTests(TestCase):
+    def test_folder_is_not_importable_as_document(self):
+        from .dingtalk_sync import _is_importable_alidoc_node
+        from .dingtalk_client import DingTalkClient
+
+        folder = {
+            "nodeId": "7NkDwLng8ZM50DoEfx1BP5vBJKMEvZBY",
+            "name": "04_版本",
+            "type": "FOLDER",
+            "category": "OTHER",
+            "extension": None,
+        }
+        self.assertFalse(_is_importable_alidoc_node(folder))
+        msg = DingTalkClient.describe_unsupported_content(
+            folder,
+            "https://alidocs.dingtalk.com/i/nodes/7NkDwLng8ZM50DoEfx1BP5vBJKMEvZBY",
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("文件夹", msg)
