@@ -1287,15 +1287,24 @@ class AgentLoopStreamAPIView(View):
             # 6.1 意图路由：按用户话术裁剪工具，减少误调
             from orchestrator_integration.intent_router import apply_intent_routing
 
-            intent_decision, tools, intent_hint = apply_intent_routing(
-                user_message, tools, kb_active=kb_qa_mode
+            _prefetch_query_early = sanitize_prefetch_query(user_message)
+            intent_decision, tools, intent_hint, kb_policy = apply_intent_routing(
+                user_message,
+                tools,
+                kb_active=kb_qa_mode,
+                prefetch_query=sanitize_prefetch_query(
+                    user_message, keep_hosts=False
+                ),
             )
             logger.info(
-                "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s tools=%s",
+                "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s kb_policy=%s tools=%s",
                 intent_decision.primary,
                 sorted(intent_decision.intents),
+                kb_policy.reason,
                 [getattr(t, "name", str(t)) for t in tools],
             )
+            _kb_cache_hit = False
+            _should_record_qa_cache = False
 
             # 7. 获取或创建 ChatSession（使用 get_or_create 避免竞态条件）
             prompt_obj = None
@@ -1334,13 +1343,6 @@ class AgentLoopStreamAPIView(View):
                 include_skills=True,
             )
 
-            # 极短续写指令跳过向量预检索，避免无意义 query
-            _msg_stripped = (user_message or "").strip()
-            _skip_prefetch = len(_msg_stripped) <= 16 and any(
-                k in _msg_stripped
-                for k in ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
-            )
-
             # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
             effective_prompt = (
                 (effective_prompt or "").rstrip()
@@ -1351,11 +1353,16 @@ class AgentLoopStreamAPIView(View):
             ).strip()
 
             # 8.0a 账号行为偏好预检索（失败静默）
-            _prefetch_query = sanitize_prefetch_query(user_message)
+            _prefetch_query = _prefetch_query_early
+            _skip_prefetch = bool(kb_policy.skip_prefetch)
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,
                     record_user_correction_behavior,
+                )
+                from orchestrator_integration.qa_answer_cache import (
+                    invalidate_kb_qa_answers,
+                    should_invalidate_for_message,
                 )
 
                 await sync_to_async(record_user_correction_behavior)(
@@ -1363,6 +1370,21 @@ class AgentLoopStreamAPIView(View):
                     user_message,
                     project_id=int(project_id) if project_id else None,
                 )
+                # 纠错：同用户同知识库相近问句缓存失效，并强制本轮查库
+                if (
+                    knowledge_base_id
+                    and use_knowledge_base
+                    and should_invalidate_for_message(user_message)
+                ):
+                    invalidated = await sync_to_async(invalidate_kb_qa_answers)(
+                        request.user.id,
+                        knowledge_base_id,
+                        _prefetch_query or user_message,
+                    )
+                    logger.info(
+                        "AgentLoopStreamAPI: 纠错失效 QA 缓存 count=%s",
+                        invalidated,
+                    )
                 if not _skip_prefetch and _prefetch_query:
                     behavior_prefetch = await sync_to_async(
                         prefetch_user_behavior_context
@@ -1380,17 +1402,74 @@ class AgentLoopStreamAPIView(View):
             except Exception as e:
                 logger.warning("AgentLoopStreamAPI: 账号行为记忆跳过: %s", e)
 
-            # 8.0b 启用知识库时：预检索并注入，避免模型不调工具就空答
-            # 纯读网页（query 去掉 URL 后几乎为空）时跳过 KB，避免无关命中干扰
-            _skip_kb_for_web = (
-                intent_decision.primary == "web"
-                and len(sanitize_prefetch_query(user_message, keep_hosts=False)) < 4
-            )
+            # 8.0b 启用知识库时：先尝试同用户同库历史答案，再决定是否预检索
+            if knowledge_base_id and use_knowledge_base and _skip_prefetch:
+                skip_note = {
+                    "continue": "本轮为续写指令，已跳过知识库预检索；请基于对话历史继续生成，无需再调 knowledge_search。",
+                    "chitchat": "本轮为寒暄/短确认，已跳过知识库；直接简短回复即可。",
+                    "meta": "本轮为对上一轮回答的追问，已跳过知识库；请基于对话历史说明，无需 knowledge_search。",
+                    "web_only": "本轮以读网页为主且无有效检索词，已跳过知识库预检索。",
+                    "write_approval": "本轮为写入确认，已跳过知识库预检索。",
+                }.get(kb_policy.reason, "本轮已跳过知识库预检索。")
+                effective_prompt = (
+                    (effective_prompt or "").rstrip()
+                    + f"\n\n（{skip_note}）"
+                ).strip()
+                logger.info(
+                    "AgentLoopStreamAPI: 跳过知识库预检索 reason=%s msg=%r",
+                    kb_policy.reason,
+                    (user_message or "")[:20],
+                )
+            elif (
+                knowledge_base_id
+                and use_knowledge_base
+                and kb_policy.try_answer_cache
+                and not kb_policy.force_kb
+                and _prefetch_query
+            ):
+                try:
+                    from orchestrator_integration.qa_answer_cache import (
+                        format_cached_answer_context,
+                        lookup_kb_qa_answer,
+                    )
+
+                    cache_hit = await sync_to_async(lookup_kb_qa_answer)(
+                        request.user.id,
+                        knowledge_base_id,
+                        _prefetch_query,
+                    )
+                    if cache_hit:
+                        _kb_cache_hit = True
+                        cached_ctx = format_cached_answer_context(cache_hit)
+                        effective_prompt = (
+                            (effective_prompt or "").rstrip()
+                            + "\n\n"
+                            + cached_ctx
+                        ).strip()
+                        # 命中缓存后去掉 knowledge_search，避免重复打库
+                        tools = [
+                            t
+                            for t in tools
+                            if getattr(t, "name", None) != "knowledge_search"
+                        ]
+                        logger.info(
+                            "AgentLoopStreamAPI: QA 缓存命中，跳过预检索 score=%.3f",
+                            float(cache_hit.get("score") or 0),
+                        )
+                        yield create_sse_data(
+                            {
+                                "type": "status",
+                                "message": "命中历史回答，正在生成…",
+                            }
+                        )
+                except Exception as e:
+                    logger.warning("AgentLoopStreamAPI: QA 缓存查找跳过: %s", e)
+
             if (
                 knowledge_base_id
                 and use_knowledge_base
                 and not _skip_prefetch
-                and not _skip_kb_for_web
+                and not _kb_cache_hit
                 and _prefetch_query
             ):
                 yield create_sse_data(
@@ -1405,33 +1484,22 @@ class AgentLoopStreamAPIView(View):
                     similarity_threshold,
                     top_k,
                 )
+                _should_record_qa_cache = True
                 effective_prompt = (
                     (effective_prompt or "").rstrip()
                     + "\n\n"
                     + (kb_prefetch or "")
                 ).strip()
                 logger.info(
-                    "AgentLoopStreamAPI: 已注入知识库预检索 context_len=%s",
+                    "AgentLoopStreamAPI: 已注入知识库预检索 context_len=%s force=%s",
                     len(kb_prefetch or ""),
+                    kb_policy.force_kb,
                 )
                 yield create_sse_data(
                     {
                         "type": "status",
                         "message": "知识库检索完成，正在生成回答…",
                     }
-                )
-            elif knowledge_base_id and use_knowledge_base and _skip_prefetch:
-                effective_prompt = (
-                    (effective_prompt or "").rstrip()
-                    + "\n\n（本轮为续写指令，已跳过知识库预检索；请基于对话历史继续生成，无需再调 knowledge_search。）"
-                ).strip()
-                logger.info(
-                    "AgentLoopStreamAPI: 跳过知识库预检索（续写短指令） msg=%r",
-                    (user_message or "")[:20],
-                )
-            elif knowledge_base_id and use_knowledge_base and _skip_kb_for_web:
-                logger.info(
-                    "AgentLoopStreamAPI: 跳过知识库预检索（读网页主意图且无有效检索词）"
                 )
 
             # 8.1 如果需要生成脚本，追加脚本生成指令
@@ -1833,6 +1901,7 @@ class AgentLoopStreamAPIView(View):
 
                 # 16. 处理结束状态
                 # 无论是否发生 interrupt，都需要计算和发送 context_update
+                all_messages = []
                 try:
                     current_state = await agent.aget_state(invoke_config)
                     all_messages = (
@@ -1898,6 +1967,53 @@ class AgentLoopStreamAPIView(View):
                             logger.info(f"AgentLoopStreamAPI: Scheduled title auto-summarization for session {session_id}")
                     except Exception as summarize_err:
                         logger.error(f"AgentLoopStreamAPI: Failed to auto-summarize title: {summarize_err}", exc_info=True)
+
+                # 同用户同知识库：本轮若实际查库且产出实质回答，写入答案缓存
+                if (
+                    not user_stopped
+                    and not interrupt_detected
+                    and knowledge_base_id
+                    and use_knowledge_base
+                    and _should_record_qa_cache
+                    and not _kb_cache_hit
+                ):
+                    try:
+                        from orchestrator_integration.qa_answer_cache import (
+                            extract_sources_from_answer,
+                            record_kb_qa_answer,
+                        )
+
+                        final_ai_text = ""
+                        for msg in reversed(all_messages or []):
+                            if isinstance(msg, AIMessage) and not getattr(
+                                msg, "tool_calls", None
+                            ):
+                                content = msg.content
+                                if isinstance(content, list):
+                                    content = "".join(
+                                        (
+                                            c.get("text", "")
+                                            if isinstance(c, dict)
+                                            else (c if isinstance(c, str) else "")
+                                        )
+                                        for c in content
+                                    )
+                                final_ai_text = str(content or "").strip()
+                                if final_ai_text:
+                                    break
+                        if final_ai_text:
+                            await sync_to_async(record_kb_qa_answer)(
+                                request.user.id,
+                                knowledge_base_id,
+                                _prefetch_query or user_message,
+                                final_ai_text,
+                                project_id=int(project_id) if project_id else None,
+                                sources=extract_sources_from_answer(final_ai_text),
+                            )
+                    except Exception as cache_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: 写入 QA 缓存失败: %s", cache_err
+                        )
 
                 if user_stopped:
                     yield create_sse_data(

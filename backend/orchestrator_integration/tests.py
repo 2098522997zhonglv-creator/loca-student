@@ -488,6 +488,66 @@ class AgentSmartnessTests(SimpleTestCase):
         web = classify_user_intent("读取 https://example.com/docs 的内容")
         self.assertIn(INTENT_WEB, web.intents)
 
+    def test_kb_policy_skip_chitchat_and_force_on_correction(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_CHITCHAT,
+            classify_user_intent,
+            decide_kb_access_policy,
+            filter_tools_by_intent,
+        )
+
+        chitchat = classify_user_intent("你好")
+        self.assertIn(INTENT_CHITCHAT, chitchat.intents)
+        policy = decide_kb_access_policy("你好", chitchat)
+        self.assertTrue(policy.skip_prefetch)
+        self.assertFalse(policy.force_kb)
+        self.assertFalse(policy.allow_knowledge_search)
+
+        meta_policy = decide_kb_access_policy("为什么你刚才没找到")
+        self.assertTrue(meta_policy.skip_prefetch)
+        self.assertEqual(meta_policy.reason, "meta")
+
+        force = decide_kb_access_policy("不对，应该是 siteadmin.callie.com")
+        self.assertTrue(force.force_kb)
+        self.assertFalse(force.try_answer_cache)
+
+        reask = decide_kb_access_policy("再查一下知识库")
+        self.assertTrue(reask.force_kb)
+
+        tools = [
+            self._FakeTool("knowledge_search"),
+            self._FakeTool("read_skill_content"),
+            self._FakeTool("execute_skill_script"),
+        ]
+        names = [
+            t.name
+            for t in filter_tools_by_intent(
+                tools, chitchat, kb_active=True, kb_policy=policy
+            )
+        ]
+        self.assertNotIn("knowledge_search", names)
+        self.assertNotIn("execute_skill_script", names)
+
+    def test_qa_cache_format_and_source_extract(self):
+        from orchestrator_integration.qa_answer_cache import (
+            extract_sources_from_answer,
+            format_cached_answer_context,
+        )
+
+        ctx = format_cached_answer_context(
+            {
+                "score": 0.91,
+                "answer": "生产地址是 a.example.com（来源：《环境说明》）",
+                "sources": ["环境说明"],
+            }
+        )
+        self.assertIn("历史已答", ctx)
+        self.assertIn("a.example.com", ctx)
+        self.assertEqual(
+            extract_sources_from_answer("见《环境说明》与《账号手册》"),
+            ["环境说明", "账号手册"],
+        )
+
     def test_filter_drops_execute_on_pure_qa(self):
         from orchestrator_integration.intent_router import (
             classify_user_intent,
@@ -639,15 +699,17 @@ class AgentSmartnessTests(SimpleTestCase):
             ("确认", INTENT_WRITE),
             ("好的，写入吧", INTENT_WRITE),
         ):
-            decision, kept, _ = apply_intent_routing(text, tools)
+            decision, kept, _, _policy = apply_intent_routing(text, tools)
             self.assertIn(intent, decision.intents, text)
             self.assertIn("execute_skill_script", [t.name for t in kept], text)
 
-        decision, kept, _ = apply_intent_routing("先生成一条给我看看", tools)
+        decision, kept, _, _policy = apply_intent_routing("先生成一条给我看看", tools)
         self.assertNotIn("execute_skill_script", [t.name for t in kept])
 
         # 未挂知识库时，纯问答也不裁执行工具
-        _, kept, hint = apply_intent_routing("帮我优化一下", tools, kb_active=False)
+        _, kept, hint, _policy = apply_intent_routing(
+            "帮我优化一下", tools, kb_active=False
+        )
         self.assertIn("execute_skill_script", [t.name for t in kept])
         self.assertNotIn("未挂载 execute_skill_script", hint)
 

@@ -15,6 +15,8 @@ INTENT_WEB = "web"
 INTENT_WRITE = "write"
 INTENT_BROWSER = "browser"
 INTENT_PLATFORM = "platform"
+INTENT_CHITCHAT = "chitchat"
+INTENT_META = "meta"
 
 _ALL_INTENTS = (
     INTENT_QA,
@@ -93,6 +95,48 @@ _SEARCH_HINTS = (
     "检索一下",
 )
 
+# 强制再查知识库（含纠错后要不同答案）
+_FORCE_KB_HINTS = (
+    "再查一下",
+    "再查下",
+    "重新查",
+    "重新检索",
+    "查知识库",
+    "问知识库",
+    "搜知识库",
+    "换个答案",
+    "换一个答案",
+    "不是这个",
+    "不是这个答案",
+    "要最新的",
+    "最新版本",
+    "更新了吗",
+    "有没有更新",
+    "以知识库为准",
+)
+
+_CHITCHAT_RE = re.compile(
+    r"^(你好|您好|嗨|哈喽|hi|hello|hey|在吗|在不在|谢谢|感谢|多谢|好的|嗯|哦|ok|okay|收到|明白了|知道了|没事了)[\s!！。.~～？?]*$",
+    re.IGNORECASE,
+)
+
+_META_HINTS = (
+    "为什么你",
+    "你刚才",
+    "你之前",
+    "你怎么没",
+    "你为什么",
+    "刚才为什么",
+    "再说详细",
+    "展开说说",
+    "换个说法",
+    "用更简单",
+    "总结一下刚才",
+    "你说的意思",
+)
+
+_CONTINUE_HINTS = ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
+
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 
 # MCP / 内置工具名匹配（小写比较）
@@ -120,6 +164,21 @@ class IntentDecision:
     def pure_kb_qa(self) -> bool:
         """纯知识库问答：无需副作用工具。"""
         return self.intents <= {INTENT_QA, INTENT_SEARCH} and bool(self.intents)
+
+    @property
+    def is_chitchat_or_meta(self) -> bool:
+        return bool(self.intents & {INTENT_CHITCHAT, INTENT_META})
+
+
+@dataclass
+class KbAccessPolicy:
+    """本轮是否预检索/强制查库/允许 knowledge_search。"""
+
+    skip_prefetch: bool = False
+    force_kb: bool = False
+    allow_knowledge_search: bool = True
+    reason: str = ""
+    try_answer_cache: bool = True
 
 
 def classify_user_intent(message: str) -> IntentDecision:
@@ -153,8 +212,20 @@ def classify_user_intent(message: str) -> IntentDecision:
     if any(h in text for h in _BROWSER_HINTS) or "playwright" in lower:
         found.add(INTENT_BROWSER)
 
-    if any(h in text for h in _SEARCH_HINTS):
+    if any(h in text for h in _SEARCH_HINTS) or any(
+        h in text for h in _FORCE_KB_HINTS
+    ):
         found.add(INTENT_SEARCH)
+
+    # 寒暄 / 对上一轮回答的元问题（默认不查库）
+    if _CHITCHAT_RE.match(text) and not (
+        found & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER, INTENT_PLATFORM, INTENT_SEARCH}
+    ):
+        found.add(INTENT_CHITCHAT)
+    elif any(h in text for h in _META_HINTS) and not (
+        found & {INTENT_WRITE, INTENT_WEB, INTENT_BROWSER, INTENT_PLATFORM, INTENT_SEARCH}
+    ):
+        found.add(INTENT_META)
 
     if not found:
         found.add(INTENT_QA)
@@ -177,6 +248,8 @@ def classify_user_intent(message: str) -> IntentDecision:
             INTENT_PLATFORM,
             INTENT_SEARCH,
             INTENT_QA,
+            INTENT_META,
+            INTENT_CHITCHAT,
         )
     else:
         priority = (
@@ -186,10 +259,107 @@ def classify_user_intent(message: str) -> IntentDecision:
             INTENT_PLATFORM,
             INTENT_SEARCH,
             INTENT_QA,
+            INTENT_META,
+            INTENT_CHITCHAT,
         )
     primary = next((p for p in priority if p in found), INTENT_QA)
     reason = ",".join(sorted(found))
     return IntentDecision(intents=found, primary=primary, reason=reason)
+
+
+def decide_kb_access_policy(
+    message: str,
+    decision: Optional[IntentDecision] = None,
+    *,
+    prefetch_query: str = "",
+) -> KbAccessPolicy:
+    """决定本轮是否跳过预检索 / 强制查库。"""
+    text = (message or "").strip()
+    decision = decision or classify_user_intent(text)
+    pq = (prefetch_query or "").strip()
+
+    from orchestrator_integration.behavior_memory import looks_like_user_correction
+
+    force = False
+    force_reason = ""
+    if looks_like_user_correction(text):
+        force = True
+        force_reason = "user_correction"
+    elif INTENT_SEARCH in decision.intents or any(h in text for h in _FORCE_KB_HINTS):
+        force = True
+        force_reason = "force_or_search"
+    elif any(h in text for h in _SEARCH_HINTS):
+        force = True
+        force_reason = "search_hint"
+
+    if force:
+        return KbAccessPolicy(
+            skip_prefetch=False,
+            force_kb=True,
+            allow_knowledge_search=True,
+            reason=force_reason,
+            try_answer_cache=False,
+        )
+
+    # 短续写
+    if len(text) <= 16 and any(k in text for k in _CONTINUE_HINTS):
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="continue",
+            try_answer_cache=False,
+        )
+
+    if INTENT_CHITCHAT in decision.intents or _CHITCHAT_RE.match(text):
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="chitchat",
+            try_answer_cache=False,
+        )
+
+    if INTENT_META in decision.intents:
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="meta",
+            try_answer_cache=False,
+        )
+
+    # 纯读网页且去掉 URL 后几乎无检索词
+    if decision.primary == INTENT_WEB and len(pq) < 4:
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="web_only",
+            try_answer_cache=False,
+        )
+
+    # 写入确认短句不必查库
+    from orchestrator_integration.builtin_tools.skill_tools import (
+        detect_user_write_approval,
+    )
+
+    if detect_user_write_approval(text) and len(text) <= 20:
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="write_approval",
+            try_answer_cache=False,
+        )
+
+    return KbAccessPolicy(
+        skip_prefetch=False,
+        force_kb=False,
+        allow_knowledge_search=True,
+        reason="normal",
+        try_answer_cache=True,
+    )
 
 
 def _tool_name(tool: Any) -> str:
@@ -204,6 +374,7 @@ def filter_tools_by_intent(
     tools: Sequence[Any],
     decision: IntentDecision,
     kb_active: bool = True,
+    kb_policy: Optional[KbAccessPolicy] = None,
 ) -> List[Any]:
     """按意图裁剪工具列表；未知工具默认保留（安全偏保守）。
 
@@ -214,6 +385,11 @@ def filter_tools_by_intent(
 
     keep_execute = decision.needs_skills_execute or not kb_active
     keep_playwright = decision.needs_playwright
+    drop_knowledge_search = bool(
+        kb_policy
+        and not kb_policy.allow_knowledge_search
+        and not kb_policy.force_kb
+    )
     # 纯问答也保留 read_skill_content，便于偶尔查 Skill 说明；去掉 execute 与浏览器
     out: List[Any] = []
     dropped: List[str] = []
@@ -226,9 +402,13 @@ def filter_tools_by_intent(
             dropped.append(name)
             continue
 
+        if name == "knowledge_search" and drop_knowledge_search:
+            dropped.append(name)
+            continue
+
         if _PLAYWRIGHT_TOOL_RE.search(lname) and not keep_playwright:
             # 纯问答/检索时去掉浏览器 MCP，降低误点页面风险
-            if decision.pure_kb_qa or (
+            if decision.pure_kb_qa or decision.is_chitchat_or_meta or (
                 not keep_playwright and INTENT_BROWSER not in decision.intents
             ):
                 dropped.append(name)
@@ -247,17 +427,39 @@ def filter_tools_by_intent(
     return out
 
 
-def build_intent_hint(decision: IntentDecision, kb_active: bool = True) -> str:
+def build_intent_hint(
+    decision: IntentDecision,
+    kb_active: bool = True,
+    kb_policy: Optional[KbAccessPolicy] = None,
+) -> str:
     """注入到 system prompt 的本轮意图补充。"""
     lines = [
         "# 本轮意图路由",
         f"- 识别意图: {', '.join(sorted(decision.intents)) or 'qa'}（主意图: {decision.primary}）",
     ]
+    if kb_policy and kb_active:
+        lines.append(
+            f"- 知识库策略: reason={kb_policy.reason} "
+            f"skip_prefetch={kb_policy.skip_prefetch} force_kb={kb_policy.force_kb}"
+        )
 
-    if decision.pure_kb_qa and kb_active:
+    if kb_policy and kb_policy.reason in ("chitchat", "meta", "continue") and kb_active:
         lines.extend(
             [
-                "- 本轮以知识库问答为主：优先用预检索/knowledge_search 回答，须标注来源。",
+                "- 本轮无需查知识库：直接基于对话历史简短回复，不要调用 knowledge_search。",
+            ]
+        )
+    elif kb_policy and kb_policy.force_kb and kb_active:
+        lines.extend(
+            [
+                "- 用户要求更新/纠正答案：必须以本轮知识库预检索/knowledge_search 为准，"
+                "不要沿用历史缓存结论。",
+            ]
+        )
+    elif decision.pure_kb_qa and kb_active:
+        lines.extend(
+            [
+                "- 本轮以知识库问答为主：优先用预检索或历史已答缓存；不足时再 knowledge_search，须标注来源。",
                 "- 未挂载 execute_skill_script；不要编造落库或浏览器操作。",
                 "- 若用户其实要保存/读网页，先确认意图再让用户重说「保存/打开网页」。",
             ]
@@ -320,9 +522,15 @@ def apply_intent_routing(
     message: str,
     tools: Optional[Sequence[Any]] = None,
     kb_active: bool = True,
-) -> tuple[IntentDecision, List[Any], str]:
-    """一站式：分类 → 裁工具 → 提示词。"""
+    prefetch_query: str = "",
+) -> tuple[IntentDecision, List[Any], str, KbAccessPolicy]:
+    """一站式：分类 → 知识库策略 → 裁工具 → 提示词。"""
     decision = classify_user_intent(message)
-    filtered = filter_tools_by_intent(list(tools or []), decision, kb_active=kb_active)
-    hint = build_intent_hint(decision, kb_active=kb_active)
-    return decision, filtered, hint
+    kb_policy = decide_kb_access_policy(
+        message, decision, prefetch_query=prefetch_query
+    )
+    filtered = filter_tools_by_intent(
+        list(tools or []), decision, kb_active=kb_active, kb_policy=kb_policy
+    )
+    hint = build_intent_hint(decision, kb_active=kb_active, kb_policy=kb_policy)
+    return decision, filtered, hint, kb_policy

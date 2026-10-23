@@ -295,6 +295,7 @@ class UserBehaviorEvent(models.Model):
         ("tool_call", "工具调用"),
         ("user_correction", "用户纠正"),
         ("hitl_decision", "HITL 审批"),
+        ("kb_qa_answer", "知识库问答缓存"),
     ]
 
     user = models.ForeignKey(
