@@ -37,7 +37,7 @@ _PLATFORM_ENTITY_RE = re.compile(
 # 跑用例 / 执行自动化：必须挂上 execute_skill_script（开着知识库也不能裁掉）
 _PLATFORM_RUN_RE = re.compile(
     r"(执行|运行|跑一?下|跑一下|跑下|启动|确认执行).{0,12}(用例|测试用例|套件|自动化|场景)"
-    r"|(用例|测试用例|套件|自动化).{0,8}(执行|运行)"
+    r"|(用例|测试用例|套件|自动化).{0,8}(执行|运行|跑一?下|跑一下|跑下)"
     r"|execute_testcase|run_testcase|batch_run"
 )
 _EXECUTE_APPROVAL_RE = re.compile(
@@ -457,15 +457,24 @@ def filter_tools_by_intent(
     decision: IntentDecision,
     kb_active: bool = True,
     kb_policy: Optional[KbAccessPolicy] = None,
+    skill_zone: Any = None,
 ) -> List[Any]:
     """按意图裁剪工具列表；未知工具默认保留（安全偏保守）。
 
     未挂知识库时纯问答无处可答，不裁 execute_skill_script（写入另有服务端确认门）。
+    skill_zone.allow_execute=True 时强制保留 execute（分区已挂载白名单）。
     """
     if not tools:
         return []
 
     keep_execute = decision.needs_skills_execute or not kb_active
+    if skill_zone is not None:
+        if getattr(skill_zone, "allow_execute", False):
+            # 分区明确允许执行（沉淀/跑用例/平台等）→ 即使 primary=qa 也保留
+            keep_execute = True
+        elif kb_active and not decision.needs_skills_execute:
+            # 挂了知识库且分区禁止执行、意图也非副作用 → 裁掉 execute
+            keep_execute = False
     keep_playwright = decision.needs_playwright
     drop_knowledge_search = bool(
         kb_policy
@@ -629,14 +638,28 @@ def apply_intent_routing(
     tools: Optional[Sequence[Any]] = None,
     kb_active: bool = True,
     prefetch_query: str = "",
+    skill_zone: Any = None,
 ) -> tuple[IntentDecision, List[Any], str, KbAccessPolicy]:
-    """一站式：分类 → 知识库策略 → 裁工具 → 提示词。"""
+    """一站式：分类 → 知识库策略 → Skill 分区 → 裁工具 → 提示词。
+
+    skill_zone 可预先由调用方按分区挂载工具后传入；未传则在此解析。
+    """
+    from orchestrator_integration.skill_zones import resolve_skill_zone, zone_hint
+
     decision = classify_user_intent(message)
     kb_policy = decide_kb_access_policy(
         message, decision, prefetch_query=prefetch_query
     )
+    zone = skill_zone or resolve_skill_zone(message, decision, kb_policy)
     filtered = filter_tools_by_intent(
-        list(tools or []), decision, kb_active=kb_active, kb_policy=kb_policy
+        list(tools or []),
+        decision,
+        kb_active=kb_active,
+        kb_policy=kb_policy,
+        skill_zone=zone,
     )
     hint = build_intent_hint(decision, kb_active=kb_active, kb_policy=kb_policy)
+    zh = zone_hint(zone)
+    if zh:
+        hint = f"{hint}\n\n{zh}" if hint else zh
     return decision, filtered, hint, kb_policy

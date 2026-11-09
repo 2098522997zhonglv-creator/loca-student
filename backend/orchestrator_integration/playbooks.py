@@ -1,0 +1,143 @@
+"""高频确定性剧本：命中后注入强制步骤，减少模型自由选工具。"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional, Sequence
+
+from orchestrator_integration.intent_router import (
+    INTENT_PLATFORM,
+    INTENT_WEB,
+    INTENT_WRITE,
+    IntentDecision,
+    KbAccessPolicy,
+    is_testcase_execute_intent,
+)
+from orchestrator_integration.skill_zones import (
+    ZONE_BROWSER,
+    ZONE_EXECUTE,
+    ZONE_PLATFORM,
+    ZONE_TICKET_KB,
+    ZONE_WEB,
+    SkillZone,
+)
+
+PLAYBOOK_TICKET_KB = "ticket_kb_upsert"
+PLAYBOOK_TESTCASE_EXECUTE = "testcase_execute"
+PLAYBOOK_URL_READ = "url_read"
+PLAYBOOK_PLATFORM_WRITE = "platform_write"
+PLAYBOOK_PLATFORM_READ = "platform_read"
+
+
+@dataclass(frozen=True)
+class Playbook:
+    playbook_id: str
+    title: str
+    steps: Sequence[str]
+    skip: Sequence[str]
+    preferred_skills: Sequence[str]
+
+
+def resolve_playbook(
+    message: str,
+    zone: SkillZone,
+    decision: IntentDecision,
+    kb_policy: Optional[KbAccessPolicy] = None,
+) -> Optional[Playbook]:
+    text = (message or "").strip()
+
+    if zone.zone_id == ZONE_TICKET_KB or (
+        kb_policy and "ticket" in (kb_policy.reason or "")
+    ):
+        return Playbook(
+            PLAYBOOK_TICKET_KB,
+            "工单/知识沉淀",
+            steps=(
+                "read_skill_content(workorder-knowledge)",
+                "按需采集/解析（只读 action）",
+                "向用户展示将写入知识库的摘要并询问确认",
+                "用户确认后 execute_skill_script(skill_name=workorder-knowledge, upsert…, user_confirmed=true)",
+            ),
+            skip=("跨区浏览器 Skill", "无关 ui-automation"),
+            preferred_skills=("workorder-knowledge", "loca-stude"),
+        )
+
+    if zone.zone_id == ZONE_EXECUTE or (
+        kb_policy and kb_policy.reason == "testcase_execute"
+    ) or is_testcase_execute_intent(text, decision):
+        return Playbook(
+            PLAYBOOK_TESTCASE_EXECUTE,
+            "执行测试用例/自动化",
+            steps=(
+                "禁止 knowledge_search / 知识库精排",
+                "read_skill_content(ui-automation 或 loca-stude)",
+                "execute_skill_script 调用 execute_testcase / run_testcase（只读执行）",
+                "汇总结果给用户；不要顺手沉淀知识库",
+            ),
+            skip=("knowledge_search", "workorder-knowledge"),
+            preferred_skills=("ui-automation", "loca-stude", "api-automation"),
+        )
+
+    if zone.zone_id == ZONE_WEB or (
+        INTENT_WEB in decision.intents and zone.zone_id != ZONE_BROWSER
+    ):
+        return Playbook(
+            PLAYBOOK_URL_READ,
+            "读取网页",
+            steps=(
+                "只使用 url-reader",
+                "read_skill_content(url-reader)",
+                'execute_skill_script(skill_name=url-reader, command=python scripts/read_url.py "URL")',
+                "失败时把错误原文告知用户；不要改调 playwright/browser-use",
+            ),
+            skip=("playwright-skill", "browser-use", "playwright-cli"),
+            preferred_skills=("url-reader",),
+        )
+
+    if zone.zone_id == ZONE_PLATFORM and INTENT_WRITE in decision.intents:
+        return Playbook(
+            PLAYBOOK_PLATFORM_WRITE,
+            "平台写入/落库",
+            steps=(
+                "read_skill_content(loca-stude)",
+                "必要时只读 get_/list_ 查询",
+                "展示将写入字段摘要，以「是否确认写入？」结束本轮",
+                "用户确认后一条 commands 串行写入（parallel=false, user_confirmed=true）",
+            ),
+            skip=("并行写入", "跨区浏览器"),
+            preferred_skills=("loca-stude", "ui-automation", "api-automation"),
+        )
+
+    if zone.zone_id == ZONE_PLATFORM and INTENT_PLATFORM in decision.intents:
+        return Playbook(
+            PLAYBOOK_PLATFORM_READ,
+            "平台只读查询",
+            steps=(
+                "read_skill_content(loca-stude)",
+                "execute_skill_script 执行 get_/list_ 只读命令",
+                "汇总真实查询结果；不要顺手写入",
+            ),
+            skip=("写入 action",),
+            preferred_skills=("loca-stude",),
+        )
+
+    return None
+
+
+def playbook_hint(playbook: Optional[Playbook]) -> str:
+    if not playbook:
+        return ""
+    lines = [
+        f"# 本轮剧本（服务端强制）: {playbook.playbook_id} — {playbook.title}",
+        "## 必须按序执行",
+    ]
+    for i, step in enumerate(playbook.steps, 1):
+        lines.append(f"{i}. {step}")
+    if playbook.preferred_skills:
+        lines.append(
+            "- 优先 Skill: " + ", ".join(playbook.preferred_skills)
+        )
+    if playbook.skip:
+        lines.append("- 禁止/跳过: " + ", ".join(playbook.skip))
+    lines.append("- 不要偏离剧本自由探索其它 Skill。")
+    return "\n".join(lines)

@@ -1,0 +1,200 @@
+"""Skill 分区：按意图挂载可用 Skill 白名单，避免跨区误调。
+
+不做 LLM 语义选 Skill；由意图路由关键字决定分区，再在 execute 入口强制校验 skill_name。
+分区白名单优先来自 skill_catalog.json。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import FrozenSet, Optional, Set
+
+from orchestrator_integration.intent_router import (
+    INTENT_BROWSER,
+    INTENT_PLATFORM,
+    INTENT_WEB,
+    INTENT_WRITE,
+    IntentDecision,
+    KbAccessPolicy,
+    is_testcase_execute_intent,
+)
+from orchestrator_integration.skill_catalog import load_skill_catalog
+
+# 分区 ID
+ZONE_KB_QA = "kb_qa"
+ZONE_TICKET_KB = "ticket_kb"
+ZONE_PLATFORM = "platform"
+ZONE_EXECUTE = "execute"
+ZONE_WEB = "web"
+ZONE_BROWSER = "browser"
+ZONE_GENERAL = "general"
+
+# Catalog 缺失时的兜底白名单
+_FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
+    ZONE_KB_QA: frozenset(),
+    ZONE_TICKET_KB: frozenset({"workorder-knowledge", "loca-stude"}),
+    ZONE_PLATFORM: frozenset(
+        {"loca-stude", "workorder-knowledge", "api-automation", "ui-automation"}
+    ),
+    ZONE_EXECUTE: frozenset({"ui-automation", "loca-stude", "api-automation"}),
+    ZONE_WEB: frozenset({"url-reader"}),
+    ZONE_BROWSER: frozenset(
+        {"playwright-skill", "playwright-cli", "browser-use", "ui-automation"}
+    ),
+    ZONE_GENERAL: frozenset(),
+}
+
+_TICKET_KB_HINTS = (
+    "workorder-knowledge",
+    "知识沉淀",
+    "沉淀到知识库",
+    "写入知识库",
+    "同步到知识库",
+    "钉钉工单",
+    "工单采集",
+    "工单需求",
+    "upsert_knowledge",
+)
+
+
+def zone_skills(zone_id: str) -> FrozenSet[str]:
+    """从 Catalog 取分区白名单；空则回退内置表。"""
+    if zone_id == ZONE_KB_QA:
+        return frozenset()
+    if zone_id == ZONE_GENERAL:
+        return frozenset()
+    catalog = load_skill_catalog()
+    names = catalog.names_for_zone(zone_id)
+    if names:
+        return names
+    return _FALLBACK_ZONE_SKILLS.get(zone_id, frozenset())
+
+
+@dataclass(frozen=True)
+class SkillZone:
+    zone_id: str
+    allowed_skills: FrozenSet[str]
+    """空 frozenset 且 zone 为 kb_qa 表示禁止执行；GENERAL 空表示不限制。"""
+    allow_execute: bool
+    reason: str
+
+    def allows(self, skill_name: str) -> bool:
+        name = (skill_name or "").strip()
+        if not self.allow_execute:
+            return False
+        if not self.allowed_skills:
+            # GENERAL：不限制
+            return self.zone_id == ZONE_GENERAL
+        return name in self.allowed_skills
+
+    def effective_allowlist(self) -> Optional[Set[str]]:
+        """传给 get_skill_tools 的白名单：None=不限制；set=强制校验。"""
+        if self.zone_id == ZONE_GENERAL:
+            return None
+        if not self.allow_execute:
+            # 不挂 execute；read 仍可用，不在此卡 skill 名
+            return None
+        return set(self.allowed_skills)
+
+
+def resolve_skill_zone(
+    message: str,
+    decision: IntentDecision,
+    kb_policy: Optional[KbAccessPolicy] = None,
+) -> SkillZone:
+    text = (message or "").strip()
+
+    if kb_policy and kb_policy.reason == "testcase_execute":
+        return SkillZone(
+            ZONE_EXECUTE,
+            zone_skills(ZONE_EXECUTE),
+            allow_execute=True,
+            reason="testcase_execute",
+        )
+
+    if is_testcase_execute_intent(text, decision):
+        return SkillZone(
+            ZONE_EXECUTE,
+            zone_skills(ZONE_EXECUTE),
+            allow_execute=True,
+            reason="run_testcase",
+        )
+
+    if any(h in text for h in _TICKET_KB_HINTS):
+        return SkillZone(
+            ZONE_TICKET_KB,
+            zone_skills(ZONE_TICKET_KB),
+            allow_execute=True,
+            reason="ticket_kb_hint",
+        )
+
+    if INTENT_WRITE in decision.intents:
+        allowed = zone_skills(ZONE_PLATFORM) | zone_skills(ZONE_TICKET_KB)
+        return SkillZone(
+            ZONE_PLATFORM,
+            frozenset(allowed),
+            allow_execute=True,
+            reason="write",
+        )
+
+    if INTENT_WEB in decision.intents and INTENT_BROWSER not in decision.intents:
+        return SkillZone(
+            ZONE_WEB,
+            zone_skills(ZONE_WEB),
+            allow_execute=True,
+            reason="web",
+        )
+
+    if INTENT_BROWSER in decision.intents:
+        return SkillZone(
+            ZONE_BROWSER,
+            zone_skills(ZONE_BROWSER),
+            allow_execute=True,
+            reason="browser",
+        )
+
+    if INTENT_PLATFORM in decision.intents:
+        return SkillZone(
+            ZONE_PLATFORM,
+            zone_skills(ZONE_PLATFORM),
+            allow_execute=True,
+            reason="platform",
+        )
+
+    if decision.pure_kb_qa or decision.is_chitchat_or_meta:
+        return SkillZone(
+            ZONE_KB_QA,
+            zone_skills(ZONE_KB_QA),
+            allow_execute=False,
+            reason="kb_qa",
+        )
+
+    return SkillZone(
+        ZONE_GENERAL,
+        zone_skills(ZONE_GENERAL),
+        allow_execute=True,
+        reason="general",
+    )
+
+
+def zone_hint(zone: SkillZone) -> str:
+    lines = [
+        "# Skill 分区（服务端强制）",
+        f"- 本轮分区: {zone.zone_id}（{zone.reason}）",
+    ]
+    if not zone.allow_execute:
+        lines.append(
+            "- 本轮禁止 execute_skill_script；只做知识库问答。"
+            "若要执行/写入/沉淀，请明确说「执行测试用例」「保存到平台」或「沉淀到知识库」。"
+        )
+        return "\n".join(lines)
+
+    if zone.allowed_skills:
+        names = ", ".join(sorted(zone.allowed_skills))
+        lines.append(f"- 本轮仅允许 Skill: {names}。其它 skill_name 会被服务端拒绝。")
+    else:
+        lines.append("- 本轮未限制 Skill 名称（general）。")
+    lines.append(
+        "- 禁止跨区调用（例如问答时跑 ui-automation，或执行用例时调 workorder-knowledge）。"
+    )
+    return "\n".join(lines)

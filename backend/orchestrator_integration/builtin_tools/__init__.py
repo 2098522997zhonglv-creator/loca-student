@@ -20,8 +20,13 @@ def get_builtin_tools(
     test_case_id: int = None,
     chat_session_id: str = None,
     user_write_approved: bool = None,
+    allowed_skill_names: set = None,
+    allow_execute: bool = True,
 ) -> list:
-    """获取所有内置工具"""
+    """获取所有内置工具。
+
+    allowed_skill_names / allow_execute：由 Skill 分区传入，限制本轮可执行的 skill。
+    """
     tools = []
 
     skill_tools = get_skill_tools(
@@ -30,8 +35,15 @@ def get_builtin_tools(
         test_case_id=test_case_id,
         chat_session_id=chat_session_id,
         user_write_approved=user_write_approved,
+        allowed_skill_names=allowed_skill_names,
+        allow_execute=allow_execute,
     )
     tools.extend(skill_tools)
-    logger.info(f"[BuiltinTools] 加载 {len(skill_tools)} 个 Skill 工具")
+    logger.info(
+        "[BuiltinTools] 加载 %s 个 Skill 工具 allow_execute=%s allowlist=%s",
+        len(skill_tools),
+        allow_execute,
+        sorted(allowed_skill_names) if allowed_skill_names is not None else None,
+    )
 
     return tools

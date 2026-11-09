@@ -1262,49 +1262,126 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
                 )
 
-            # 6. 添加内置 Skill 工具（与知识库并存：检索出用例，Skill 负责落库）
+            # 6. 意图分区 → 按区挂载 Skill 工具（非 LLM 语义选 skill）
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
             from orchestrator_integration.builtin_tools import get_builtin_tools
             from orchestrator_integration.builtin_tools.skill_tools import (
                 detect_user_write_approval,
             )
+            from orchestrator_integration.intent_router import (
+                apply_intent_routing,
+                classify_user_intent,
+                decide_kb_access_policy,
+            )
+            from orchestrator_integration.skill_zones import resolve_skill_zone
 
             user_write_approved = detect_user_write_approval(user_message)
             logger.info(
                 "AgentLoopStreamAPI: 本轮写入授权=%s（按用户原话判定）",
                 user_write_approved,
             )
+            _prefetch_query_early = sanitize_prefetch_query(user_message)
+            _prefetch_for_policy = sanitize_prefetch_query(
+                user_message, keep_hosts=False
+            )
+            _early_decision = classify_user_intent(user_message)
+            _early_kb_policy = decide_kb_access_policy(
+                user_message,
+                _early_decision,
+                prefetch_query=_prefetch_for_policy,
+            )
+            skill_zone = resolve_skill_zone(
+                user_message, _early_decision, _early_kb_policy
+            )
+            from orchestrator_integration.domain_specialists import run_specialist_prep
+            from orchestrator_integration.playbooks import (
+                playbook_hint,
+                resolve_playbook,
+            )
+            from orchestrator_integration.telemetry_context import (
+                TelemetryContext,
+                set_telemetry_context,
+            )
+
+            specialist_spec, specialist_hint_text, specialist_allow = (
+                run_specialist_prep(skill_zone, user_message)
+            )
+            # 未挂知识库时即使分区是 kb_qa 也挂 execute（无处可答；写入另有确认门）
+            mount_execute = skill_zone.allow_execute or not kb_qa_mode
+            skill_allowlist = (
+                skill_zone.effective_allowlist()
+                if skill_zone.allow_execute
+                else None
+            )
+            if specialist_allow is not None and skill_allowlist is not None:
+                skill_allowlist = skill_allowlist & specialist_allow
+            elif specialist_allow is not None:
+                skill_allowlist = specialist_allow
             builtin_tools = get_builtin_tools(
                 user_id=request.user.id,
                 project_id=int(project_id),
                 test_case_id=test_case_id,
                 chat_session_id=session_id,
                 user_write_approved=user_write_approved,
+                allowed_skill_names=skill_allowlist,
+                allow_execute=mount_execute,
             )
             tools.extend(builtin_tools)
             logger.info(
-                f"AgentLoopStreamAPI: Added {len(builtin_tools)} builtin tools"
-                + (" (与知识库并存)" if kb_qa_mode else "")
+                "AgentLoopStreamAPI: Added %s builtin tools zone=%s allow_execute=%s "
+                "allowlist=%s specialist=%s%s",
+                len(builtin_tools),
+                skill_zone.zone_id,
+                skill_zone.allow_execute,
+                sorted(skill_allowlist) if skill_allowlist is not None else None,
+                specialist_spec.domain if specialist_spec and specialist_spec.active else None,
+                " (与知识库并存)" if kb_qa_mode else "",
             )
 
             # 6.1 意图路由：按用户话术裁剪工具，减少误调
-            from orchestrator_integration.intent_router import apply_intent_routing
-
-            _prefetch_query_early = sanitize_prefetch_query(user_message)
             intent_decision, tools, intent_hint, kb_policy = apply_intent_routing(
                 user_message,
                 tools,
                 kb_active=kb_qa_mode,
-                prefetch_query=sanitize_prefetch_query(
-                    user_message, keep_hosts=False
-                ),
+                prefetch_query=_prefetch_for_policy,
+                skill_zone=skill_zone,
+            )
+            active_playbook = resolve_playbook(
+                user_message, skill_zone, intent_decision, kb_policy
+            )
+            pb_hint = playbook_hint(active_playbook)
+            if pb_hint:
+                intent_hint = f"{intent_hint}\n\n{pb_hint}" if intent_hint else pb_hint
+            if specialist_hint_text:
+                intent_hint = (
+                    f"{intent_hint}\n\n{specialist_hint_text}"
+                    if intent_hint
+                    else specialist_hint_text
+                )
+            mounted_names = [getattr(t, "name", str(t)) for t in tools]
+            set_telemetry_context(
+                TelemetryContext(
+                    zone=skill_zone.zone_id,
+                    playbook=active_playbook.playbook_id if active_playbook else "",
+                    tools_mounted=mounted_names,
+                    session_id=session_id or "",
+                    user_id=request.user.id,
+                    specialist_domain=(
+                        specialist_spec.domain
+                        if specialist_spec and specialist_spec.active
+                        else ""
+                    ),
+                )
             )
             logger.info(
-                "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s kb_policy=%s tools=%s",
+                "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s zone=%s "
+                "playbook=%s kb_policy=%s tools=%s",
                 intent_decision.primary,
                 sorted(intent_decision.intents),
+                skill_zone.zone_id,
+                active_playbook.playbook_id if active_playbook else None,
                 kb_policy.reason,
-                [getattr(t, "name", str(t)) for t in tools],
+                mounted_names,
             )
             _kb_cache_hit = False
             _should_record_qa_cache = False

@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "loca-stude",
+      "zones": ["platform", "execute", "ticket_kb"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 120,
+      "actions": {
+        "get_projects": "read",
+        "get_modules": "read",
+        "get_levels": "read",
+        "get_testcases": "read",
+        "get_testcase_detail": "read",
+        "list_files": "read",
+        "get_file_detail": "read",
+        "get_file_references": "read",
+        "get_file_settings": "read",
+        "download_file": "read",
+        "export_testcases": "read",
+        "add_module": "write",
+        "add_testcase": "write",
+        "edit_testcase": "write",
+        "delete_testcase": "irreversible",
+        "delete_module": "irreversible",
+        "upload_file": "write",
+        "delete_file": "irreversible"
+      }
+    },
+    {
+      "name": "workorder-knowledge",
+      "zones": ["ticket_kb", "platform"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 180,
+      "actions": {
+        "collect_tickets": "read",
+        "extract_knowledge": "read",
+        "upsert_knowledge": "write",
+        "upsert_knowledge_extract": "write",
+        "preview_knowledge": "read"
+      }
+    },
+    {
+      "name": "ui-automation",
+      "zones": ["platform", "execute", "browser"],
+      "side_effect": "write",
+      "depends_on": ["loca-stude"],
+      "timeout_sec": 300,
+      "actions": {
+        "get_ui_modules": "read",
+        "get_ui_cases": "read",
+        "get_case_detail": "read",
+        "list_elements": "read",
+        "execute_testcase": "read",
+        "run_testcase": "read",
+        "batch_run": "read",
+        "create_ui_module": "write",
+        "create_ui_case": "write",
+        "set_case_steps": "write",
+        "update_ui_case": "write",
+        "delete_ui_case": "irreversible"
+      }
+    },
+    {
+      "name": "api-automation",
+      "zones": ["platform", "execute"],
+      "side_effect": "write",
+      "depends_on": ["loca-stude"],
+      "timeout_sec": 180,
+      "actions": {
+        "list_apis": "read",
+        "get_api": "read",
+        "run_api": "read",
+        "create_api": "write",
+        "update_api": "write",
+        "delete_api": "irreversible"
+      }
+    },
+    {
+      "name": "url-reader",
+      "zones": ["web"],
+      "side_effect": "read",
+      "depends_on": [],
+      "timeout_sec": 60,
+      "actions": {}
+    },
+    {
+      "name": "playwright-skill",
+      "zones": ["browser"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 300,
+      "actions": {}
+    },
+    {
+      "name": "playwright-cli",
+      "zones": ["browser"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 300,
+      "actions": {}
+    },
+    {
+      "name": "browser-use",
+      "zones": ["browser"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 300,
+      "actions": {}
+    },
+    {
+      "name": "requirement-review",
+      "zones": ["general", "platform"],
+      "side_effect": "read",
+      "depends_on": [],
+      "timeout_sec": 120,
+      "actions": {}
+    },
+    {
+      "name": "prototype-vision",
+      "zones": ["general", "platform"],
+      "side_effect": "read",
+      "depends_on": [],
+      "timeout_sec": 120,
+      "actions": {}
+    },
+    {
+      "name": "weknora-kb",
+      "zones": ["ticket_kb", "general"],
+      "side_effect": "write",
+      "depends_on": [],
+      "timeout_sec": 180,
+      "actions": {
+        "search": "read",
+        "upsert": "write"
+      }
+    }
+  ]
+}

@@ -654,12 +654,73 @@ def get_skill_tools(
     test_case_id: Optional[int] = None,
     chat_session_id: Optional[str] = None,
     user_write_approved: Optional[bool] = None,
+    allowed_skill_names: Optional[set[str]] = None,
+    allow_execute: bool = True,
 ) -> list[object]:
-    """获取 Skill 工具列表（Skills 全局共享，不限制项目）"""
+    """获取 Skill 工具列表（Skills 全局共享，不限制项目）。
+
+    allowed_skill_names: 本轮分区白名单；None 表示不限制，空 set 表示禁止执行任何 skill。
+    allow_execute: False 时不挂载 execute_skill_script（纯知识库问答分区）。
+    """
     current_user_id = user_id
     current_project_id = project_id if project_id is not None else 0
     current_test_case_id = test_case_id
     current_chat_session_id = chat_session_id
+    allowed_names = (
+        {n.strip() for n in allowed_skill_names if n and str(n).strip()}
+        if allowed_skill_names is not None
+        else None
+    )
+
+    def _assert_skill_allowed(skill_name: Optional[str]) -> Optional[str]:
+        name = (skill_name or "").strip()
+        if not name:
+            return None
+        if allowed_names is None:
+            return None
+        if not allowed_names:
+            return (
+                f"本轮分区禁止执行任何 Skill（当前请求 skill_name={name}）。"
+                "若要写入/执行/沉淀，请明确说明意图后重试。"
+            )
+        if name not in allowed_names:
+            return (
+                f"Skill「{name}」不在本轮分区白名单内。允许: {', '.join(sorted(allowed_names))}。"
+                "请改用允许的 skill_name，或换一句带明确意图的话（如「沉淀到知识库」「执行测试用例」）。"
+            )
+        return None
+
+    def _emit_telemetry(
+        *,
+        tool_name: str,
+        skill_name: str = "",
+        success: bool = True,
+        duration_ms: float = 0.0,
+        rejected_by_allowlist: bool = False,
+        rejected_by_catalog: bool = False,
+        error_kind: str = "",
+    ) -> None:
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+            from orchestrator_integration.tool_telemetry import record_tool_telemetry
+
+            ctx = get_telemetry_context()
+            record_tool_telemetry(
+                zone=ctx.zone,
+                playbook=ctx.playbook,
+                tool_name=tool_name,
+                skill_name=skill_name,
+                success=success,
+                duration_ms=duration_ms,
+                rejected_by_allowlist=rejected_by_allowlist,
+                rejected_by_catalog=rejected_by_catalog,
+                error_kind=error_kind,
+                tools_mounted=ctx.tools_mounted,
+                session_id=ctx.session_id or (current_chat_session_id or ""),
+                user_id=ctx.user_id if ctx.user_id is not None else current_user_id,
+            )
+        except Exception as exc:
+            logger.debug("skill telemetry 失败: %s", exc)
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
@@ -680,6 +741,17 @@ def get_skill_tools(
         from skills.models import Skill
 
         logger.info(f"[read_skill_content] skill_name={skill_name}")
+        blocked = _assert_skill_allowed(skill_name)
+        if blocked:
+            logger.info("[read_skill_content] 分区拒绝: %s", blocked)
+            _emit_telemetry(
+                tool_name="read_skill_content",
+                skill_name=skill_name,
+                success=False,
+                rejected_by_allowlist=True,
+                error_kind="allowlist",
+            )
+            return blocked
 
         try:
             skill = Skill.objects.filter(name=skill_name, is_active=True).first()
@@ -1010,10 +1082,45 @@ def get_skill_tools(
             except ValueError as exc:
                 return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+        from orchestrator_integration.skill_catalog import (
+            catalog_reject_unregistered_write,
+        )
+        from orchestrator_integration.tool_telemetry import TelemetryTimer
+
         # 批量执行模式
         if commands:
             if not commands:
                 return json.dumps({"error": "命令列表为空"}, ensure_ascii=False)
+
+            for c in commands:
+                if not isinstance(c, dict):
+                    continue
+                blocked = _assert_skill_allowed(c.get("skill_name"))
+                if blocked:
+                    logger.info("[execute_skill_script] 分区拒绝批量: %s", blocked)
+                    _emit_telemetry(
+                        tool_name="execute_skill_script",
+                        skill_name=str(c.get("skill_name") or ""),
+                        success=False,
+                        rejected_by_allowlist=True,
+                        error_kind="allowlist",
+                    )
+                    return blocked
+                catalog_block = catalog_reject_unregistered_write(
+                    c.get("skill_name"), c.get("command")
+                )
+                if catalog_block:
+                    logger.info(
+                        "[execute_skill_script] Catalog 拒绝批量: %s", catalog_block
+                    )
+                    _emit_telemetry(
+                        tool_name="execute_skill_script",
+                        skill_name=str(c.get("skill_name") or ""),
+                        success=False,
+                        rejected_by_catalog=True,
+                        error_kind="unregistered_write",
+                    )
+                    return catalog_block
 
             mutating_cmds = [
                 c
@@ -1117,6 +1224,12 @@ def get_skill_tools(
             logger.info(
                 f"[execute_skill_script] 批量完成: {success_count} 成功, {error_count} 失败"
             )
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name="batch",
+                success=error_count == 0,
+                error_kind="" if error_count == 0 else "batch_partial_error",
+            )
 
             return json.dumps(
                 {
@@ -1137,9 +1250,39 @@ def get_skill_tools(
         if not skill_name or not command:
             return "错误: 单个执行模式需要提供 skill_name 和 command 参数"
 
+        blocked = _assert_skill_allowed(skill_name)
+        if blocked:
+            logger.info("[execute_skill_script] 分区拒绝: %s", blocked)
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                rejected_by_allowlist=True,
+                error_kind="allowlist",
+            )
+            return blocked
+
+        catalog_block = catalog_reject_unregistered_write(skill_name, command)
+        if catalog_block:
+            logger.info("[execute_skill_script] Catalog 拒绝: %s", catalog_block)
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                rejected_by_catalog=True,
+                error_kind="unregistered_write",
+            )
+            return catalog_block
+
         if is_mutating_skill_command(command) and not _write_allowed(user_confirmed, user_write_approved):
             logger.info(
                 "[execute_skill_script] 写入未确认，拒绝执行 skill=%s", skill_name
+            )
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                error_kind="needs_confirmation",
             )
             return _needs_write_confirmation_payload(
                 skill_name=skill_name,
@@ -1152,8 +1295,39 @@ def get_skill_tools(
                 "[execute_skill_script] 拦截浏览器误用→url-reader skill=%s",
                 skill_name,
             )
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                error_kind="prefer_url_reader",
+            )
             return redirect
 
-        return _execute_single_skill_script(skill_name, command, session_id)
+        with TelemetryTimer() as timer:
+            try:
+                result = _execute_single_skill_script(skill_name, command, session_id)
+                ok = not (
+                    isinstance(result, str)
+                    and result.startswith("错误")
+                )
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name=skill_name,
+                    success=ok,
+                    duration_ms=timer.elapsed_ms,
+                    error_kind="" if ok else "execute_error",
+                )
+                return result
+            except Exception as exc:
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name=skill_name,
+                    success=False,
+                    duration_ms=timer.elapsed_ms,
+                    error_kind="exception",
+                )
+                raise exc
 
+    if not allow_execute:
+        return [read_skill_content]
     return [read_skill_content, execute_skill_script]

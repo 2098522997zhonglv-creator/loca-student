@@ -902,6 +902,217 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertNotIn(INTENT_WRITE, d.intents)
         self.assertEqual(d.primary, INTENT_WEB)
 
+    def test_skill_zones_partition_without_llm(self):
+        from orchestrator_integration.intent_router import (
+            apply_intent_routing,
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_EXECUTE,
+            ZONE_KB_QA,
+            ZONE_PLATFORM,
+            ZONE_TICKET_KB,
+            ZONE_WEB,
+            resolve_skill_zone,
+        )
+        from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
+
+        class _T:
+            def __init__(self, name):
+                self.name = name
+
+        tools = [
+            _T("knowledge_search"),
+            _T("read_skill_content"),
+            _T("execute_skill_script"),
+        ]
+
+        # 金标 1：纯问答
+        d = classify_user_intent("登录流程怎么测")
+        policy = decide_kb_access_policy("登录流程怎么测", d)
+        zone = resolve_skill_zone("登录流程怎么测", d, policy)
+        self.assertEqual(zone.zone_id, ZONE_KB_QA)
+        self.assertFalse(zone.allow_execute)
+
+        _, kept, hint, _ = apply_intent_routing(
+            "登录流程怎么测", tools, kb_active=True, skill_zone=zone
+        )
+        self.assertNotIn("execute_skill_script", [t.name for t in kept])
+        self.assertIn("Skill 分区", hint)
+
+        # 金标 2：沉淀知识库
+        ticket = "把钉钉工单沉淀到知识库"
+        d2 = classify_user_intent(ticket)
+        policy2 = decide_kb_access_policy(ticket, d2)
+        zone2 = resolve_skill_zone(ticket, d2, policy2)
+        self.assertEqual(zone2.zone_id, ZONE_TICKET_KB)
+        self.assertTrue(zone2.allow_execute)
+        self.assertIn("workorder-knowledge", zone2.allowed_skills)
+        _, kept2, hint2, _ = apply_intent_routing(
+            ticket, tools, kb_active=True, skill_zone=zone2
+        )
+        self.assertIn("execute_skill_script", [t.name for t in kept2])
+        self.assertIn("workorder-knowledge", hint2)
+
+        # 金标 3：跑用例
+        run = "确认执行测试用例 35"
+        d3 = classify_user_intent(run)
+        policy3 = decide_kb_access_policy(run, d3)
+        zone3 = resolve_skill_zone(run, d3, policy3)
+        self.assertEqual(zone3.zone_id, ZONE_EXECUTE)
+
+        # 金标 4：读网页
+        web = "读这个网页 https://example.com"
+        d4 = classify_user_intent(web)
+        zone4 = resolve_skill_zone(web, d4, decide_kb_access_policy(web, d4))
+        self.assertEqual(zone4.zone_id, ZONE_WEB)
+
+        # 金标 5：平台查询
+        plat = "查看已有用例"
+        d5 = classify_user_intent(plat)
+        zone5 = resolve_skill_zone(plat, d5, decide_kb_access_policy(plat, d5))
+        self.assertEqual(zone5.zone_id, ZONE_PLATFORM)
+        self.assertIn("loca-stude", zone5.allowed_skills)
+
+        # 服务端白名单：execute 区禁止 workorder-knowledge
+        tools_map = {
+            t.name: t
+            for t in get_skill_tools(
+                user_id=1,
+                project_id=1,
+                user_write_approved=True,
+                allowed_skill_names=set(zone3.allowed_skills),
+                allow_execute=True,
+            )
+        }
+        blocked = tools_map["execute_skill_script"].invoke(
+            {
+                "skill_name": "workorder-knowledge",
+                "command": "python x.py --action upsert_knowledge",
+                "user_confirmed": True,
+            }
+        )
+        self.assertIn("不在本轮分区白名单", blocked)
+
+        # kb_qa 分区不挂 execute
+        only_read = get_skill_tools(
+            user_id=1, project_id=1, allow_execute=False
+        )
+        self.assertEqual([t.name for t in only_read], ["read_skill_content"])
+
+    def test_skill_catalog_and_unregistered_write(self):
+        from orchestrator_integration.skill_catalog import (
+            catalog_reject_unregistered_write,
+            load_skill_catalog,
+            skills_for_zone,
+        )
+        from orchestrator_integration.skill_zones import ZONE_WEB, zone_skills
+
+        catalog = load_skill_catalog()
+        self.assertIn("loca-stude", catalog.skills)
+        self.assertEqual(zone_skills(ZONE_WEB), skills_for_zone(ZONE_WEB))
+        self.assertIn("url-reader", zone_skills(ZONE_WEB))
+
+        msg = catalog_reject_unregistered_write(
+            "loca-stude",
+            "python loca_stude_tools.py --action wipe_all_cases",
+        )
+        self.assertIsNotNone(msg)
+        self.assertIn("未在 Skill Catalog 登记", msg)
+
+        ok = catalog_reject_unregistered_write(
+            "loca-stude",
+            "python loca_stude_tools.py --action get_projects",
+        )
+        self.assertIsNone(ok)
+
+    def test_playbooks_resolve_for_hot_paths(self):
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.playbooks import (
+            PLAYBOOK_PLATFORM_WRITE,
+            PLAYBOOK_TESTCASE_EXECUTE,
+            PLAYBOOK_TICKET_KB,
+            PLAYBOOK_URL_READ,
+            playbook_hint,
+            resolve_playbook,
+        )
+        from orchestrator_integration.skill_zones import resolve_skill_zone
+
+        cases = (
+            ("把钉钉工单沉淀到知识库", PLAYBOOK_TICKET_KB),
+            ("确认执行测试用例 35", PLAYBOOK_TESTCASE_EXECUTE),
+            ("读这个网页 https://example.com", PLAYBOOK_URL_READ),
+            ("确认写入平台用例", PLAYBOOK_PLATFORM_WRITE),
+        )
+        for text, expected in cases:
+            d = classify_user_intent(text)
+            p = decide_kb_access_policy(text, d)
+            z = resolve_skill_zone(text, d, p)
+            pb = resolve_playbook(text, z, d, p)
+            self.assertIsNotNone(pb, text)
+            self.assertEqual(pb.playbook_id, expected, text)
+            self.assertIn("本轮剧本", playbook_hint(pb))
+
+    def test_tool_telemetry_aggregate(self):
+        from orchestrator_integration.tool_telemetry import (
+            aggregate_telemetry,
+            record_tool_telemetry,
+        )
+
+        record_tool_telemetry(
+            zone="execute",
+            playbook="testcase_execute",
+            tool_name="execute_skill_script",
+            skill_name="workorder-knowledge",
+            success=False,
+            rejected_by_allowlist=True,
+            error_kind="allowlist",
+            duration_ms=12.5,
+        )
+        record_tool_telemetry(
+            zone="execute",
+            playbook="testcase_execute",
+            tool_name="execute_skill_script",
+            skill_name="ui-automation",
+            success=True,
+            duration_ms=800.0,
+        )
+        summary = aggregate_telemetry(limit=100)
+        self.assertGreaterEqual(summary["total"], 2)
+        self.assertIn("execute", summary["zone_hits"])
+        self.assertTrue(summary["top_allowlist_rejects"])
+
+    def test_domain_specialist_force_env(self):
+        import os
+        from orchestrator_integration.domain_specialists import (
+            run_specialist_prep,
+            should_use_specialist,
+        )
+        from orchestrator_integration.intent_router import classify_user_intent
+        from orchestrator_integration.skill_zones import resolve_skill_zone
+
+        text = "查看已有用例"
+        d = classify_user_intent(text)
+        z = resolve_skill_zone(text, d)
+        old = os.environ.get("FORCE_DOMAIN_SPECIALIST")
+        try:
+            os.environ["FORCE_DOMAIN_SPECIALIST"] = "1"
+            self.assertTrue(should_use_specialist(z))
+            spec, hint, allow = run_specialist_prep(z, text)
+            self.assertTrue(spec.active)
+            self.assertIn("域专家子环", hint)
+            self.assertIsNotNone(allow)
+            self.assertIn("loca-stude", allow)
+        finally:
+            if old is None:
+                os.environ.pop("FORCE_DOMAIN_SPECIALIST", None)
+            else:
+                os.environ["FORCE_DOMAIN_SPECIALIST"] = old
+
 
 class BehaviorMemoryDBTests(TestCase):
     def test_record_creates_db_row_when_vector_upsert_fails(self):
