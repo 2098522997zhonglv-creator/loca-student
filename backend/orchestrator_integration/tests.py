@@ -706,6 +706,38 @@ class AgentSmartnessTests(SimpleTestCase):
         decision, kept, _, _policy = apply_intent_routing("先生成一条给我看看", tools)
         self.assertNotIn("execute_skill_script", [t.name for t in kept])
 
+        for text in (
+            "把知识沉淀写入知识库",
+            "执行 skill workorder-knowledge",
+            "按文档执行 upsert_knowledge_extract",
+            "执行测试用例",
+            "把这条用例跑一下",
+            "运行自动化用例",
+        ):
+            decision, kept, _, _policy = apply_intent_routing(text, tools)
+            self.assertIn(
+                "execute_skill_script",
+                [t.name for t in kept],
+                text,
+            )
+
+        # 执行用例：跳过 KB、裁掉 knowledge_search，并注入执行剧本
+        tools_kb = [
+            _T("knowledge_search"),
+            _T("read_skill_content"),
+            _T("execute_skill_script"),
+        ]
+        decision, kept, hint, policy = apply_intent_routing(
+            "确认执行测试用例 35", tools_kb, kb_active=True
+        )
+        self.assertEqual(policy.reason, "testcase_execute")
+        self.assertTrue(policy.skip_prefetch)
+        self.assertFalse(policy.allow_knowledge_search)
+        self.assertNotIn("knowledge_search", [t.name for t in kept])
+        self.assertIn("execute_skill_script", [t.name for t in kept])
+        self.assertIn("execute_testcase", hint)
+        self.assertIn("禁止调用 knowledge_search", hint)
+
         # 未挂知识库时，纯问答也不裁执行工具
         _, kept, hint, _policy = apply_intent_routing(
             "帮我优化一下", tools, kb_active=False

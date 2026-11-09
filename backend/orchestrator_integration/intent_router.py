@@ -34,6 +34,17 @@ _PLATFORM_READ_VERB_RE = re.compile(
 _PLATFORM_ENTITY_RE = re.compile(
     r"用例|模块|项目|需求|套件|执行记录|执行历史|测试结果|评审|缺陷|页面步骤|元素|ui自动化|UI自动化|截图|附件|文件"
 )
+# 跑用例 / 执行自动化：必须挂上 execute_skill_script（开着知识库也不能裁掉）
+_PLATFORM_RUN_RE = re.compile(
+    r"(执行|运行|跑一?下|跑一下|跑下|启动|确认执行).{0,12}(用例|测试用例|套件|自动化|场景)"
+    r"|(用例|测试用例|套件|自动化).{0,8}(执行|运行)"
+    r"|execute_testcase|run_testcase|batch_run"
+)
+_EXECUTE_APPROVAL_RE = re.compile(
+    r"(确认|同意|允许|可以|直接)(执行|运行|跑)"
+    r"|(执行|运行)吧"
+    r"|开始执行"
+)
 
 _WRITE_HINTS = (
     "保存",
@@ -60,6 +71,32 @@ _WRITE_HINTS = (
     "同意写入",
     "可以保存",
     "可以写入",
+    # 工单/知识库沉淀路径（workorder-knowledge）
+    "知识沉淀",
+    "沉淀到知识库",
+    "写入知识库",
+    "同步到知识库",
+    "同步知识库",
+    "入库知识库",
+    "upsert_knowledge",
+    "workorder-knowledge",
+    "工单采集",
+    "steps_file",
+)
+
+# 明确要求跑 Skill 脚本时也要挂上 execute（否则只剩 read_skill_content）
+_SKILL_EXECUTE_HINTS = (
+    "execute_skill_script",
+    "执行 skill",
+    "执行Skill",
+    "执行脚本",
+    "跑 skill",
+    "跑Skill",
+    "按 skill 执行",
+    "按SKILL执行",
+    "按文档执行",
+    "调用 skill",
+    "调用Skill",
 )
 
 _WEB_HINTS = (
@@ -84,6 +121,8 @@ _BROWSER_HINTS = (
     "UI自动化",
     "端到端",
     "e2e",
+    "执行自动化",
+    "跑自动化",
 )
 
 _SEARCH_HINTS = (
@@ -203,8 +242,18 @@ def classify_user_intent(message: str) -> IntentDecision:
     if detect_user_write_approval(text):
         found.add(INTENT_WRITE)
 
+    if any(h in text for h in _SKILL_EXECUTE_HINTS) or "execute_skill" in lower:
+        # 用户点名要跑脚本：至少挂上执行工具（写入仍走确认门）
+        found.add(INTENT_PLATFORM)
+
     if _PLATFORM_READ_VERB_RE.search(text) and _PLATFORM_ENTITY_RE.search(text):
         found.add(INTENT_PLATFORM)
+
+    if _PLATFORM_RUN_RE.search(text):
+        found.add(INTENT_PLATFORM)
+        # 含 UI/浏览器语义时同时标 browser，便于挂 playwright 类工具
+        if any(h in text for h in ("自动化", "浏览器", "playwright", "ui", "UI", "e2e")):
+            found.add(INTENT_BROWSER)
 
     if any(h in text for h in _WEB_HINTS) or _URL_RE.search(text):
         found.add(INTENT_WEB)
@@ -267,6 +316,29 @@ def classify_user_intent(message: str) -> IntentDecision:
     return IntentDecision(intents=found, primary=primary, reason=reason)
 
 
+def is_testcase_execute_intent(
+    message: str, decision: Optional[IntentDecision] = None
+) -> bool:
+    """用户明确要跑/确认执行平台用例或自动化（与知识库问答解耦）。"""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if _PLATFORM_RUN_RE.search(text):
+        return True
+    if _EXECUTE_APPROVAL_RE.search(text) and (
+        "用例" in text or "自动化" in text or "套件" in text or "testcase" in text.lower()
+    ):
+        return True
+    decision = decision or classify_user_intent(text)
+    # 短确认「确认执行」且本轮已标 platform/browser（由上轮上下文话术带入时仍靠关键字）
+    if _EXECUTE_APPROVAL_RE.search(text) and decision.intents & {
+        INTENT_PLATFORM,
+        INTENT_BROWSER,
+    }:
+        return True
+    return False
+
+
 def decide_kb_access_policy(
     message: str,
     decision: Optional[IntentDecision] = None,
@@ -277,6 +349,16 @@ def decide_kb_access_policy(
     text = (message or "").strip()
     decision = decision or classify_user_intent(text)
     pq = (prefetch_query or "").strip()
+
+    # 确认/执行用例：完全离开知识库路径（无预检索、无精排、禁 knowledge_search）
+    if is_testcase_execute_intent(text, decision):
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="testcase_execute",
+            try_answer_cache=False,
+        )
 
     from orchestrator_integration.behavior_memory import looks_like_user_correction
 
@@ -443,7 +525,22 @@ def build_intent_hint(
             f"skip_prefetch={kb_policy.skip_prefetch} force_kb={kb_policy.force_kb}"
         )
 
-    if kb_policy and kb_policy.reason in ("chitchat", "meta", "continue") and kb_active:
+    if kb_policy and kb_policy.reason == "testcase_execute":
+        lines.extend(
+            [
+                "- 本轮为「执行测试用例/自动化」：已跳过知识库预检索与精排；禁止调用 knowledge_search。",
+                "- 同一会话内：若历史已出现过对应 Skill 的 read_skill_content，本轮不要再读；直接 execute_skill_script。",
+                "- 首次需要说明时最多 read_skill_content 一次（ui-automation 或 loca-stude），随后只 execute。",
+                "- 执行命令优先一条搞定："
+                "python ui_automation_tools.py --action execute_testcase --testcase_id <N> --wait_result"
+                "（或平台等价 execute/run action）。",
+                "- 成功后不要再紧跟 get_execution_records；仅当返回失败/timeout 且需要排查时，才查一次记录。",
+                "- 多条互相独立的只读/执行：用 commands + parallel=true；凡含写入或有先后依赖：parallel=false 串行。",
+                "- 同一命令失败后无差别重试不得超过 1 次；第二次仍失败则停止并原文汇报错误，不要换参连环试。",
+                "- 不要为「显得在干活」去 knowledge_search、重复 read_skill_content 或重复拉执行记录。",
+            ]
+        )
+    elif kb_policy and kb_policy.reason in ("chitchat", "meta", "continue") and kb_active:
         lines.extend(
             [
                 "- 本轮无需查知识库：直接基于对话历史简短回复，不要调用 knowledge_search。",
@@ -460,11 +557,14 @@ def build_intent_hint(
         lines.extend(
             [
                 "- 本轮以知识库问答为主：优先用预检索或历史已答缓存；不足时再 knowledge_search，须标注来源。",
-                "- 未挂载 execute_skill_script；不要编造落库或浏览器操作。",
-                "- 若用户其实要保存/读网页，先确认意图再让用户重说「保存/打开网页」。",
+                "- 未挂载 execute_skill_script；不要编造落库、执行 Skill 或浏览器操作。",
+                "- 若用户其实要保存/知识沉淀/执行 Skill/读网页：不要硬调不存在的工具；"
+                "请明确请用户重说「保存到平台」「沉淀到知识库」或「执行 skill」。",
             ]
         )
-    if INTENT_WRITE in decision.intents:
+    if INTENT_WRITE in decision.intents and (
+        not kb_policy or kb_policy.reason != "testcase_execute"
+    ):
         lines.extend(
             [
                 "- 落库剧本（必须按序）：",
@@ -495,7 +595,11 @@ def build_intent_hint(
                 "有就以知识库说明为准并标注文档名，网页内容只作补充；预检索没有再 knowledge_search 搜域名，"
                 "仍没有才明确说「知识库未收录」并读网页。"
             )
-    if INTENT_PLATFORM in decision.intents and INTENT_WRITE not in decision.intents:
+    if (
+        INTENT_PLATFORM in decision.intents
+        and INTENT_WRITE not in decision.intents
+        and (not kb_policy or kb_policy.reason != "testcase_execute")
+    ):
         lines.append(
             "- 查询平台数据：read_skill_content(loca-stude) → execute_skill_script 执行 get_/list_ 只读命令，"
             "无需确认；查到后直接汇总给用户，不要顺手写入。"
@@ -505,7 +609,9 @@ def build_intent_hint(
             "也不要沿用历史里「工具不可用/调用失败」的结论（问题可能已修复）。"
             "若用户所说「已生成的用例」可能指本对话草稿，需同时说明：草稿（未保存）与平台已保存用例（查询结果）。"
         )
-    if INTENT_BROWSER in decision.intents:
+    if INTENT_BROWSER in decision.intents and (
+        not kb_policy or kb_policy.reason != "testcase_execute"
+    ):
         lines.append(
             "- 浏览器自动化：read_skill_content(playwright-skill) → execute_skill_script，多步共用 session_id。"
         )
