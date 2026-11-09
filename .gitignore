@@ -9,3 +9,4 @@ __pycache__/
 .idea/
 # SqliteSaver 在 :memory: 模式下会在工作目录留下的会话文件
 :memory:.ses
+.tmp_testcase_wf/
