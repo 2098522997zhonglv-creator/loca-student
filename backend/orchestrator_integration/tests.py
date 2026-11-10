@@ -1057,6 +1057,61 @@ class AgentSmartnessTests(SimpleTestCase):
             self.assertEqual(pb.playbook_id, expected, text)
             self.assertIn("本轮剧本", playbook_hint(pb))
 
+    def test_teambition_ticket_not_url_reader(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_WEB,
+            apply_intent_routing,
+            classify_user_intent,
+            decide_kb_access_policy,
+            is_ticket_workorder_intent,
+        )
+        from orchestrator_integration.playbooks import resolve_playbook
+        from orchestrator_integration.skill_catalog import reload_skill_catalog
+        from orchestrator_integration.skill_zones import (
+            ZONE_TICKET_KB,
+            resolve_skill_zone,
+        )
+
+        reload_skill_catalog()
+        text = (
+            "https://www.teambition.com/task/6ad57ab55690775793262052"
+            "查看下这个钉钉工单"
+        )
+        self.assertTrue(is_ticket_workorder_intent(text))
+        d = classify_user_intent(text)
+        self.assertNotIn(INTENT_WEB, d.intents)
+        policy = decide_kb_access_policy(text, d)
+        self.assertEqual(policy.reason, "ticket_workorder")
+        self.assertTrue(policy.skip_prefetch)
+        self.assertFalse(policy.allow_knowledge_search)
+        zone = resolve_skill_zone(text, d, policy)
+        self.assertEqual(zone.zone_id, ZONE_TICKET_KB)
+        self.assertIn("playwright-skill", zone.allowed_skills)
+        self.assertIn("workorder-knowledge", zone.allowed_skills)
+        pb = resolve_playbook(text, zone, d, policy)
+        self.assertIsNotNone(pb)
+        self.assertIn("url-reader", pb.skip)
+
+        class _T:
+            def __init__(self, name):
+                self.name = name
+
+        tools = [
+            _T("knowledge_search"),
+            _T("read_skill_content"),
+            _T("execute_skill_script"),
+        ]
+        _, kept, hint, _ = apply_intent_routing(
+            text, tools, kb_active=True, skill_zone=zone
+        )
+        self.assertNotIn("knowledge_search", [t.name for t in kept])
+        self.assertIn("execute_skill_script", [t.name for t in kept])
+        self.assertIn("ticket_kb", hint)
+        from orchestrator_integration.playbooks import playbook_hint
+
+        self.assertIn("禁止 url-reader", playbook_hint(pb))
+        self.assertNotIn(INTENT_WEB, d.intents)
+
     def test_tool_telemetry_aggregate(self):
         from orchestrator_integration.tool_telemetry import (
             aggregate_telemetry,

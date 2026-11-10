@@ -84,6 +84,16 @@ _WRITE_HINTS = (
     "steps_file",
 )
 
+# Teambition / 钉钉工单：SPA，禁止当静态网页走 url-reader
+_TEAMBITION_TASK_RE = re.compile(
+    r"teambition\.com/(?:task|project|sprint)/", re.IGNORECASE
+)
+_TICKET_VIEW_RE = re.compile(
+    r"(查看|打开|读|看|打开下|看下|查看下).{0,8}工单"
+    r"|这个工单|该工单|工单链接|钉钉工单|teambition\s*工单",
+    re.IGNORECASE,
+)
+
 # 明确要求跑 Skill 脚本时也要挂上 execute（否则只剩 read_skill_content）
 _SKILL_EXECUTE_HINTS = (
     "execute_skill_script",
@@ -258,6 +268,18 @@ def classify_user_intent(message: str) -> IntentDecision:
     if any(h in text for h in _WEB_HINTS) or _URL_RE.search(text):
         found.add(INTENT_WEB)
 
+    # 工单链接是登录态 SPA：标 platform，并去掉误判的 web（避免 url-reader）
+    if is_ticket_workorder_intent(text):
+        found.add(INTENT_PLATFORM)
+        found.discard(INTENT_WEB)
+        # 采集页常需浏览器；仅「沉淀/写入」时不强制 browser
+        if _TEAMBITION_TASK_RE.search(text) or _TICKET_VIEW_RE.search(text):
+            if not any(
+                h in text
+                for h in ("沉淀到知识库", "写入知识库", "知识沉淀", "upsert_knowledge")
+            ):
+                found.add(INTENT_BROWSER)
+
     if any(h in text for h in _BROWSER_HINTS) or "playwright" in lower:
         found.add(INTENT_BROWSER)
 
@@ -316,6 +338,31 @@ def classify_user_intent(message: str) -> IntentDecision:
     return IntentDecision(intents=found, primary=primary, reason=reason)
 
 
+def is_ticket_workorder_intent(message: str) -> bool:
+    """Teambition/钉钉工单查看或沉淀（非静态网页）。"""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if _TEAMBITION_TASK_RE.search(text):
+        return True
+    if _TICKET_VIEW_RE.search(text):
+        return True
+    if any(
+        h in text
+        for h in (
+            "钉钉工单",
+            "工单采集",
+            "工单需求",
+            "workorder-knowledge",
+            "知识沉淀",
+            "沉淀到知识库",
+            "upsert_knowledge",
+        )
+    ):
+        return True
+    return False
+
+
 def is_testcase_execute_intent(
     message: str, decision: Optional[IntentDecision] = None
 ) -> bool:
@@ -357,6 +404,18 @@ def decide_kb_access_policy(
             force_kb=False,
             allow_knowledge_search=False,
             reason="testcase_execute",
+            try_answer_cache=False,
+        )
+
+    # 查看/采集工单：先读工单本身，不要用工单 URL 去知识库瞎检索
+    if is_ticket_workorder_intent(text) and not any(
+        h in text for h in _FORCE_KB_HINTS
+    ):
+        return KbAccessPolicy(
+            skip_prefetch=True,
+            force_kb=False,
+            allow_knowledge_search=False,
+            reason="ticket_workorder",
             try_answer_cache=False,
         )
 

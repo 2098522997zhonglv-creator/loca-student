@@ -49,17 +49,45 @@ def resolve_playbook(
     if zone.zone_id == ZONE_TICKET_KB or (
         kb_policy and "ticket" in (kb_policy.reason or "")
     ):
+        want_upsert = any(
+            h in text
+            for h in (
+                "沉淀到知识库",
+                "写入知识库",
+                "知识沉淀",
+                "同步到知识库",
+                "upsert_knowledge",
+            )
+        )
+        if want_upsert:
+            return Playbook(
+                PLAYBOOK_TICKET_KB,
+                "工单知识沉淀入库",
+                steps=(
+                    "禁止 url-reader / knowledge_search（Teambition 是登录态 SPA）",
+                    "read_skill_content(workorder-knowledge)",
+                    "用 playwright-skill 只读打开工单并采集字段",
+                    "向用户展示将写入知识库的摘要并询问确认",
+                    "用户确认后 execute_skill_script(workorder-knowledge, upsert…, user_confirmed=true)",
+                ),
+                skip=("url-reader", "knowledge_search", "无关 ui-automation"),
+                preferred_skills=(
+                    "workorder-knowledge",
+                    "playwright-skill",
+                    "loca-stude",
+                ),
+            )
         return Playbook(
             PLAYBOOK_TICKET_KB,
-            "工单/知识沉淀",
+            "查看/采集工单",
             steps=(
+                "禁止 url-reader / knowledge_search（Teambition/钉钉工单是登录态 SPA）",
                 "read_skill_content(workorder-knowledge)",
-                "按需采集/解析（只读 action）",
-                "向用户展示将写入知识库的摘要并询问确认",
-                "用户确认后 execute_skill_script(skill_name=workorder-knowledge, upsert…, user_confirmed=true)",
+                "用 playwright-skill 打开工单链接，只读采集标题/描述/评论/关联文档",
+                "汇总工单信息给用户；未要求沉淀时不要 upsert 知识库",
             ),
-            skip=("跨区浏览器 Skill", "无关 ui-automation"),
-            preferred_skills=("workorder-knowledge", "loca-stude"),
+            skip=("url-reader", "knowledge_search", "未确认的 upsert"),
+            preferred_skills=("workorder-knowledge", "playwright-skill"),
         )
 
     if zone.zone_id == ZONE_EXECUTE or (

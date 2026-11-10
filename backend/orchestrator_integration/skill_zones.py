@@ -17,6 +17,7 @@ from orchestrator_integration.intent_router import (
     IntentDecision,
     KbAccessPolicy,
     is_testcase_execute_intent,
+    is_ticket_workorder_intent,
 )
 from orchestrator_integration.skill_catalog import load_skill_catalog
 
@@ -32,7 +33,9 @@ ZONE_GENERAL = "general"
 # Catalog 缺失时的兜底白名单
 _FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
     ZONE_KB_QA: frozenset(),
-    ZONE_TICKET_KB: frozenset({"workorder-knowledge", "loca-stude"}),
+    ZONE_TICKET_KB: frozenset(
+        {"workorder-knowledge", "loca-stude", "playwright-skill"}
+    ),
     ZONE_PLATFORM: frozenset(
         {"loca-stude", "workorder-knowledge", "api-automation", "ui-automation"}
     ),
@@ -43,18 +46,6 @@ _FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
     ),
     ZONE_GENERAL: frozenset(),
 }
-
-_TICKET_KB_HINTS = (
-    "workorder-knowledge",
-    "知识沉淀",
-    "沉淀到知识库",
-    "写入知识库",
-    "同步到知识库",
-    "钉钉工单",
-    "工单采集",
-    "工单需求",
-    "upsert_knowledge",
-)
 
 
 def zone_skills(zone_id: str) -> FrozenSet[str]:
@@ -120,12 +111,14 @@ def resolve_skill_zone(
             reason="run_testcase",
         )
 
-    if any(h in text for h in _TICKET_KB_HINTS):
+    if is_ticket_workorder_intent(text) or (
+        kb_policy and kb_policy.reason == "ticket_workorder"
+    ):
         return SkillZone(
             ZONE_TICKET_KB,
             zone_skills(ZONE_TICKET_KB),
             allow_execute=True,
-            reason="ticket_kb_hint",
+            reason="ticket_workorder",
         )
 
     if INTENT_WRITE in decision.intents:
