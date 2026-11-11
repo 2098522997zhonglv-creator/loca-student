@@ -901,8 +901,9 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertIsNone(err3)
         self.assertFalse(plan3.parallel)
-        # write 串行；get 可在 write 前
-        self.assertIn("get_projects", plan3.ordered_commands[0]["command"])
+        # FR02.1：保留输入顺序（创建在前、查询在后），不做 read/write 全局重排
+        self.assertIn("add_testcase", plan3.ordered_commands[0]["command"])
+        self.assertIn("get_projects", plan3.ordered_commands[1]["command"])
 
         self.assertEqual(
             classify_attribution(error_kind="allowlist"), "planning"
@@ -1788,6 +1789,106 @@ class AgentSmartnessTests(SimpleTestCase):
             self.assertNotIn("不在本任务主类授权内", ok)
         finally:
             set_telemetry_context(None)
+
+    def test_tool_result_nonzero_exit_and_timeout_unknown(self):
+        from orchestrator_integration.tool_result import (
+            classify_skill_output,
+            summarize_batch_statuses,
+        )
+
+        failed = classify_skill_output(
+            text="命令执行失败 (退出码: 1)\nboom",
+            exit_code=1,
+            skill_name="playwright-skill",
+        )
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.error_code, "nonzero_exit")
+        self.assertEqual(failed.exit_code, 1)
+
+        unknown = classify_skill_output(
+            text="错误: 命令执行超时（120秒）",
+            skill_name="playwright-skill",
+        )
+        self.assertEqual(unknown.status, "unknown")
+        self.assertEqual(unknown.error_code, "timeout_unknown")
+        self.assertTrue(unknown.retryable)
+
+        summary = summarize_batch_statuses([failed, unknown])
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["counts"]["failed"], 1)
+        self.assertEqual(summary["counts"]["unknown"], 1)
+
+    def test_browser_acceptance_rejects_timeout_only(self):
+        from orchestrator_integration.execution_policy import (
+            evaluate_browser_checkpoints,
+            evaluate_post_condition,
+        )
+
+        timeout_text = (
+            'page.waitForEvent: Timeout 15000ms exceeded while waiting for event "filechooser"'
+        )
+        chk = evaluate_browser_checkpoints(timeout_text)
+        self.assertFalse(chk["ok"])
+
+        verdict = evaluate_post_condition(
+            post_condition="浏览器交互已完成",
+            tool_results=[timeout_text],
+            playbook_id="browser_act",
+        )
+        self.assertFalse(verdict["ok"])
+
+        # 仅 1/1 无预览 → 不通过
+        count_only = evaluate_post_condition(
+            post_condition="x",
+            tool_results=["上传计数 0/1 → 1/1"],
+            playbook_id="browser_act",
+        )
+        self.assertFalse(count_only["ok"])
+
+        # 有加购证据可通过超时检查点
+        ok_v = evaluate_post_condition(
+            post_condition="x",
+            tool_results=["Add To Cart ok; cart_id=abc123; preview refreshed"],
+            playbook_id="browser_act",
+        )
+        self.assertTrue(ok_v["ok"])
+
+    def test_route_correct_keeps_browser_without_execute_keyword(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_BROWSER,
+            IntentDecision,
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_BROWSER,
+            ZONE_KB_QA,
+            SkillZone,
+            correct_misrouted_zone,
+            resolve_skill_zone,
+            zone_skills,
+        )
+
+        # 自然表达：无需「执行」
+        text = (
+            "帮我上传后加购 https://callie-us-test-ai-model-tip-1105-web.a.callie.cc/x "
+            "不要支付"
+        )
+        d = classify_user_intent(text)
+        self.assertIn(INTENT_BROWSER, d.intents)
+        z = resolve_skill_zone(text, d, decide_kb_access_policy(text, d))
+        self.assertEqual(z.zone_id, ZONE_BROWSER)
+
+        # 误判 kb_qa + SPA → 有界纠正到 browser
+        bad = SkillZone(ZONE_KB_QA, frozenset(), allow_execute=False, reason="kb_qa")
+        fixed = correct_misrouted_zone(
+            text,
+            bad,
+            IntentDecision(intents=set(), primary="qa"),
+        )
+        self.assertEqual(fixed.zone_id, ZONE_BROWSER)
+        self.assertTrue(fixed.reason.startswith("route_correct"))
+        self.assertEqual(fixed.allowed_skills, zone_skills(ZONE_BROWSER))
 
 
 class BehaviorMemoryDBTests(TestCase):

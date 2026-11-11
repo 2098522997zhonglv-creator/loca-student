@@ -88,94 +88,134 @@ class SkillZone:
         return set(self.allowed_skills)
 
 
+def correct_misrouted_zone(
+    message: str,
+    zone: SkillZone,
+    decision: IntentDecision,
+    kb_policy: Optional[KbAccessPolicy] = None,
+) -> SkillZone:
+    """有界路由纠正（FR08.6）：分区与已授权浏览器目标冲突时升到 browser，不扩大写权限。"""
+    text = (message or "").strip()
+    if zone.zone_id == ZONE_BROWSER:
+        return zone
+    # 已是执行/写/工单区则不抢占
+    if zone.zone_id in {ZONE_EXECUTE, ZONE_PLATFORM, ZONE_TICKET_KB}:
+        return zone
+    from orchestrator_integration.intent_router import (
+        _BROWSER_SESSION_FOLLOWUP_RE,
+        _INTERACTIVE_SPA_HOST_RE,
+        _INTERACTIVE_SITE_HINTS,
+        _PURE_STATIC_READ_HINTS,
+        _SITE_ACTION_CUES,
+        _URL_RE,
+    )
+
+    spa = bool(_INTERACTIVE_SPA_HOST_RE.search(text)) and not any(
+        h in text for h in _PURE_STATIC_READ_HINTS
+    )
+    interactive = any(h in text for h in _INTERACTIVE_SITE_HINTS)
+    action = (
+        any(c in text for c in _SITE_ACTION_CUES)
+        or bool(_URL_RE.search(text))
+        or bool(_BROWSER_SESSION_FOLLOWUP_RE.search(text))
+    )
+    session_follow = bool(_BROWSER_SESSION_FOLLOWUP_RE.search(text))
+    if spa or session_follow or (interactive and action) or (
+        INTENT_BROWSER in decision.intents
+    ):
+        if zone.zone_id in {ZONE_KB_QA, ZONE_WEB, ZONE_GENERAL}:
+            return SkillZone(
+                ZONE_BROWSER,
+                zone_skills(ZONE_BROWSER),
+                allow_execute=True,
+                reason=f"route_correct:{zone.zone_id}->browser",
+            )
+    return zone
+
+
 def resolve_skill_zone(
     message: str,
     decision: IntentDecision,
     kb_policy: Optional[KbAccessPolicy] = None,
 ) -> SkillZone:
     text = (message or "").strip()
+    zone: SkillZone
 
     if kb_policy and kb_policy.reason == "testcase_execute":
         from orchestrator_integration.skill_governance import (
             filter_skills_for_execute_zone,
         )
 
-        return SkillZone(
+        zone = SkillZone(
             ZONE_EXECUTE,
             frozenset(filter_skills_for_execute_zone(zone_skills(ZONE_EXECUTE))),
             allow_execute=True,
             reason="testcase_execute",
         )
-
-    if is_testcase_execute_intent(text, decision):
+    elif is_testcase_execute_intent(text, decision):
         from orchestrator_integration.skill_governance import (
             filter_skills_for_execute_zone,
         )
 
-        return SkillZone(
+        zone = SkillZone(
             ZONE_EXECUTE,
             frozenset(filter_skills_for_execute_zone(zone_skills(ZONE_EXECUTE))),
             allow_execute=True,
             reason="run_testcase",
         )
-
-    if is_ticket_workorder_intent(text) or (
+    elif is_ticket_workorder_intent(text) or (
         kb_policy and kb_policy.reason == "ticket_workorder"
     ):
-        return SkillZone(
+        zone = SkillZone(
             ZONE_TICKET_KB,
             zone_skills(ZONE_TICKET_KB),
             allow_execute=True,
             reason="ticket_workorder",
         )
-
-    if INTENT_WRITE in decision.intents:
+    elif INTENT_WRITE in decision.intents:
         # 写区不再并集 ticket：沉淀走 ticket_kb，避免平台写入与工单 Skill 打架
-        return SkillZone(
+        zone = SkillZone(
             ZONE_PLATFORM,
             zone_skills(ZONE_PLATFORM),
             allow_execute=True,
             reason="write",
         )
-
-    if INTENT_WEB in decision.intents and INTENT_BROWSER not in decision.intents:
-        return SkillZone(
+    elif INTENT_WEB in decision.intents and INTENT_BROWSER not in decision.intents:
+        zone = SkillZone(
             ZONE_WEB,
             zone_skills(ZONE_WEB),
             allow_execute=True,
             reason="web",
         )
-
-    if INTENT_BROWSER in decision.intents:
-        return SkillZone(
+    elif INTENT_BROWSER in decision.intents:
+        zone = SkillZone(
             ZONE_BROWSER,
             zone_skills(ZONE_BROWSER),
             allow_execute=True,
             reason="browser",
         )
-
-    if INTENT_PLATFORM in decision.intents:
-        return SkillZone(
+    elif INTENT_PLATFORM in decision.intents:
+        zone = SkillZone(
             ZONE_PLATFORM,
             zone_skills(ZONE_PLATFORM),
             allow_execute=True,
             reason="platform",
         )
-
-    if decision.pure_kb_qa or decision.is_chitchat_or_meta:
-        return SkillZone(
+    elif decision.pure_kb_qa or decision.is_chitchat_or_meta:
+        zone = SkillZone(
             ZONE_KB_QA,
             zone_skills(ZONE_KB_QA),
             allow_execute=False,
             reason="kb_qa",
         )
-
-    return SkillZone(
-        ZONE_GENERAL,
-        zone_skills(ZONE_GENERAL),
-        allow_execute=True,
-        reason="general",
-    )
+    else:
+        zone = SkillZone(
+            ZONE_GENERAL,
+            zone_skills(ZONE_GENERAL),
+            allow_execute=True,
+            reason="general",
+        )
+    return correct_misrouted_zone(text, zone, decision, kb_policy)
 
 
 def zone_hint(zone: SkillZone) -> str:

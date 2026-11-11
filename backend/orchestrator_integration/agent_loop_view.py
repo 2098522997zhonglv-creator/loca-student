@@ -103,8 +103,14 @@ _KB_PRIORITY_HINT = """
 ## 自主执行（禁止逼用户写剧本）
 - 用户目标含 URL / 加购 / 传图 / 执行用例时：同一轮内连续调用工具直到完成或不可恢复失败。
 - 禁止要求用户说「执行」、点名 Skill（browser-use/playwright）、重写逐步指令，或在目标已清晰时二选一确认。
-- 用户说「不要支付」：交付 cart/结算页标识即可，勿追问 order_sn vs cart；仅当用户点名订单号时才进到支付前页抓 sn（仍不支付）。
 - 工具失败先自愈换策略（如 filechooser 超时改 setInputFiles）；持久会话同一轮内继续带同一 session_id。
+
+## 授权边界（加购 / 下单 / 支付）
+- 商品定制、加入购物车、进入结算、提交订单、支付是不同动作；未支付 ≠ 未下单。
+- 用户只授权加购时：完成上传+加购并交付真实 cart_id/cart_item_id 等字段与来源；不得为拿 order_sn 而提交订单。
+- 「不要支付」只禁止支付，不能当作「允许提交订单」；若必须订单号且尚未授权下单，仅询问是否允许「提交订单」这一新增动作，并保留已完成的加购结果。
+- 访问 /cart 或结算 URL 不能单独证明业务动作已发生；知识库订单号示例不得当作本次结果。
+- 澄清只在会改变目标/授权/必要输入时提出；已授权的上传与加购不得因订单分支歧义而整单暂停。
 
 ## 写入约定（按钮确认）
 - 落库用 loca-stude 的 add_testcase 等；没有 functional_test_case_save。
@@ -2234,6 +2240,45 @@ class AgentLoopStreamAPIView(View):
                             "AgentLoopStreamAPI: 写入 QA 缓存失败: %s", cache_err
                         )
 
+                # FR03.2：运行时强制验收（不依赖模型是否调用 assert_task_postcondition）
+                acceptance = None
+                if (
+                    not user_stopped
+                    and not interrupt_detected
+                    and "task_commission" in locals()
+                    and task_commission is not None
+                ):
+                    try:
+                        from orchestrator_integration.execution_policy import (
+                            evaluate_post_condition,
+                        )
+
+                        acceptance = evaluate_post_condition(
+                            post_condition=task_commission.post_condition,
+                            tool_results=list(task_commission.last_tool_results),
+                            had_unconfirmed_write=False,
+                            playbook_id=task_commission.playbook_id or "",
+                        )
+                        yield create_sse_data(
+                            {
+                                "type": (
+                                    "task_completed"
+                                    if acceptance.get("ok")
+                                    else "task_blocked"
+                                ),
+                                "task_id": task_commission.task_id,
+                                "status": (
+                                    "completed" if acceptance.get("ok") else "blocked"
+                                ),
+                                "acceptance": acceptance,
+                            }
+                        )
+                    except Exception as acc_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: runtime acceptance failed: %s",
+                            acc_err,
+                        )
+
                 if user_stopped:
                     yield create_sse_data(
                         {"type": "complete", "status": "stopped", "steps": step_count}
@@ -2243,7 +2288,21 @@ class AgentLoopStreamAPIView(View):
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
                 else:
-                    complete_data = {"type": "complete", "total_steps": step_count}
+                    complete_data = {
+                        "type": "complete",
+                        "total_steps": step_count,
+                        "task_status": (
+                            "completed"
+                            if acceptance and acceptance.get("ok")
+                            else (
+                                "blocked"
+                                if acceptance and not acceptance.get("ok")
+                                else "finished"
+                            )
+                        ),
+                    }
+                    if acceptance is not None:
+                        complete_data["acceptance"] = acceptance
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,

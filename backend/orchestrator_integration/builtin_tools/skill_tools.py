@@ -584,6 +584,11 @@ def _finalize_skill_result(
     skill_dir: str,
     artifacts_dir: str,
     artifacts_before: dict[str, str],
+    exit_code: Optional[int] = None,
+    skill_name: str = "",
+    command: str = "",
+    duration_ms: float = 0.0,
+    structured: bool = True,
 ) -> str:
     artifacts = _collect_skill_artifacts(
         result_output,
@@ -592,6 +597,39 @@ def _finalize_skill_result(
         artifacts_before=artifacts_before,
     )
     compact = compact_skill_tool_output(result_output)
+
+    # FR01：结构化 ToolResult（保留 artifacts 给前端下载）
+    if structured:
+        try:
+            from orchestrator_integration.tool_result import classify_skill_output
+
+            tr = classify_skill_output(
+                text=compact if isinstance(compact, str) else str(compact),
+                exit_code=exit_code,
+                duration_ms=duration_ms,
+                skill_name=skill_name,
+                command=command or "",
+            )
+            if artifacts:
+                tr.data = dict(tr.data or {})
+                tr.data["artifacts"] = artifacts
+                tr.evidence = dict(tr.evidence or {})
+                tr.evidence["artifact_count"] = len(artifacts)
+            # 记录到任务立项，供运行时验收
+            try:
+                from orchestrator_integration.telemetry_context import (
+                    get_telemetry_context,
+                )
+
+                commission = get_telemetry_context().commission
+                if commission is not None:
+                    commission.last_tool_results.append(tr.to_tool_text())
+            except Exception:
+                pass
+            return tr.to_tool_text()
+        except Exception as exc:
+            logger.debug("ToolResult 适配失败，回退原文: %s", exc)
+
     if not artifacts:
         return compact
 
@@ -1074,12 +1112,23 @@ def get_skill_tools(
                             skill_dir=skill_dir,
                             artifacts_dir=artifacts_dir,
                             artifacts_before=artifacts_before,
+                            exit_code=None,
+                            skill_name=skill_name or "",
+                            command=command or "",
                         )
                     except TimeoutError:
                         logger.error(
                             "[execute_skill_script] 持久化 Playwright 执行超时"
                         )
-                        return "错误: 命令执行超时（120秒）"
+                        from orchestrator_integration.tool_result import (
+                            classify_skill_output,
+                        )
+
+                        return classify_skill_output(
+                            text="错误: 命令执行超时（120秒）",
+                            skill_name=skill_name or "",
+                            command=command or "",
+                        ).to_tool_text()
                     except Exception as e:
                         logger.error(
                             f"[execute_skill_script] 持久化 Playwright 执行失败: {e}",
@@ -1164,14 +1213,30 @@ def get_skill_tools(
                 skill_dir=skill_dir,
                 artifacts_dir=artifacts_dir,
                 artifacts_before=artifacts_before,
+                exit_code=result.returncode,
+                skill_name=skill_name or "",
+                command=command or "",
             )
 
         except subprocess.TimeoutExpired:
             logger.error("[execute_skill_script] 执行超时")
-            return "错误: 命令执行超时（120秒）"
+            from orchestrator_integration.tool_result import classify_skill_output
+
+            return classify_skill_output(
+                text="错误: 命令执行超时（120秒）",
+                exit_code=None,
+                skill_name=skill_name or "",
+                command=command or "",
+            ).to_tool_text()
         except Exception as e:
             logger.error(f"[execute_skill_script] 执行失败: {e}", exc_info=True)
-            return f"错误: {str(e)}"
+            from orchestrator_integration.tool_result import classify_skill_output
+
+            return classify_skill_output(
+                text=f"错误: {str(e)}",
+                skill_name=skill_name or "",
+                command=command or "",
+            ).to_tool_text()
 
     @langchain_tool
     def execute_skill_script(
