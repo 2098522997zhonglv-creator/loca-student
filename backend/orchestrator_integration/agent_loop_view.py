@@ -1373,15 +1373,30 @@ class AgentLoopStreamAPIView(View):
                     ),
                 )
             )
+            try:
+                from orchestrator_integration.tool_telemetry import record_route_decision
+
+                record_route_decision(
+                    zone=skill_zone.zone_id,
+                    playbook=active_playbook.playbook_id if active_playbook else "",
+                    intents=sorted(intent_decision.intents),
+                    kb_policy=kb_policy.reason,
+                    tools_mounted=mounted_names,
+                    session_id=session_id or "",
+                    user_id=request.user.id,
+                )
+            except Exception:
+                pass
             logger.info(
                 "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s zone=%s "
-                "playbook=%s kb_policy=%s tools=%s",
+                "playbook=%s kb_policy=%s tools=%s allowlist=%s",
                 intent_decision.primary,
                 sorted(intent_decision.intents),
                 skill_zone.zone_id,
                 active_playbook.playbook_id if active_playbook else None,
                 kb_policy.reason,
                 mounted_names,
+                sorted(skill_allowlist) if skill_allowlist is not None else None,
             )
             _kb_cache_hit = False
             _should_record_qa_cache = False

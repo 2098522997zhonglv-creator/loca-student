@@ -36,8 +36,12 @@ _PLATFORM_ENTITY_RE = re.compile(
 )
 # 跑用例 / 执行自动化：必须挂上 execute_skill_script（开着知识库也不能裁掉）
 _PLATFORM_RUN_RE = re.compile(
-    r"(执行|运行|跑一?下|跑一下|跑下|启动|确认执行).{0,12}(用例|测试用例|套件|自动化|场景)"
+    r"(执行|运行|跑一?下|跑一下|跑下|启动|确认执行).{0,16}(用例|测试用例|套件|自动化|场景)"
     r"|(用例|测试用例|套件|自动化).{0,8}(执行|运行|跑一?下|跑一下|跑下)"
+    r"|执行(?:ID为|id\s*=?\s*|编号)?\s*\d+.{0,10}(?:测试)?用例"
+    r"|执行用例\s*[#＃]?\s*\d+"
+    r"|跑(?:一?下)?用例\s*[#＃]?\s*\d+"
+    r"|帮我(?:执行|跑|运行).{0,10}用例"
     r"|execute_testcase|run_testcase|batch_run"
 )
 _EXECUTE_APPROVAL_RE = re.compile(
@@ -45,7 +49,6 @@ _EXECUTE_APPROVAL_RE = re.compile(
     r"|(执行|运行)吧"
     r"|开始执行"
 )
-
 _WRITE_HINTS = (
     "保存",
     "写入",
@@ -363,10 +366,8 @@ def is_ticket_workorder_intent(message: str) -> bool:
     return False
 
 
-def is_testcase_execute_intent(
-    message: str, decision: Optional[IntentDecision] = None
-) -> bool:
-    """用户明确要跑/确认执行平台用例或自动化（与知识库问答解耦）。"""
+def looks_like_testcase_execute_keywords(message: str) -> bool:
+    """仅关键字判定（不调用 classify，可供写入确认门安全使用）。"""
     text = (message or "").strip()
     if not text:
         return False
@@ -375,6 +376,18 @@ def is_testcase_execute_intent(
     if _EXECUTE_APPROVAL_RE.search(text) and (
         "用例" in text or "自动化" in text or "套件" in text or "testcase" in text.lower()
     ):
+        return True
+    return False
+
+
+def is_testcase_execute_intent(
+    message: str, decision: Optional[IntentDecision] = None
+) -> bool:
+    """用户明确要跑/确认执行平台用例或自动化（与知识库问答解耦）。"""
+    text = (message or "").strip()
+    if not text:
+        return False
+    if looks_like_testcase_execute_keywords(text):
         return True
     decision = decision or classify_user_intent(text)
     # 短确认「确认执行」且本轮已标 platform/browser（由上轮上下文话术带入时仍靠关键字）
@@ -601,8 +614,10 @@ def build_intent_hint(
                 "- 首次需要说明时最多 read_skill_content 一次（ui-automation 或 loca-stude），随后只 execute。",
                 "- 执行命令优先一条搞定："
                 "python ui_automation_tools.py --action execute_testcase --testcase_id <N> --wait_result"
-                "（或平台等价 execute/run action）。",
+                "（或平台等价 execute/run action）。execute/run 是只读执行，无需 user_confirmed。",
                 "- 成功后不要再紧跟 get_execution_records；仅当返回失败/timeout 且需要排查时，才查一次记录。",
+                "- 未明确要求「生成/创建 UI 自动化」时：禁止 create_ui_* / set_case_steps / add_testcase；只跑执行。",
+                "- 若用户同时要求生成 UI：先 execute_testcase 出结果；生成类写入须另问确认后再调（服务端会拦未确认写入）。",
                 "- 多条互相独立的只读/执行：用 commands + parallel=true；凡含写入或有先后依赖：parallel=false 串行。",
                 "- 同一命令失败后无差别重试不得超过 1 次；第二次仍失败则停止并原文汇报错误，不要换参连环试。",
                 "- 不要为「显得在干活」去 knowledge_search、重复 read_skill_content 或重复拉执行记录。",

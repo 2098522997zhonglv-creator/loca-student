@@ -37,7 +37,7 @@ _FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
         {"workorder-knowledge", "loca-stude", "playwright-skill"}
     ),
     ZONE_PLATFORM: frozenset(
-        {"loca-stude", "workorder-knowledge", "api-automation", "ui-automation"}
+        {"loca-stude", "api-automation", "ui-automation"}
     ),
     ZONE_EXECUTE: frozenset({"ui-automation", "loca-stude", "api-automation"}),
     ZONE_WEB: frozenset({"url-reader"}),
@@ -96,17 +96,25 @@ def resolve_skill_zone(
     text = (message or "").strip()
 
     if kb_policy and kb_policy.reason == "testcase_execute":
+        from orchestrator_integration.skill_governance import (
+            filter_skills_for_execute_zone,
+        )
+
         return SkillZone(
             ZONE_EXECUTE,
-            zone_skills(ZONE_EXECUTE),
+            frozenset(filter_skills_for_execute_zone(zone_skills(ZONE_EXECUTE))),
             allow_execute=True,
             reason="testcase_execute",
         )
 
     if is_testcase_execute_intent(text, decision):
+        from orchestrator_integration.skill_governance import (
+            filter_skills_for_execute_zone,
+        )
+
         return SkillZone(
             ZONE_EXECUTE,
-            zone_skills(ZONE_EXECUTE),
+            frozenset(filter_skills_for_execute_zone(zone_skills(ZONE_EXECUTE))),
             allow_execute=True,
             reason="run_testcase",
         )
@@ -122,10 +130,10 @@ def resolve_skill_zone(
         )
 
     if INTENT_WRITE in decision.intents:
-        allowed = zone_skills(ZONE_PLATFORM) | zone_skills(ZONE_TICKET_KB)
+        # 写区不再并集 ticket：沉淀走 ticket_kb，避免平台写入与工单 Skill 打架
         return SkillZone(
             ZONE_PLATFORM,
-            frozenset(allowed),
+            zone_skills(ZONE_PLATFORM),
             allow_execute=True,
             reason="write",
         )
@@ -190,4 +198,9 @@ def zone_hint(zone: SkillZone) -> str:
     lines.append(
         "- 禁止跨区调用（例如问答时跑 ui-automation，或执行用例时调 workorder-knowledge）。"
     )
+    if zone.zone_id == ZONE_EXECUTE:
+        lines.append(
+            "- 执行区禁止写入/生成类 action（create/update/delete/set_case_steps）；"
+            "越权写入会被服务端拒绝。"
+        )
     return "\n".join(lines)

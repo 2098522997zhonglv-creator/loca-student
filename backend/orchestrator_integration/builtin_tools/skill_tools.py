@@ -73,10 +73,11 @@ _MUTATING_FUNC_RE = re.compile(
 )
 
 _NO_ASK_APPROVAL_RE = re.compile(r"(不用|无需|不需要|不要|别)(再)?(问我|确认|询问)")
+# 「确认执行用例」不算同意写入；写入须出现写入/保存/创建等语义
 _EXPLICIT_WRITE_APPROVAL_RE = re.compile(
-    r"(确认|同意|允许|可以|直接)(写入|入库|落库|保存|创建|提交|执行写入|执行用例|执行测试|运行用例)"
-    r"|直接(写|存|建|保存|入库|执行)"
-    r"|(继续|接着|剩下的?|其余的?)(也|都)?(更新|修改|改|编辑|写入|保存|创建|添加|新增|处理|执行)"
+    r"(确认|同意|允许|可以|直接)(写入|入库|落库|保存|创建|提交|执行写入)"
+    r"|直接(写|存|建|保存|入库)"
+    r"|(继续|接着|剩下的?|其余的?)(也|都)?(更新|修改|改|编辑|写入|保存|创建|添加|新增|处理)"
 )
 # 肯定词后须紧跟标点/空白/结尾，避免“可以帮我执行用例35吗”被当成同意
 _SHORT_APPROVAL_RE = re.compile(
@@ -89,13 +90,26 @@ _WRITE_REJECT_RE = re.compile(r"不要|不用了|别写|先不|暂不|取消|不
 
 
 def detect_user_write_approval(message: Optional[str]) -> bool:
-    """按用户原话判定本轮是否明确同意写入。"""
+    """按用户原话判定本轮是否明确同意写入（≠ 同意执行用例）。"""
     text = (message or "").strip()
     if not text:
         return False
     if _NO_ASK_APPROVAL_RE.search(text):
         return True
     if _WRITE_REJECT_RE.search(text):
+        return False
+    # 执行用例意图且未说写入/保存/创建：不算写入授权（防执行区越权）
+    # 用关键字判定，避免与 classify→detect_user_write_approval 递归
+    from orchestrator_integration.intent_router import (
+        looks_like_testcase_execute_keywords,
+    )
+    from orchestrator_integration.skill_governance import (
+        message_has_explicit_write_intent,
+    )
+
+    if looks_like_testcase_execute_keywords(text) and not message_has_explicit_write_intent(
+        text
+    ):
         return False
     if _EXPLICIT_WRITE_APPROVAL_RE.search(text):
         return True
@@ -238,21 +252,29 @@ def _needs_write_confirmation_payload(
     skill_name: Optional[str],
     command: Optional[str],
     pending_commands: Optional[list] = None,
+    executed_readonly: Optional[list] = None,
 ) -> str:
-    """返回需用户确认的结构化提示，不执行写入。"""
+    """返回需用户确认的结构化提示；可附带已放行的只读/执行结果。"""
+    message = (
+        "检测到平台/数据库写入操作，用户本轮消息没有明确同意写入，已拒绝执行写入。"
+        "服务端按用户原话判定，本轮内任何写入重试（包括 user_confirmed=true）都会被拒绝。"
+        "请立即停止调用写入命令，用自然语言向用户列出将要写入的内容与影响，"
+        "以“是否确认写入？”结束本轮回复，等待用户下一条消息回复“确认”后再执行。"
+    )
+    if executed_readonly:
+        message = (
+            "只读/执行类命令已先执行；写入类命令仍需用户确认，本轮未执行写入。"
+            "请向用户汇报已执行结果，再列出待写入内容，以“是否确认写入？”结束。"
+        )
     payload = {
         "status": "needs_confirmation",
-        "message": (
-            "检测到平台/数据库写入操作，用户本轮消息没有明确同意写入，已拒绝执行。"
-            "服务端按用户原话判定，本轮内任何写入重试（包括 user_confirmed=true）都会被拒绝。"
-            "请立即停止调用写入命令，用自然语言向用户列出将要写入的内容与影响，"
-            "以“是否确认写入？”结束本轮回复，等待用户下一条消息回复“确认”后再执行。"
-        ),
+        "message": message,
         "pending": {
             "skill_name": skill_name,
             "command": command,
             "commands": pending_commands,
         },
+        "executed_readonly": executed_readonly or [],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -1085,12 +1107,32 @@ def get_skill_tools(
         from orchestrator_integration.skill_catalog import (
             catalog_reject_unregistered_write,
         )
+        from orchestrator_integration.skill_governance import (
+            reject_cross_skill_batch,
+            reject_zone_privilege_escalation,
+        )
+        from orchestrator_integration.telemetry_context import get_telemetry_context
         from orchestrator_integration.tool_telemetry import TelemetryTimer
+
+        def _zone_id() -> str:
+            return (get_telemetry_context().zone or "").strip()
 
         # 批量执行模式
         if commands:
             if not commands:
                 return json.dumps({"error": "命令列表为空"}, ensure_ascii=False)
+
+            cross = reject_cross_skill_batch(commands)
+            if cross:
+                logger.info("[execute_skill_script] 跨 Skill 拒绝批量: %s", cross)
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name="batch",
+                    success=False,
+                    rejected_by_allowlist=True,
+                    error_kind="cross_skill",
+                )
+                return cross
 
             for c in commands:
                 if not isinstance(c, dict):
@@ -1121,34 +1163,34 @@ def get_skill_tools(
                         error_kind="unregistered_write",
                     )
                     return catalog_block
+                priv = reject_zone_privilege_escalation(
+                    zone_id=_zone_id(),
+                    skill_name=c.get("skill_name"),
+                    command=c.get("command"),
+                )
+                if priv:
+                    logger.info("[execute_skill_script] 越权拒绝批量: %s", priv)
+                    _emit_telemetry(
+                        tool_name="execute_skill_script",
+                        skill_name=str(c.get("skill_name") or ""),
+                        success=False,
+                        rejected_by_allowlist=True,
+                        error_kind="privilege",
+                    )
+                    return priv
 
             mutating_cmds = [
                 c
                 for c in commands
                 if isinstance(c, dict) and is_mutating_skill_command(c.get("command"))
             ]
-            if mutating_cmds and not _write_allowed(user_confirmed, user_write_approved):
-                logger.info(
-                    "[execute_skill_script] 批量写入未确认，拒绝执行 count=%s",
-                    len(mutating_cmds),
-                )
-                return _needs_write_confirmation_payload(
-                    skill_name=None,
-                    command=None,
-                    pending_commands=commands,
-                )
-
-            run_parallel = bool(parallel) and len(commands) > 1
-            if mutating_cmds and run_parallel:
-                logger.info(
-                    "[execute_skill_script] 批量含写入，强制串行（忽略 parallel=true）"
-                )
-                run_parallel = False
-
-            logger.info(
-                f"[execute_skill_script] 批量模式: {len(commands)} 条命令, "
-                f"parallel={run_parallel}, max_workers={max_workers}, "
-                f"user_confirmed={user_confirmed}"
+            readonly_cmds = [
+                c
+                for c in commands
+                if isinstance(c, dict) and not is_mutating_skill_command(c.get("command"))
+            ]
+            write_blocked = bool(mutating_cmds) and not _write_allowed(
+                user_confirmed, user_write_approved
             )
 
             def execute_single(idx: int, cmd: dict[str, str]) -> dict[str, object]:
@@ -1196,6 +1238,58 @@ def get_skill_tools(
                     }
                 finally:
                     close_old_connections()
+
+            # 写入未确认：先放行只读/执行类（如 execute_testcase），写入另等确认
+            if write_blocked:
+                executed_readonly: list[dict[str, object]] = []
+                if readonly_cmds:
+                    logger.info(
+                        "[execute_skill_script] 批量写入未确认：先执行只读/执行 %s 条，挂起写入 %s 条",
+                        len(readonly_cmds),
+                        len(mutating_cmds),
+                    )
+                    for idx, cmd in enumerate(commands):
+                        if not isinstance(cmd, dict):
+                            continue
+                        if is_mutating_skill_command(cmd.get("command")):
+                            continue
+                        executed_readonly.append(execute_single(idx, cmd))
+                    _emit_telemetry(
+                        tool_name="execute_skill_script",
+                        skill_name="batch_readonly_then_confirm",
+                        success=True,
+                        error_kind="needs_confirmation_partial",
+                    )
+                else:
+                    logger.info(
+                        "[execute_skill_script] 批量写入未确认，拒绝执行 count=%s",
+                        len(mutating_cmds),
+                    )
+                    _emit_telemetry(
+                        tool_name="execute_skill_script",
+                        skill_name="batch",
+                        success=False,
+                        error_kind="needs_confirmation",
+                    )
+                return _needs_write_confirmation_payload(
+                    skill_name=None,
+                    command=None,
+                    pending_commands=mutating_cmds,
+                    executed_readonly=executed_readonly or None,
+                )
+
+            run_parallel = bool(parallel) and len(commands) > 1
+            if mutating_cmds and run_parallel:
+                logger.info(
+                    "[execute_skill_script] 批量含写入，强制串行（忽略 parallel=true）"
+                )
+                run_parallel = False
+
+            logger.info(
+                f"[execute_skill_script] 批量模式: {len(commands)} 条命令, "
+                f"parallel={run_parallel}, max_workers={max_workers}, "
+                f"user_confirmed={user_confirmed}"
+            )
 
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
 
@@ -1273,6 +1367,22 @@ def get_skill_tools(
                 error_kind="unregistered_write",
             )
             return catalog_block
+
+        priv = reject_zone_privilege_escalation(
+            zone_id=_zone_id(),
+            skill_name=skill_name,
+            command=command,
+        )
+        if priv:
+            logger.info("[execute_skill_script] 越权拒绝: %s", priv)
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                rejected_by_allowlist=True,
+                error_kind="privilege",
+            )
+            return priv
 
         if is_mutating_skill_command(command) and not _write_allowed(user_confirmed, user_write_approved):
             logger.info(

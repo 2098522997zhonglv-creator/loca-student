@@ -20,6 +20,7 @@ class Command(BaseCommand):
         summary = aggregate_telemetry(limit=int(options["limit"] or 2000))
         self.stdout.write(self.style.SUCCESS(f"total={summary.get('total', 0)}"))
         for key in (
+            "governance_kpis",
             "zone_hits",
             "playbook_hits",
             "top_allowlist_rejects",

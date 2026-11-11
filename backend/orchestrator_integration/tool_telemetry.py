@@ -141,6 +141,21 @@ def aggregate_telemetry(limit: int = 2000) -> Dict[str, Any]:
     fail_kinds = Counter(e.error_kind for e in events if e.error_kind)
     playbooks = Counter(e.playbook for e in events if e.playbook)
 
+    total = len(events) or 1
+    cross_skill = sum(1 for e in events if e.error_kind == "cross_skill")
+    privilege = sum(1 for e in events if e.error_kind == "privilege")
+    allowlist_n = sum(1 for e in events if e.rejected_by_allowlist)
+    catalog_n = sum(1 for e in events if e.rejected_by_catalog)
+    unauth_write = sum(
+        1
+        for e in events
+        if e.error_kind
+        in {"unregistered_write", "privilege", "needs_confirmation", "needs_confirmation_partial"}
+        or e.rejected_by_catalog
+    )
+    route_events = [e for e in events if e.tool_name == "route_decision"]
+    tool_events = [e for e in events if e.tool_name != "route_decision"]
+
     return {
         "total": len(events),
         "zone_hits": dict(zone_hits.most_common()),
@@ -149,7 +164,43 @@ def aggregate_telemetry(limit: int = 2000) -> Dict[str, Any]:
         "top_slow_calls": slow,
         "error_kinds": dict(fail_kinds.most_common(10)),
         "playbook_hits": dict(playbooks.most_common()),
+        # 治理 KPI（底层门禁，非页面约束）
+        "governance_kpis": {
+            "route_decisions": len(route_events),
+            "tool_calls": len(tool_events),
+            "cross_zone_or_skill_reject_rate": round(cross_skill / total, 4),
+            "cross_skill_rejects": cross_skill,
+            "allowlist_reject_rate": round(allowlist_n / total, 4),
+            "unauthorized_write_block_rate": round(unauth_write / total, 4),
+            "unauthorized_write_blocks": unauth_write,
+            "privilege_escalation_blocks": privilege,
+            "catalog_rejects": catalog_n,
+        },
     }
+
+
+def record_route_decision(
+    *,
+    zone: str,
+    playbook: str = "",
+    intents: Optional[List[str]] = None,
+    kb_policy: str = "",
+    tools_mounted: Optional[List[str]] = None,
+    session_id: str = "",
+    user_id: Optional[int] = None,
+) -> ToolCallTelemetry:
+    """记录本轮路由决策，供误判率/分区命中分析。"""
+    return record_tool_telemetry(
+        zone=zone,
+        playbook=playbook,
+        tool_name="route_decision",
+        skill_name=",".join(sorted(intents or [])),
+        success=True,
+        error_kind=kb_policy or "",
+        tools_mounted=tools_mounted,
+        session_id=session_id,
+        user_id=user_id,
+    )
 
 
 def _load_jsonl(limit: int) -> List[ToolCallTelemetry]:

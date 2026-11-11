@@ -792,6 +792,149 @@ class AgentSmartnessTests(SimpleTestCase):
         ):
             self.assertFalse(detect_user_write_approval(text), text)
 
+    def test_execute_testcase_path_skips_kb_and_keeps_tool(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            is_mutating_skill_command,
+        )
+        from orchestrator_integration.intent_router import (
+            apply_intent_routing,
+            decide_kb_access_policy,
+            is_testcase_execute_intent,
+        )
+
+        class _T:
+            def __init__(self, name):
+                self.name = name
+
+        tools = [
+            _T("knowledge_search"),
+            _T("read_skill_content"),
+            _T("execute_skill_script"),
+        ]
+        for text in (
+            "确认执行测试用例 35",
+            "执行ID为35的测试用例，并生成UI自动化用例",
+            "可以帮我执行用例35吗",
+            "帮我跑一下用例 12",
+            "执行用例#40",
+        ):
+            self.assertTrue(is_testcase_execute_intent(text), text)
+            policy = decide_kb_access_policy(text)
+            self.assertEqual(policy.reason, "testcase_execute", text)
+            self.assertTrue(policy.skip_prefetch, text)
+            self.assertFalse(policy.allow_knowledge_search, text)
+            _, kept, hint, policy2 = apply_intent_routing(
+                text, tools, kb_active=True
+            )
+            self.assertEqual(policy2.reason, "testcase_execute", text)
+            self.assertIn("execute_skill_script", [t.name for t in kept], text)
+            self.assertNotIn("knowledge_search", [t.name for t in kept], text)
+            self.assertIn("execute_testcase", hint, text)
+
+        self.assertFalse(
+            is_mutating_skill_command(
+                "python ui_automation_tools.py --action execute_testcase "
+                "--testcase_id 35 --wait_result"
+            )
+        )
+        self.assertTrue(
+            is_mutating_skill_command(
+                "python ui_automation_tools.py --action create_ui_module --name x"
+            )
+        )
+
+    def test_skill_governance_blocks_cross_skill_and_execute_write(self):
+        from orchestrator_integration.skill_governance import (
+            reject_cross_skill_batch,
+            reject_zone_privilege_escalation,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_EXECUTE,
+            ZONE_PLATFORM,
+            resolve_skill_zone,
+        )
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            detect_user_write_approval,
+        )
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+
+        # 跨亲和组批量拒绝
+        cross = reject_cross_skill_batch(
+            [
+                {
+                    "skill_name": "ui-automation",
+                    "command": "python ui_automation_tools.py --action execute_testcase --testcase_id 1",
+                },
+                {
+                    "skill_name": "workorder-knowledge",
+                    "command": "python workorder_knowledge_tools.py --action upsert_knowledge",
+                },
+            ]
+        )
+        self.assertIsNotNone(cross)
+        self.assertIn("亲和组", cross)
+
+        # 执行区禁止 create（越权）
+        priv = reject_zone_privilege_escalation(
+            zone_id=ZONE_EXECUTE,
+            skill_name="ui-automation",
+            command="python ui_automation_tools.py --action create_ui_module --name x",
+        )
+        self.assertIsNotNone(priv)
+        self.assertIn("执行区", priv)
+
+        ok_run = reject_zone_privilege_escalation(
+            zone_id=ZONE_EXECUTE,
+            skill_name="ui-automation",
+            command="python ui_automation_tools.py --action execute_testcase --testcase_id 1 --wait_result",
+        )
+        self.assertIsNone(ok_run)
+
+        # 确认执行 ≠ 同意写入
+        self.assertFalse(detect_user_write_approval("确认执行测试用例 35"))
+        self.assertTrue(detect_user_write_approval("确认写入"))
+        self.assertTrue(detect_user_write_approval("执行吧"))
+
+        # 写区不再并集 workorder（沉淀走 ticket_kb）
+        from orchestrator_integration.skill_catalog import reload_skill_catalog
+
+        reload_skill_catalog()
+        text = "确认写入平台用例"
+        d = classify_user_intent(text)
+        z = resolve_skill_zone(text, d, decide_kb_access_policy(text, d))
+        self.assertEqual(z.zone_id, ZONE_PLATFORM)
+        self.assertNotIn("workorder-knowledge", z.allowed_skills)
+        self.assertIn("loca-stude", z.allowed_skills)
+
+    def test_batch_runs_readonly_before_write_confirm(self):
+        from orchestrator_integration.builtin_tools import skill_tools as st
+
+        payload = st._needs_write_confirmation_payload(
+            skill_name=None,
+            command=None,
+            pending_commands=[
+                {
+                    "skill_name": "ui-automation",
+                    "command": "python ui_automation_tools.py --action create_ui_module --name x",
+                }
+            ],
+            executed_readonly=[
+                {
+                    "index": 0,
+                    "skill_name": "ui-automation",
+                    "command": "python ui_automation_tools.py --action execute_testcase --testcase_id 35 --wait_result",
+                    "result": "ok",
+                }
+            ],
+        )
+        self.assertIn("needs_confirmation", payload)
+        self.assertIn("只读/执行类命令已先执行", payload)
+        self.assertIn("executed_readonly", payload)
+        self.assertIn("execute_testcase", payload)
+
     def test_model_cannot_self_confirm_write(self):
         from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
 

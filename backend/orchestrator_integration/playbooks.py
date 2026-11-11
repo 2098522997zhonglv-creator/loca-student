@@ -97,12 +97,18 @@ def resolve_playbook(
             PLAYBOOK_TESTCASE_EXECUTE,
             "执行测试用例/自动化",
             steps=(
-                "禁止 knowledge_search / 知识库精排",
-                "read_skill_content(ui-automation 或 loca-stude)",
-                "execute_skill_script 调用 execute_testcase / run_testcase（只读执行）",
-                "汇总结果给用户；不要顺手沉淀知识库",
+                "禁止 knowledge_search / 知识库预检索与精排",
+                "同会话若已读过 ui-automation：直接 execute，不要再 read_skill_content",
+                "一条命令：python ui_automation_tools.py --action execute_testcase --testcase_id <N> --wait_result",
+                "成功后直接汇总结果；禁止紧跟 get_execution_records / create_ui_* / 知识沉淀",
+                "若用户还要求生成 UI 自动化：先汇报执行结果，再单独询问是否确认写入",
             ),
-            skip=("knowledge_search", "workorder-knowledge"),
+            skip=(
+                "knowledge_search",
+                "workorder-knowledge",
+                "url-reader",
+                "未确认的 create_ui_*/set_case_steps",
+            ),
             preferred_skills=("ui-automation", "loca-stude", "api-automation"),
         )
 

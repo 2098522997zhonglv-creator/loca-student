@@ -30,7 +30,7 @@
     },
     {
       "name": "workorder-knowledge",
-      "zones": ["ticket_kb", "platform", "browser"],
+      "zones": ["ticket_kb"],
       "side_effect": "write",
       "depends_on": [],
       "timeout_sec": 180,
@@ -112,7 +112,7 @@
     },
     {
       "name": "requirement-review",
-      "zones": ["general", "platform"],
+      "zones": ["general"],
       "side_effect": "read",
       "depends_on": [],
       "timeout_sec": 120,
@@ -120,7 +120,7 @@
     },
     {
       "name": "prototype-vision",
-      "zones": ["general", "platform"],
+      "zones": ["general"],
       "side_effect": "read",
       "depends_on": [],
       "timeout_sec": 120,
