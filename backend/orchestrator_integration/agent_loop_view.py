@@ -20,7 +20,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -51,6 +51,13 @@ from .middleware_config import (
 )
 from .playwright_instructions import PLAYWRIGHT_SCRIPT_INSTRUCTION
 from .stop_signal import should_stop, clear_stop_signal
+from .write_confirmation import (
+    build_resume_user_message,
+    build_write_confirm_interrupt,
+    is_write_confirm_interrupt,
+    parse_needs_confirmation,
+    get_write_confirm_store,
+)
 from langgraph_integration.models import ChatSession, LLMConfig
 from langgraph_integration.views import (
     _extract_requirement_doc_images_for_message,
@@ -93,12 +100,13 @@ _KB_PRIORITY_HINT = """
   优先一条 `execute_testcase --testcase_id N --wait_result`；成功后不要再 get_execution_records；
   同一失败命令无差别重试最多 1 次。
 
-## 写入约定（必须先问）
+## 写入约定（按钮确认）
 - 落库用 loca-stude 的 add_testcase 等；没有 functional_test_case_save。
-- 写入（create/add/update/delete/set/upload 等）前，先在回复中列出将写入的内容，以「是否确认写入？」结束本轮；
-  用户下一条消息明确同意后才执行（user_confirmed=true）。服务端按用户原话判定，
-  用户本轮没同意时写入必被拒（needs_confirmation），不要自行重试，直接停下来问用户。
-- 只读查询（get_/list_）和浏览器操作不需要确认，可先做完再汇总写入计划。
+- 写入（create/add/update/delete/set/upload 等）由服务端拦截：未获同意时返回 needs_confirmation，
+  界面弹出「确认写入」按钮。不要要求用户打字「确认」；简要列出待写入内容后结束本轮即可。
+- 用户点允许后系统会 resume 并放行（user_confirmed=true）；点拒绝则取消写入。
+- 只读查询（get_/list_）、浏览器操作、执行用例不需要确认，应自主连续推进，不要中途停下来问「下一步？」。
+- 支付类操作除非用户明确要求，否则不要执行。
 - 写入内容里的系统地址、账号、密码、测试数据必须来自用户或知识库原文；没有就写「待补充：xxx」，
   禁止编造 example.com 地址、示例账号或密码来“补充细节”。
 - 「看看 / 生成草稿」只输出内容，不落库。
@@ -752,6 +760,42 @@ def process_mcp_tool_output(content: Any) -> tuple:
             summary = str(content)[:200]
 
     return content, summary
+
+
+def _tool_result_sse_events(
+    *,
+    tool_name: str,
+    content: Any,
+    step_count: int,
+    session_id: str,
+    thread_id: str,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    生成 tool_result SSE，若输出为 needs_confirmation 则追加写库确认 interrupt。
+    返回 (events, write_confirm_emitted)。
+    """
+    content, summary = process_mcp_tool_output(content)
+    events: List[Dict[str, Any]] = [
+        {
+            "type": "tool_result",
+            "tool_name": tool_name,
+            "tool_output": content,
+            "summary": summary,
+            "step": step_count,
+        }
+    ]
+    confirmation = parse_needs_confirmation(content)
+    if not confirmation:
+        return events, False
+    events.append(
+        build_write_confirm_interrupt(
+            session_id=session_id,
+            thread_id=thread_id,
+            tool_name=tool_name or "execute_skill_script",
+            confirmation=confirmation,
+        )
+    )
+    return events, True
 
 
 def _build_sanitized_messages(messages: List[Any]) -> tuple[List[Any], int]:
@@ -1954,26 +1998,39 @@ class AgentLoopStreamAPIView(View):
                                                     tool_msg, "tool_name", "unknown"
                                                 )
 
-                                                # 使用辅助函数处理 MCP 工具输出
-                                                content, summary = (
-                                                    process_mcp_tool_output(content)
+                                                events, write_confirm = (
+                                                    _tool_result_sse_events(
+                                                        tool_name=tool_name
+                                                        or "unknown",
+                                                        content=content,
+                                                        step_count=step_count,
+                                                        session_id=session_id,
+                                                        thread_id=thread_id,
+                                                    )
                                                 )
-
-                                                yield create_sse_data(
-                                                    {
-                                                        "type": "tool_result",
-                                                        "tool_name": tool_name,
-                                                        "tool_output": content,
-                                                        "summary": summary,
-                                                        "step": step_count,
-                                                    }
-                                                )
+                                                for event in events:
+                                                    if event.get("type") == "interrupt":
+                                                        interrupt_detected = True
+                                                    yield create_sse_data(event)
+                                                if write_confirm:
+                                                    logger.info(
+                                                        "AgentLoopStreamAPI: Write confirm interrupt emitted"
+                                                    )
                                                 await sync_to_async(
                                                     _record_tool_behavior_safe
                                                 )(
                                                     request.user.id,
                                                     tool_name or "unknown",
-                                                    str(content or ""),
+                                                    str(
+                                                        (
+                                                            events[0].get(
+                                                                "tool_output"
+                                                            )
+                                                            if events
+                                                            else content
+                                                        )
+                                                        or ""
+                                                    ),
                                                     project_id,
                                                 )
                                         # 步骤完成
@@ -2622,6 +2679,25 @@ class AgentLoopResumeAPIView(View):
         decision_info = resume_data[interrupt_id].get("decisions", [{}])[0]
         decision_type = decision_info.get("type", "reject")
 
+        # 写库确认按钮：非 LangGraph HITL checkpoint，走新一轮带批准消息的 astream
+        write_confirm_resume = is_write_confirm_interrupt(interrupt_id)
+        write_confirm_pending = None
+        if write_confirm_resume:
+            write_confirm_pending = get_write_confirm_store().pop(interrupt_id)
+            if write_confirm_pending is None:
+                yield create_sse_data(
+                    {
+                        "type": "error",
+                        "message": "写入确认已过期或不存在，请重新发起写入任务",
+                    }
+                )
+                return
+            logger.info(
+                "AgentLoopResumeAPI: Write confirm resume decision=%s interrupt_id=%s",
+                decision_type,
+                interrupt_id,
+            )
+
         # 获取工具调用数量（前端传递）
         action_count = resume_data[interrupt_id].get("action_count", 1)
 
@@ -2637,6 +2713,7 @@ class AgentLoopResumeAPIView(View):
                 "type": "resume_start",
                 "session_id": session_id,
                 "decision": decision_type,
+                "kind": "write_confirmation" if write_confirm_resume else "hitl",
             }
         )
 
@@ -2797,8 +2874,19 @@ class AgentLoopResumeAPIView(View):
                     log_prefix="AgentLoopResumeAPI",
                 )
 
-                # 7. 构建 Command 来 resume
-                command = Command(resume=resume_value)
+                # 7. 构建输入：写库确认走新 HumanMessage；否则 Command(resume=...)
+                if write_confirm_resume:
+                    resume_input: Any = {
+                        "messages": [
+                            HumanMessage(
+                                content=build_resume_user_message(
+                                    decision_type, write_confirm_pending
+                                )
+                            )
+                        ]
+                    }
+                else:
+                    resume_input = Command(resume=resume_value)
 
                 # 8. 步骤跟踪状态
                 step_count = 0
@@ -2807,7 +2895,9 @@ class AgentLoopResumeAPIView(View):
                 # 9. 流式执行
                 try:
                     async for stream_mode, chunk in agent.astream(
-                        command, config=config, stream_mode=["updates", "messages"]
+                        resume_input,
+                        config=config,
+                        stream_mode=["updates", "messages"],
                     ):
                         if stream_mode == "updates":
                             # 检查中断事件 (HITL) - resume 后可能又触发新的中断
@@ -2947,26 +3037,39 @@ class AgentLoopResumeAPIView(View):
                                                     tool_msg, "tool_name", "unknown"
                                                 )
 
-                                                # 使用辅助函数处理 MCP 工具输出
-                                                content, summary = (
-                                                    process_mcp_tool_output(content)
+                                                events, write_confirm = (
+                                                    _tool_result_sse_events(
+                                                        tool_name=tool_name
+                                                        or "unknown",
+                                                        content=content,
+                                                        step_count=step_count,
+                                                        session_id=session_id,
+                                                        thread_id=thread_id,
+                                                    )
                                                 )
-
-                                                yield create_sse_data(
-                                                    {
-                                                        "type": "tool_result",
-                                                        "tool_name": tool_name,
-                                                        "tool_output": content,
-                                                        "summary": summary,
-                                                        "step": step_count,
-                                                    }
-                                                )
+                                                for event in events:
+                                                    if event.get("type") == "interrupt":
+                                                        interrupt_detected = True
+                                                    yield create_sse_data(event)
+                                                if write_confirm:
+                                                    logger.info(
+                                                        "AgentLoopResumeAPI: Write confirm interrupt emitted"
+                                                    )
                                                 await sync_to_async(
                                                     _record_tool_behavior_safe
                                                 )(
                                                     user.id,
                                                     tool_name or "unknown",
-                                                    str(content or ""),
+                                                    str(
+                                                        (
+                                                            events[0].get(
+                                                                "tool_output"
+                                                            )
+                                                            if events
+                                                            else content
+                                                        )
+                                                        or ""
+                                                    ),
                                                     project_id,
                                                 )
                                         if step_count > 0:

@@ -1094,8 +1094,65 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertIn("needs_confirmation", payload)
         self.assertIn("只读/执行类命令已先执行", payload)
+        self.assertIn("确认写入", payload)
         self.assertIn("executed_readonly", payload)
         self.assertIn("execute_testcase", payload)
+
+    def test_write_confirm_interrupt_roundtrip(self):
+        from orchestrator_integration.write_confirmation import (
+            build_resume_user_message,
+            build_write_confirm_interrupt,
+            get_write_confirm_store,
+            is_write_confirm_interrupt,
+            parse_needs_confirmation,
+        )
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            _needs_write_confirmation_payload,
+            detect_user_write_approval,
+        )
+        from orchestrator_integration.agent_loop_view import _tool_result_sse_events
+
+        raw = _needs_write_confirmation_payload(
+            skill_name="loca-stude",
+            command="python loca_stude_tools.py --action add_testcase --name demo",
+        )
+        parsed = parse_needs_confirmation(raw)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["status"], "needs_confirmation")
+
+        events, emitted = _tool_result_sse_events(
+            tool_name="execute_skill_script",
+            content=raw,
+            step_count=1,
+            session_id="sess-wc",
+            thread_id="1_2_sess-wc",
+        )
+        self.assertTrue(emitted)
+        self.assertEqual(events[0]["type"], "tool_result")
+        interrupt = events[1]
+        self.assertEqual(interrupt["type"], "interrupt")
+        self.assertEqual(interrupt["kind"], "write_confirmation")
+        self.assertTrue(is_write_confirm_interrupt(interrupt["interrupt_id"]))
+        self.assertEqual(interrupt["action_requests"][0]["name"], "确认写入")
+
+        pending = get_write_confirm_store().get(interrupt["interrupt_id"])
+        self.assertIsNotNone(pending)
+        approve_msg = build_resume_user_message("approve", pending)
+        self.assertTrue(detect_user_write_approval(approve_msg))
+        self.assertIn("pending_json", approve_msg)
+        reject_msg = build_resume_user_message("reject", pending)
+        self.assertFalse(detect_user_write_approval(reject_msg))
+
+        # build_write_confirm_interrupt 独立路径
+        again = build_write_confirm_interrupt(
+            session_id="sess-wc",
+            thread_id="1_2_sess-wc",
+            tool_name="execute_skill_script",
+            confirmation=parsed,
+        )
+        self.assertTrue(is_write_confirm_interrupt(again["interrupt_id"]))
+        self.assertIsNotNone(get_write_confirm_store().pop(again["interrupt_id"]))
+        get_write_confirm_store().pop(interrupt["interrupt_id"])
 
     def test_model_cannot_self_confirm_write(self):
         from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools

@@ -17,7 +17,7 @@
 
         <!-- 右侧：操作按钮 -->
         <div class="action-section">
-          <div class="remember-option">
+          <div v-if="!isWriteConfirmation" class="remember-option">
             <a-select
               v-model="rememberPolicy"
               size="small"
@@ -33,7 +33,7 @@
               :loading="loading"
             >
               <template #icon><icon-close /></template>
-              {{ text.reject }}
+              {{ isWriteConfirmation ? text.cancelWrite : text.reject }}
             </a-button>
             <a-button
               type="primary"
@@ -43,7 +43,7 @@
               :loading="loading"
             >
               <template #icon><icon-check /></template>
-              {{ text.allow }}
+              {{ isWriteConfirmation ? text.confirmWrite : text.allow }}
             </a-button>
           </div>
         </div>
@@ -99,6 +99,7 @@ export interface ActionRequest {
 export interface InterruptEvent {
   id: string;
   interrupt_id?: string;
+  kind?: string;
   action_requests: ActionRequest[];
 }
 
@@ -124,12 +125,19 @@ const rememberPolicy = ref<'ask' | 'always_allow'>('ask');
 const showDetails = ref(false);
 const { isEnglish } = useAppI18n();
 
+const isWriteConfirmation = computed(
+  () => props.interrupt?.kind === 'write_confirmation'
+    || String(props.interrupt?.interrupt_id || props.interrupt?.id || '').startsWith('write_confirm_')
+);
+
 const text = computed(() => (
   isEnglish.value
     ? {
-        needsApproval: 'Approval required',
+        needsApproval: isWriteConfirmation.value ? 'Write confirmation' : 'Approval required',
         reject: 'Reject',
         allow: 'Allow',
+        confirmWrite: 'Confirm write',
+        cancelWrite: 'Cancel',
         collapseArgs: 'Collapse args',
         viewArgs: 'View full args',
         policyAsk: 'Ask every time',
@@ -138,9 +146,11 @@ const text = computed(() => (
         operationFailed: (reason?: string) => `Action failed: ${reason || 'Unknown error'}`,
       }
     : {
-        needsApproval: '需要审批',
+        needsApproval: isWriteConfirmation.value ? '写入确认' : '需要审批',
         reject: '拒绝',
         allow: '允许',
+        confirmWrite: '确认写入',
+        cancelWrite: '取消',
         collapseArgs: '收起参数',
         viewArgs: '查看完整参数',
         policyAsk: '每次询问',
@@ -158,6 +168,9 @@ const policyOptions = computed(() => [
 const actionRequest = computed(() => {
   return props.interrupt?.action_requests?.[0] || null;
 });
+
+const resolveInterruptId = () =>
+  props.interrupt?.interrupt_id || props.interrupt?.id || '';
 
 const hasArgs = computed(() => {
   return actionRequest.value?.args && Object.keys(actionRequest.value.args).length > 0;
@@ -212,8 +225,12 @@ const handleApprove = async () => {
   loading.value = true;
 
   try {
-    // 如果选择了"始终允许"，保存偏好
-    if (rememberPolicy.value === 'always_allow' && actionRequest.value.name) {
+    // 写库确认不支持「始终允许」；工具审批才可记住偏好
+    if (
+      !isWriteConfirmation.value
+      && rememberPolicy.value === 'always_allow'
+      && actionRequest.value.name
+    ) {
       await saveToolApproval(
         actionRequest.value.name,
         'always_allow',
@@ -224,9 +241,9 @@ const handleApprove = async () => {
     }
 
     emit('decision', {
-      interruptId: props.interrupt.id,
+      interruptId: resolveInterruptId(),
       type: 'approve',
-      rememberChoice: rememberPolicy.value === 'always_allow',
+      rememberChoice: !isWriteConfirmation.value && rememberPolicy.value === 'always_allow',
       rememberScope: 'permanent',
       toolName: actionRequest.value.name,
     });
@@ -248,7 +265,7 @@ const handleReject = async () => {
 
   try {
     emit('decision', {
-      interruptId: props.interrupt.id,
+      interruptId: resolveInterruptId(),
       type: 'reject',
       rememberChoice: false,
       rememberScope: 'permanent',

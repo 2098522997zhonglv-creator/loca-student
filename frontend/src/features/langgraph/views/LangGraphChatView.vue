@@ -2178,6 +2178,7 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
             interrupt: {
               id: data.interrupt.interrupt_id,
               interrupt_id: data.interrupt.interrupt_id,
+              kind: data.interrupt.kind,
               action_requests: data.interrupt.action_requests
             }
           };
@@ -2186,6 +2187,7 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
           activeStreams.value[data.session_id].interrupt = {
             id: data.interrupt.interrupt_id,
             interrupt_id: data.interrupt.interrupt_id,
+            kind: data.interrupt.kind,
             action_requests: data.interrupt.action_requests
           };
         }

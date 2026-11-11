@@ -51,6 +51,7 @@ interface StreamState {
   interrupt?: {
     id: string;
     interrupt_id?: string;
+    kind?: string;
     action_requests: Array<{
       name: string;
       args: Record<string, unknown>;
@@ -751,6 +752,7 @@ export async function sendChatMessageStream(
             activeStreams.value[streamSessionId].interrupt = {
               id: parsed.interrupt_id || parsed.id,
               interrupt_id: parsed.interrupt_id,
+              kind: parsed.kind,
               action_requests: parsed.action_requests || [],
             };
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
@@ -1351,6 +1353,7 @@ export async function resumeAgentLoop(
             activeStreams.value[sessionId].interrupt = {
               id: parsed.interrupt_id || parsed.id,
               interrupt_id: parsed.interrupt_id,
+              kind: parsed.kind,
               action_requests: parsed.action_requests || []
             };
             activeStreams.value[sessionId].isWaitingForApproval = true;
