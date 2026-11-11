@@ -1139,6 +1139,15 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertIn("url-reader", msg)
         self.assertIn("read_url.py", msg)
 
+        # 交互 SPA：拦 browser-use 时改推 playwright，禁止推 url-reader
+        spa = prefer_url_reader_instead(
+            "browser-use",
+            "goto https://callie-us-test-ai-model-tip-1105-web.a.callie.cc/ 加购",
+        )
+        self.assertIsNotNone(spa)
+        self.assertIn("playwright-skill", spa)
+        self.assertIn("禁止改调 url-reader", spa)
+
     def test_prefer_url_reader_blocks_playwright_html_report(self):
         from orchestrator_integration.builtin_tools.skill_tools import (
             prefer_url_reader_instead,
@@ -1546,7 +1555,8 @@ class AgentSmartnessTests(SimpleTestCase):
             message=text, zone=z, playbook=pb, decision=d, kb_policy=p
         )
         self.assertTrue(c.short_circuit)
-        self.assertIn("playwright-skill", c.primary_skills)
+        self.assertEqual(c.primary_skills, frozenset({"playwright-skill"}))
+        self.assertEqual(c.effective_allowlist(), {"playwright-skill"})
         self.assertGreaterEqual(c.max_tool_steps, 8)
 
         # 纯问答含「购物车」：仍走 kb_qa，不升 browser

@@ -174,13 +174,30 @@ def prefer_url_reader_instead(
     urls = _HTTP_URL_RE.findall(cmd)
     sample_url = urls[0] if urls else "https://example.com/page.html"
 
-    # browser-use 在本仓库几乎总被模型写成裸 API/heredoc，直接拦回 url-reader
+    # browser-use 在本仓库几乎总被写成裸 API/heredoc：禁止执行。
+    # 交互站/加购等应改 playwright-skill；切勿再推 url-reader（SPA 会空转）。
     if name == "browser-use":
+        spa = bool(
+            re.search(
+                r"(?i)teambition\.com|dingtalk\.com|callie\.cc|bomiv\.com|"
+                r"click|fill|login|cart|加购|下单|传图|购物车",
+                cmd,
+            )
+        )
+        if spa or not urls:
+            return (
+                "错误: browser-use 不接受 goto/new_tab/heredoc 这类裸命令。"
+                "请改用 playwright-skill（持久会话）：\n"
+                'node run.js "await page.goto(\''
+                + sample_url
+                + '\'); /* 再 click/fill/加购 */"\n'
+                "禁止改调 url-reader 处理需要交互的页面。"
+            )
         return (
             "错误: browser-use 不接受 goto/new_tab/heredoc 这类裸命令。"
-            "读取网页或 HTML 报告请改用 url-reader：\n"
+            "静态网页/HTML 报告请用 url-reader：\n"
             f'python scripts/read_url.py "{sample_url}"\n'
-            "仅当用户明确要求点击/登录/填表等浏览器自动化时，才使用 playwright-skill。"
+            "需要点击/登录/填表/加购时请用 playwright-skill。"
         )
 
     # 登录态 / 交互 SPA：必须浏览器，禁止改道 url-reader

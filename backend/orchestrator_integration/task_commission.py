@@ -116,12 +116,13 @@ def _split_primary_aux(
         return frozenset({"url-reader"}), frozenset()
 
     if zone.zone_id == ZONE_BROWSER:
-        core = ["playwright-skill", "ui-automation"]
-        primary = frozenset(
-            s for s in core if (not zone_all or s in zone_all)
-        ) or frozenset({"playwright-skill"})
-        aux_candidates = set(preferred or []) | (
-            zone_all or {"playwright-cli", "browser-use"}
+        # 主类强制 playwright-skill：catalog 顺序/哈希切前两名时曾落到
+        # browser-use+ui-automation，而 browser-use 会被 prefer_url_reader 拦死。
+        primary = frozenset({"playwright-skill"})
+        aux_candidates = (
+            set(preferred or [])
+            | (zone_all or set())
+            | {"playwright-cli", "browser-use", "ui-automation"}
         )
         aux = frozenset(aux_candidates - set(primary))
         return primary, aux
