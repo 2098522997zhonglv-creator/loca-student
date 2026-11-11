@@ -183,10 +183,11 @@ def prefer_url_reader_instead(
             "仅当用户明确要求点击/登录/填表等浏览器自动化时，才使用 playwright-skill。"
         )
 
-    # Teambition / 钉钉登录态 SPA：必须浏览器，禁止改道 url-reader
+    # 登录态 / 交互 SPA：必须浏览器，禁止改道 url-reader
     if re.search(
-        r"(?i)teambition\.com|dingtalk\.com|addCookies|TEAMBITION_|TB_ACCESS_TOKEN"
-        r"|getPageText|getPageStructure|helpers\.",
+        r"(?i)teambition\.com|dingtalk\.com|callie\.cc|bomiv\.com|"
+        r"addCookies|TEAMBITION_|TB_ACCESS_TOKEN|"
+        r"getPageText|getPageStructure|helpers\.",
         cmd,
     ):
         return None
@@ -719,7 +720,9 @@ def get_skill_tools(
         name = (skill_name or "").strip()
         if not name:
             return None
-        # 任务立项主/辅授权（优先于静态分区白名单收紧）
+        # 任务立项主/辅授权（优先于工具创建时的静态分区白名单）
+        # Escape Hatch 动态扩权写在 commission.granted_auxiliary，必须在此直接放行，
+        # 否则会落到下方 closed-over allowed_names 仍被拒。
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
@@ -727,18 +730,20 @@ def get_skill_tools(
             commission = ctx.commission
             if commission is not None:
                 granted = commission.effective_allowlist()
-                if granted is not None and name not in granted:
-                    if name in commission.auxiliary_skills:
+                if granted is not None:
+                    if name not in granted:
+                        if name in commission.auxiliary_skills:
+                            return (
+                                f"Skill「{name}」属于辅类，尚未授权。"
+                                "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
+                                "或请用户明确授权后再用。"
+                            )
                         return (
-                            f"Skill「{name}」属于辅类，尚未授权。"
-                            "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
-                            "或请用户明确授权后再用。"
+                            f"Skill「{name}」不在本任务主类授权内。"
+                            f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
+                            "禁止跨任务扩权；不足时用 report_task_blocked 降级。"
                         )
-                    return (
-                        f"Skill「{name}」不在本任务主类授权内。"
-                        f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
-                        "禁止跨任务扩权；不足时用 report_task_blocked 降级。"
-                    )
+                    return None
         except Exception:
             pass
         if allowed_names is None:

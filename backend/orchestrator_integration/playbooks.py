@@ -25,6 +25,7 @@ from orchestrator_integration.skill_zones import (
 PLAYBOOK_TICKET_KB = "ticket_kb_upsert"
 PLAYBOOK_TESTCASE_EXECUTE = "testcase_execute"
 PLAYBOOK_URL_READ = "url_read"
+PLAYBOOK_BROWSER_ACT = "browser_act"
 PLAYBOOK_PLATFORM_WRITE = "platform_write"
 PLAYBOOK_PLATFORM_READ = "platform_read"
 
@@ -110,6 +111,20 @@ def resolve_playbook(
                 "未确认的 create_ui_*/set_case_steps",
             ),
             preferred_skills=("ui-automation", "loca-stude", "api-automation"),
+        )
+
+    if zone.zone_id == ZONE_BROWSER:
+        return Playbook(
+            PLAYBOOK_BROWSER_ACT,
+            "浏览器交互操作",
+            steps=(
+                "禁止 url-reader / knowledge_search（加购/登录/传图是交互 SPA）",
+                "read_skill_content(playwright-skill)（同会话已读过可跳过）",
+                "execute_skill_script(playwright-skill)：打开目标站、完成交互（登录/传图/加购等）",
+                "把关键结果（订单号/截图路径/页面状态）直接回报用户；不要支付除非用户明确要求",
+            ),
+            skip=("url-reader", "knowledge_search", "未确认的平台写入"),
+            preferred_skills=("playwright-skill", "ui-automation"),
         )
 
     if zone.zone_id == ZONE_WEB or (

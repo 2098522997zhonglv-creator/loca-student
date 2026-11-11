@@ -123,6 +123,46 @@ _WEB_HINTS = (
     "打开这个网址",
 )
 
+# 站点交互实体词：须搭配行动线索才升为 browser，避免「购物车逻辑是什么」误路由
+_INTERACTIVE_SITE_HINTS = (
+    "加购",
+    "加入购物车",
+    "购物车",
+    "下单",
+    "传图",
+    "上传图片",
+    "上传图",
+    "所见即所得",
+    "所见所得",
+    "提交订单",
+    "结算",
+    "填表",
+    "扫码登录",
+)
+
+_SITE_ACTION_CUES = (
+    "帮我",
+    "给我",
+    "去下单",
+    "去加购",
+    "订单号",
+    "不要支付",
+    "不需要支付",
+    "不支付",
+    "打开浏览器",
+    "用浏览器",
+    "用 playwright",
+    "执行 skill",
+)
+
+_BROWSER_ACTION_RE = re.compile(
+    r"(帮我.*(下单|加购|登录|截图|传图)|"
+    r"用\s*playwright|"
+    r"打开\s*https?://[^\s]+.*(找|点|填|登|加购|购物车|下单|传图)|"
+    r"(加购|加入购物车|下单|传图).*(订单号|不要支付|不需要支付))",
+    re.IGNORECASE,
+)
+
 _BROWSER_HINTS = (
     "浏览器",
     "自动化",
@@ -136,6 +176,8 @@ _BROWSER_HINTS = (
     "e2e",
     "执行自动化",
     "跑自动化",
+    "打开浏览器",
+    "用浏览器",
 )
 
 _SEARCH_HINTS = (
@@ -290,6 +332,20 @@ def classify_user_intent(message: str) -> IntentDecision:
 
     if any(h in text for h in _BROWSER_HINTS) or "playwright" in lower:
         found.add(INTENT_BROWSER)
+
+    # 交互站点操作（加购/下单/传图等）：升 browser，并去掉 web，避免 url-reader 短路
+    interactive = any(h in text for h in _INTERACTIVE_SITE_HINTS)
+    action_cue = (
+        any(c in text for c in _SITE_ACTION_CUES)
+        or bool(_URL_RE.search(text))
+        or bool(_BROWSER_ACTION_RE.search(text))
+    )
+    if interactive and action_cue:
+        found.add(INTENT_BROWSER)
+        found.discard(INTENT_WEB)
+    elif _BROWSER_ACTION_RE.search(text):
+        found.add(INTENT_BROWSER)
+        found.discard(INTENT_WEB)
 
     if any(h in text for h in _SEARCH_HINTS) or any(
         h in text for h in _FORCE_KB_HINTS

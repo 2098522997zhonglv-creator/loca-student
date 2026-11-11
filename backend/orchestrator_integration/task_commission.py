@@ -11,6 +11,7 @@ from typing import FrozenSet, Optional, Set
 
 from orchestrator_integration.intent_router import IntentDecision, KbAccessPolicy
 from orchestrator_integration.playbooks import (
+    PLAYBOOK_BROWSER_ACT,
     PLAYBOOK_PLATFORM_READ,
     PLAYBOOK_PLATFORM_WRITE,
     PLAYBOOK_TESTCASE_EXECUTE,
@@ -19,6 +20,7 @@ from orchestrator_integration.playbooks import (
     Playbook,
 )
 from orchestrator_integration.skill_zones import (
+    ZONE_BROWSER,
     ZONE_EXECUTE,
     ZONE_KB_QA,
     ZONE_PLATFORM,
@@ -113,6 +115,17 @@ def _split_primary_aux(
     if zone.zone_id == ZONE_WEB:
         return frozenset({"url-reader"}), frozenset()
 
+    if zone.zone_id == ZONE_BROWSER:
+        core = ["playwright-skill", "ui-automation"]
+        primary = frozenset(
+            s for s in core if (not zone_all or s in zone_all)
+        ) or frozenset({"playwright-skill"})
+        aux_candidates = set(preferred or []) | (
+            zone_all or {"playwright-cli", "browser-use"}
+        )
+        aux = frozenset(aux_candidates - set(primary))
+        return primary, aux
+
     if zone.zone_id == ZONE_TICKET_KB:
         core = ["workorder-knowledge", "playwright-skill"]
         primary = frozenset(
@@ -122,14 +135,10 @@ def _split_primary_aux(
         return primary, aux
 
     if zone.zone_id == ZONE_PLATFORM:
-        if playbook and playbook.playbook_id == PLAYBOOK_PLATFORM_READ:
-            return frozenset({"loca-stude"}), frozenset(
-                (zone_all - {"loca-stude"}) if zone_all else {"ui-automation", "api-automation"}
-            )
+        default_aux = {"ui-automation", "api-automation", "playwright-skill"}
         primary = frozenset({"loca-stude"})
-        aux = frozenset(
-            (zone_all - primary) if zone_all else {"ui-automation", "api-automation"}
-        )
+        base_aux = (zone_all - primary) if zone_all else set()
+        aux = frozenset((base_aux | default_aux) - primary)
         return primary, aux
 
     if zone.allowed_skills:
@@ -147,6 +156,7 @@ def _post_condition(playbook: Optional[Playbook], zone: SkillZone) -> str:
     mapping = {
         PLAYBOOK_TESTCASE_EXECUTE: "执行结果已返回且未夹带未确认写入",
         PLAYBOOK_URL_READ: "url-reader 产出可读正文或明确错误原文",
+        PLAYBOOK_BROWSER_ACT: "浏览器交互已完成并回报关键结果（订单号/状态/截图）",
         PLAYBOOK_TICKET_KB: "工单字段已汇总；若 upsert 则须用户确认后才写入",
         PLAYBOOK_PLATFORM_WRITE: "仅草稿/确认后写入；未确认不得落库",
         PLAYBOOK_PLATFORM_READ: "只读查询有真实工具结果",
@@ -170,10 +180,16 @@ def commission_task(
         in {
             PLAYBOOK_TESTCASE_EXECUTE,
             PLAYBOOK_URL_READ,
+            PLAYBOOK_BROWSER_ACT,
             PLAYBOOK_PLATFORM_READ,
             PLAYBOOK_TICKET_KB,
         }
     )
+    # 浏览器交互步数更多（导航+传图+加购），轻量通道放宽预算
+    if pb_id == PLAYBOOK_BROWSER_ACT:
+        step_cap_override = 10
+    else:
+        step_cap_override = None
     # 工单沉淀入库 / 平台写入：短路提示仍开，但走重量通道 + 草稿写
     heavy = bool(
         pb_id == PLAYBOOK_PLATFORM_WRITE
@@ -190,6 +206,8 @@ def commission_task(
     channel = CHANNEL_HEAVY if heavy else CHANNEL_LIGHT
     # 轻量短路路径收紧步数；重量路径稍宽但仍有帽
     step_cap = 4 if (short and channel == CHANNEL_LIGHT) else (6 if heavy else 8)
+    if step_cap_override is not None:
+        step_cap = step_cap_override
     return TaskCommission(
         task_id=uuid.uuid4().hex[:12],
         zone_id=zone.zone_id,

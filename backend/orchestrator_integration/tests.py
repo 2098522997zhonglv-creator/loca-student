@@ -979,28 +979,31 @@ class AgentSmartnessTests(SimpleTestCase):
         set_telemetry_context(
             TelemetryContext(zone=z.zone_id, commission=c, playbook=pb.playbook_id)
         )
-        tools = {t.name: t for t in get_meta_tools()}
-        denied = tools["request_tool_expansion"].invoke(
-            {"skill_name": "workorder-knowledge", "reason": "test"}
-        )
-        self.assertIn("denied", denied)
+        try:
+            tools = {t.name: t for t in get_meta_tools()}
+            denied = tools["request_tool_expansion"].invoke(
+                {"skill_name": "workorder-knowledge", "reason": "test"}
+            )
+            self.assertIn("denied", denied)
 
-        blocked = tools["report_task_blocked"].invoke(
-            {"summary": "缺权限", "missing_capability": "refund"}
-        )
-        self.assertIn("degraded", blocked)
+            blocked = tools["report_task_blocked"].invoke(
+                {"summary": "缺权限", "missing_capability": "refund"}
+            )
+            self.assertIn("degraded", blocked)
 
-        self.assertIn("assert_task_postcondition", tools)
-        c.last_tool_results.append("execute_testcase ok")
-        verdict = tools["assert_task_postcondition"].invoke(
-            {"had_unconfirmed_write": False}
-        )
-        self.assertIn('"ok": true', verdict)  # json.dumps 默认空格
-        # 有未确认写入时断言应失败
-        bad = tools["assert_task_postcondition"].invoke(
-            {"had_unconfirmed_write": True}
-        )
-        self.assertIn('"ok": false', bad)
+            self.assertIn("assert_task_postcondition", tools)
+            c.last_tool_results.append("execute_testcase ok")
+            verdict = tools["assert_task_postcondition"].invoke(
+                {"had_unconfirmed_write": False}
+            )
+            self.assertIn('"ok": true', verdict)  # json.dumps 默认空格
+            # 有未确认写入时断言应失败
+            bad = tools["assert_task_postcondition"].invoke(
+                {"had_unconfirmed_write": True}
+            )
+            self.assertIn('"ok": false', bad)
+        finally:
+            set_telemetry_context(None)
 
     def test_skill_governance_blocks_cross_skill_and_execute_write(self):
         from orchestrator_integration.skill_governance import (
@@ -1295,7 +1298,12 @@ class AgentSmartnessTests(SimpleTestCase):
                 "user_confirmed": True,
             }
         )
-        self.assertIn("不在本轮分区白名单", blocked)
+        self.assertTrue(
+            ("不在本轮分区白名单" in blocked)
+            or ("不在本任务主类授权内" in blocked)
+            or ("分区禁止" in blocked),
+            blocked,
+        )
 
         # kb_qa 分区不挂 execute
         only_read = get_skill_tools(
@@ -1499,6 +1507,137 @@ class AgentSmartnessTests(SimpleTestCase):
                 os.environ.pop("FORCE_DOMAIN_SPECIALIST", None)
             else:
                 os.environ["FORCE_DOMAIN_SPECIALIST"] = old
+
+    def test_interactive_site_routes_browser_not_url_reader(self):
+        from orchestrator_integration.intent_router import (
+            INTENT_BROWSER,
+            INTENT_WEB,
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.playbooks import (
+            PLAYBOOK_BROWSER_ACT,
+            PLAYBOOK_URL_READ,
+            resolve_playbook,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_BROWSER,
+            ZONE_KB_QA,
+            ZONE_WEB,
+            resolve_skill_zone,
+        )
+        from orchestrator_integration.task_commission import commission_task
+
+        # URL + 加购：必须 browser，禁止 url_read
+        text = (
+            "打开 https://callie-us-test-ai-model-tip-1105-web.a.callie.cc/ ，"
+            "找一个已启用的所见所得商品，详情页传图后加入购物车，把购物车里返回的订单号给我，不要支付"
+        )
+        d = classify_user_intent(text)
+        self.assertIn(INTENT_BROWSER, d.intents)
+        self.assertNotIn(INTENT_WEB, d.intents)
+        p = decide_kb_access_policy(text, d)
+        z = resolve_skill_zone(text, d, p)
+        self.assertEqual(z.zone_id, ZONE_BROWSER)
+        pb = resolve_playbook(text, z, d, p)
+        self.assertIsNotNone(pb)
+        self.assertEqual(pb.playbook_id, PLAYBOOK_BROWSER_ACT)
+        c = commission_task(
+            message=text, zone=z, playbook=pb, decision=d, kb_policy=p
+        )
+        self.assertTrue(c.short_circuit)
+        self.assertIn("playwright-skill", c.primary_skills)
+        self.assertGreaterEqual(c.max_tool_steps, 8)
+
+        # 纯问答含「购物车」：仍走 kb_qa，不升 browser
+        qa = "购物车逻辑是什么"
+        dq = classify_user_intent(qa)
+        self.assertNotIn(INTENT_BROWSER, dq.intents)
+        zq = resolve_skill_zone(qa, dq, decide_kb_access_policy(qa, dq))
+        self.assertEqual(zq.zone_id, ZONE_KB_QA)
+
+        # 静态读网页仍走 url_read
+        web = "读这个网页 https://example.com/docs"
+        dw = classify_user_intent(web)
+        self.assertIn(INTENT_WEB, dw.intents)
+        zw = resolve_skill_zone(web, dw, decide_kb_access_policy(web, dw))
+        self.assertEqual(zw.zone_id, ZONE_WEB)
+        pbw = resolve_playbook(web, zw, dw, decide_kb_access_policy(web, dw))
+        self.assertEqual(pbw.playbook_id, PLAYBOOK_URL_READ)
+
+        # 「帮我下单所见即所得」无 URL 也应 browser
+        order = (
+            "帮我在 CALLIE 环境里下单一个所见即所得商品的订单，"
+            "不需要支付把订单号给我即可"
+        )
+        do = classify_user_intent(order)
+        self.assertIn(INTENT_BROWSER, do.intents)
+        zo = resolve_skill_zone(order, do, decide_kb_access_policy(order, do))
+        self.assertEqual(zo.zone_id, ZONE_BROWSER)
+
+    def test_escape_hatch_grant_syncs_skill_allowlist(self):
+        from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools
+        from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.playbooks import resolve_playbook
+        from orchestrator_integration.skill_zones import resolve_skill_zone
+        from orchestrator_integration.task_commission import commission_task
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        text = "执行 skill"
+        d = classify_user_intent(text)
+        p = decide_kb_access_policy(text, d)
+        z = resolve_skill_zone(text, d, p)
+        pb = resolve_playbook(text, z, d, p)
+        c = commission_task(
+            message=text, zone=z, playbook=pb, decision=d, kb_policy=p
+        )
+        # 工具创建时白名单仅主类；随后 Escape Hatch 扩权必须对 read 生效
+        allow = c.effective_allowlist() or set()
+        tools = {
+            t.name: t
+            for t in get_skill_tools(
+                user_id=1,
+                project_id=1,
+                allowed_skill_names=allow,
+                allow_execute=True,
+            )
+        }
+        set_telemetry_context(
+            TelemetryContext(
+                zone=z.zone_id,
+                commission=c,
+                playbook=pb.playbook_id if pb else "",
+            )
+        )
+        try:
+            denied = tools["read_skill_content"].invoke(
+                {"skill_name": "ui-automation"}
+            )
+            self.assertIn("辅类", denied)
+
+            meta = {t.name: t for t in get_meta_tools()}
+            granted = meta["request_tool_expansion"].invoke(
+                {
+                    "skill_name": "ui-automation",
+                    "reason": "需要浏览器自动化完成加购",
+                }
+            )
+            self.assertIn("granted", granted)
+            self.assertIn("ui-automation", c.effective_allowlist() or set())
+
+            ok = tools["read_skill_content"].invoke({"skill_name": "ui-automation"})
+            self.assertNotIn("不在本轮分区白名单", ok)
+            self.assertNotIn("辅类，尚未授权", ok)
+            self.assertNotIn("不在本任务主类授权内", ok)
+        finally:
+            set_telemetry_context(None)
 
 
 class BehaviorMemoryDBTests(TestCase):

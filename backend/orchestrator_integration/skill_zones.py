@@ -37,7 +37,7 @@ _FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
         {"workorder-knowledge", "loca-stude", "playwright-skill"}
     ),
     ZONE_PLATFORM: frozenset(
-        {"loca-stude", "api-automation", "ui-automation"}
+        {"loca-stude", "api-automation", "ui-automation", "playwright-skill"}
     ),
     ZONE_EXECUTE: frozenset({"ui-automation", "loca-stude", "api-automation"}),
     ZONE_WEB: frozenset({"url-reader"}),
