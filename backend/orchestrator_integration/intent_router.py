@@ -275,12 +275,17 @@ def classify_user_intent(message: str) -> IntentDecision:
     if is_ticket_workorder_intent(text):
         found.add(INTENT_PLATFORM)
         found.discard(INTENT_WEB)
-        # 采集页常需浏览器；仅「沉淀/写入」时不强制 browser
-        if _TEAMBITION_TASK_RE.search(text) or _TICKET_VIEW_RE.search(text):
-            if not any(
-                h in text
-                for h in ("沉淀到知识库", "写入知识库", "知识沉淀", "upsert_knowledge")
-            ):
+        # 采集/登录/cookie 跟进强制 browser；纯沉淀写入不强制
+        upsert_hints = (
+            "沉淀到知识库",
+            "写入知识库",
+            "知识沉淀",
+            "upsert_knowledge",
+        )
+        if _TICKET_AUTH_FOLLOWUP_RE.search(text):
+            found.add(INTENT_BROWSER)
+        elif _TEAMBITION_TASK_RE.search(text) or _TICKET_VIEW_RE.search(text):
+            if not any(h in text for h in upsert_hints):
                 found.add(INTENT_BROWSER)
 
     if any(h in text for h in _BROWSER_HINTS) or "playwright" in lower:
@@ -341,6 +346,16 @@ def classify_user_intent(message: str) -> IntentDecision:
     return IntentDecision(intents=found, primary=primary, reason=reason)
 
 
+_TICKET_AUTH_FOLLOWUP_RE = re.compile(
+    r"TEAMBITION_SESSIONID|TB_ACCESS_TOKEN|teambition\.com"
+    r"|更换\s*cookie|更新\s*cookie|换\s*cookie|cookie\s*更换"
+    r"|登录钉钉|钉钉账号|钉钉扫码|钉钉登录"
+    r"|只读采集.{0,12}(?:工单|Teambition|teambition)"
+    r"|(?:浏览器|playwright).{0,16}(?:工单|Teambition|teambition)",
+    re.IGNORECASE,
+)
+
+
 def is_ticket_workorder_intent(message: str) -> bool:
     """Teambition/钉钉工单查看或沉淀（非静态网页）。"""
     text = (message or "").strip()
@@ -349,6 +364,9 @@ def is_ticket_workorder_intent(message: str) -> bool:
     if _TEAMBITION_TASK_RE.search(text):
         return True
     if _TICKET_VIEW_RE.search(text):
+        return True
+    # 同会话跟进：补 cookie / 钉钉登录 / 只读采集，仍走 ticket_kb 而非 kb_qa
+    if _TICKET_AUTH_FOLLOWUP_RE.search(text):
         return True
     if any(
         h in text

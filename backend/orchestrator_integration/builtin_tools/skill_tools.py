@@ -183,6 +183,14 @@ def prefer_url_reader_instead(
             "仅当用户明确要求点击/登录/填表等浏览器自动化时，才使用 playwright-skill。"
         )
 
+    # Teambition / 钉钉登录态 SPA：必须浏览器，禁止改道 url-reader
+    if re.search(
+        r"(?i)teambition\.com|dingtalk\.com|addCookies|TEAMBITION_|TB_ACCESS_TOKEN"
+        r"|getPageText|getPageStructure|helpers\.",
+        cmd,
+    ):
+        return None
+
     # playwright：明显只是打开 URL 读 HTML 报告 → 拦
     looks_like_nav = bool(_BROWSER_NAV_HINT_RE.search(cmd))
     is_html_report = any(

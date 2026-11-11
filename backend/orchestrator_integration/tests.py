@@ -1360,6 +1360,9 @@ class AgentSmartnessTests(SimpleTestCase):
             self.assertIn("本轮剧本", playbook_hint(pb))
 
     def test_teambition_ticket_not_url_reader(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            prefer_url_reader_instead,
+        )
         from orchestrator_integration.intent_router import (
             INTENT_WEB,
             apply_intent_routing,
@@ -1413,6 +1416,33 @@ class AgentSmartnessTests(SimpleTestCase):
 
         self.assertIn("禁止 url-reader", playbook_hint(pb))
         self.assertNotIn(INTENT_WEB, d.intents)
+
+        # 跟进：cookie / 钉钉登录仍走 ticket_kb，且 Teambition goto 不被 prefer_url_reader 误拦
+        for follow in (
+            "登录钉钉账号：159xxxx zhonglvxxxx",
+            "更换cookie TEAMBITION_SESSIONID=abc teambition_lang=zh",
+            "执行 skill，用浏览器只读采集这个 Teambition 工单",
+        ):
+            self.assertTrue(is_ticket_workorder_intent(follow), follow)
+            zd = classify_user_intent(follow)
+            zp = decide_kb_access_policy(follow, zd)
+            zz = resolve_skill_zone(follow, zd, zp)
+            self.assertEqual(zz.zone_id, ZONE_TICKET_KB, follow)
+            self.assertTrue(zz.allow_execute, follow)
+
+        self.assertIsNone(
+            prefer_url_reader_instead(
+                "playwright-skill",
+                'node run.js "await page.goto(\'https://www.teambition.com/task/abc\'); '
+                'const txt=await helpers.getPageText(page);"',
+            )
+        )
+        self.assertIsNotNone(
+            prefer_url_reader_instead(
+                "playwright-skill",
+                'node run.js "await page.goto(\'https://example.com/report.html\');"',
+            )
+        )
 
     def test_tool_telemetry_aggregate(self):
         from orchestrator_integration.tool_telemetry import (
