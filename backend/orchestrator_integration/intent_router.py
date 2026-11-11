@@ -232,6 +232,18 @@ _META_HINTS = (
 _CONTINUE_HINTS = ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
 
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+# 已知交互 SPA：默认走 browser，禁止 url-reader 短路（除非用户明确只要读静态正文）
+_INTERACTIVE_SPA_HOST_RE = re.compile(
+    r"(?i)https?://[^\s]*(?:callie\.cc|bomiv\.com|teambition\.com|dingtalk\.com)\b"
+)
+_PURE_STATIC_READ_HINTS = (
+    "读网页",
+    "读取网页",
+    "url-reader",
+    "抓取正文",
+    "看源码",
+    "只要 html",
+)
 
 # MCP / 内置工具名匹配（小写比较）
 _PLAYWRIGHT_TOOL_RE = re.compile(r"(?i)playwright|browser_")
@@ -344,6 +356,13 @@ def classify_user_intent(message: str) -> IntentDecision:
         found.add(INTENT_BROWSER)
         found.discard(INTENT_WEB)
     elif _BROWSER_ACTION_RE.search(text):
+        found.add(INTENT_BROWSER)
+        found.discard(INTENT_WEB)
+
+    # callie/bomiv 等 SPA：除非明确只要静态正文，否则强制 browser
+    if _INTERACTIVE_SPA_HOST_RE.search(text) and not any(
+        h in text for h in _PURE_STATIC_READ_HINTS
+    ):
         found.add(INTENT_BROWSER)
         found.discard(INTENT_WEB)
 

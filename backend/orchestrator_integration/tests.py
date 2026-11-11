@@ -1585,6 +1585,14 @@ class AgentSmartnessTests(SimpleTestCase):
         zo = resolve_skill_zone(order, do, decide_kb_access_policy(order, do))
         self.assertEqual(zo.zone_id, ZONE_BROWSER)
 
+        # SPA 主机即使关键词不全，只要不是明确静态读，也强制 browser
+        spa = "打开 https://callie-us-test-ai-model-tip-1105-web.a.callie.cc/"
+        ds = classify_user_intent(spa)
+        self.assertIn(INTENT_BROWSER, ds.intents)
+        self.assertNotIn(INTENT_WEB, ds.intents)
+        zs = resolve_skill_zone(spa, ds, decide_kb_access_policy(spa, ds))
+        self.assertEqual(zs.zone_id, ZONE_BROWSER)
+
     def test_escape_hatch_grant_syncs_skill_allowlist(self):
         from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools
         from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools

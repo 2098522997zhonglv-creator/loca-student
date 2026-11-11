@@ -278,9 +278,27 @@ import logging.config as _logging_config
 _logging_config.dictConfig(LOGGING)
 import logging as _logging
 
+def _runtime_git_head() -> str:
+    try:
+        import subprocess
+        from pathlib import Path
+
+        root = Path(BASE_DIR).resolve().parent
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(root),
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        return out.decode("utf-8", errors="replace").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 _logging.getLogger("loca_stude_django.settings").info(
-    "Runtime logging ready: file=%s level=%s backup_count=%s",
+    "Runtime logging ready: file=%s level=%s backup_count=%s git=%s",
     APP_LOG_FILE,
     LOG_LEVEL,
     LOG_BACKUP_COUNT,
+    _runtime_git_head(),
 )
