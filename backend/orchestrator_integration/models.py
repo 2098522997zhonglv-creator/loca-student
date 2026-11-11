@@ -69,11 +69,15 @@ class OrchestratorTask(models.Model):
 
 
 class AgentTask(models.Model):
-    """Agent Loop 任务 - 用于分步执行的任务管理"""
+    """Agent Loop 任务 - 用于分步执行的任务管理（FR04 TaskRun）"""
     
     STATUS_CHOICES = [
         ('pending', '待处理'),
         ('running', '执行中'),
+        ('awaiting_approval', '等待审批'),
+        ('blocked', '已阻塞'),
+        ('cancelling', '正在取消'),
+        ('cancelled', '已取消'),
         ('paused', '已暂停'),
         ('completed', '已完成'),
         ('failed', '失败'),
@@ -85,12 +89,51 @@ class AgentTask(models.Model):
         related_name='agent_tasks',
         verbose_name='关联会话'
     )
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='agent_tasks',
+        verbose_name='所属项目',
+    )
+    user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='agent_loop_tasks',
+        verbose_name='发起用户',
+    )
+    public_task_id = models.CharField(
+        max_length=32,
+        unique=True,
+        db_index=True,
+        null=True,
+        blank=True,
+        verbose_name='对外任务ID',
+    )
     goal = models.TextField(verbose_name='任务目标（用户原始请求）')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
     max_steps = models.IntegerField(default=500, verbose_name='最大步骤数')
     current_step = models.IntegerField(default=0, verbose_name='当前步骤')
     final_response = models.TextField(blank=True, verbose_name='最终响应')
     error_message = models.TextField(blank=True, verbose_name='错误信息')
+
+    # FR04/FR07/FR08 持久化字段
+    plan_version = models.IntegerField(default=1, verbose_name='计划版本')
+    current_stage = models.CharField(max_length=64, blank=True, default='', verbose_name='当前阶段')
+    stage_plan = models.JSONField(default=list, blank=True, verbose_name='阶段计划')
+    auth_scope = models.JSONField(default=dict, blank=True, verbose_name='授权范围')
+    task_scope = models.JSONField(default=dict, blank=True, verbose_name='任务范围/浏览器约束')
+    budget = models.JSONField(default=dict, blank=True, verbose_name='预算快照')
+    acceptance = models.JSONField(default=dict, blank=True, verbose_name='验收结论')
+    facts = models.JSONField(default=dict, blank=True, verbose_name='结构化事实（非摘要）')
+    checkpoint_ref = models.CharField(max_length=255, blank=True, default='', verbose_name='checkpoint引用')
+    version = models.IntegerField(default=0, verbose_name='乐观锁版本')
+    lease_owner = models.CharField(max_length=64, blank=True, default='', verbose_name='执行租约持有者')
+    lease_expires_at = models.DateTimeField(null=True, blank=True, verbose_name='租约到期')
+    deadline_at = models.DateTimeField(null=True, blank=True, verbose_name='截止时间')
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -101,13 +144,29 @@ class AgentTask(models.Model):
         ordering = ['-created_at']
         verbose_name = 'Agent任务'
         verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=['session', '-created_at']),
+            models.Index(fields=['public_task_id']),
+            models.Index(fields=['status', '-updated_at']),
+        ]
     
     def __str__(self):
         return f"AgentTask {self.id}: {self.goal[:50]}"
 
 
 class AgentStep(models.Model):
-    """Agent 单步执行记录"""
+    """Agent 单步执行记录（FR04 TaskStep）"""
+
+    STATUS_CHOICES = [
+        ('pending', '待执行'),
+        ('running', '执行中'),
+        ('succeeded', '成功'),
+        ('failed', '失败'),
+        ('unknown', '未知'),
+        ('skipped', '已跳过'),
+        ('cancelled', '已取消'),
+        ('awaiting_approval', '等待审批'),
+    ]
     
     task = models.ForeignKey(
         AgentTask,
@@ -119,9 +178,15 @@ class AgentStep(models.Model):
         validators=[MinValueValidator(1)],
         verbose_name='步骤序号'
     )
+    step_id = models.CharField(max_length=64, blank=True, default='', verbose_name='逻辑步骤ID')
+    stage_id = models.CharField(max_length=64, blank=True, default='', verbose_name='所属阶段')
+    depends_on = models.JSONField(default=list, blank=True, verbose_name='依赖步骤')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    on_failure = models.CharField(max_length=32, default='stop_dependents', verbose_name='失败策略')
     
     # 输入
     input_context = models.JSONField(default=dict, verbose_name='输入上下文（精简版）')
+    param_fingerprint = models.CharField(max_length=64, blank=True, default='', verbose_name='参数指纹')
     
     # AI 决策
     ai_thinking = models.TextField(blank=True, verbose_name='AI思考过程')
@@ -132,6 +197,10 @@ class AgentStep(models.Model):
     tool_input = models.JSONField(null=True, blank=True, verbose_name='工具输入')
     tool_output_summary = models.TextField(blank=True, verbose_name='工具输出摘要')
     tool_output_full_ref = models.CharField(max_length=200, blank=True, verbose_name='完整输出引用')
+    operation_id = models.CharField(max_length=64, blank=True, default='', verbose_name='操作ID')
+    structured_result = models.JSONField(default=dict, blank=True, verbose_name='结构化结果')
+    evidence = models.JSONField(default=dict, blank=True, verbose_name='证据')
+    attempt_count = models.IntegerField(default=0, verbose_name='尝试次数')
     
     # AI 响应
     ai_response = models.TextField(blank=True, verbose_name='AI响应')
@@ -334,3 +403,128 @@ class UserBehaviorEvent(models.Model):
 
     def __str__(self):
         return f"{self.user_id}:{self.event_type}:{self.summary_text[:40]}"
+
+
+class ApprovalRequest(models.Model):
+    """持久化审批请求（FR05），替代纯进程内 write_confirm 缓存。"""
+
+    STATUS_CHOICES = [
+        ('pending', '待审批'),
+        ('approved', '已批准'),
+        ('rejected', '已拒绝'),
+        ('consumed', '已消费'),
+        ('expired', '已过期'),
+        ('cancelled', '已取消'),
+    ]
+
+    interrupt_id = models.CharField(max_length=64, unique=True, db_index=True)
+    task = models.ForeignKey(
+        AgentTask,
+        on_delete=models.CASCADE,
+        related_name='approvals',
+        null=True,
+        blank=True,
+    )
+    step = models.ForeignKey(
+        AgentStep,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='approvals',
+    )
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name='approval_requests'
+    )
+    project = models.ForeignKey(
+        'projects.Project',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    session_id = models.CharField(max_length=255, blank=True, default='')
+    action_name = models.CharField(max_length=128, verbose_name='动作名')
+    action_args = models.JSONField(default=dict, blank=True)
+    param_fingerprint = models.CharField(max_length=64, blank=True, default='')
+    content_version = models.CharField(max_length=64, blank=True, default='')
+    kind = models.CharField(max_length=32, default='write_confirmation')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    expires_at = models.DateTimeField(null=True, blank=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    decision = models.CharField(max_length=16, blank=True, default='')
+    summary = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'orchestrator_approval_request'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'status', '-created_at']),
+            models.Index(fields=['session_id', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Approval {self.interrupt_id}:{self.status}"
+
+
+class TaskEvent(models.Model):
+    """任务事件流水（FR10）。"""
+
+    task = models.ForeignKey(
+        AgentTask, on_delete=models.CASCADE, related_name='events'
+    )
+    event_id = models.CharField(max_length=64, unique=True, db_index=True)
+    sequence = models.IntegerField(default=0)
+    step_id = models.CharField(max_length=64, blank=True, default='')
+    event_type = models.CharField(max_length=64)
+    status = models.CharField(max_length=32, blank=True, default='')
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'orchestrator_task_event'
+        ordering = ['task', 'sequence']
+        indexes = [
+            models.Index(fields=['task', 'sequence']),
+            models.Index(fields=['event_type', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.event_type}:{self.event_id}"
+
+
+class EvidenceRecord(models.Model):
+    """验收证据（FR03/FR09）。"""
+
+    task = models.ForeignKey(
+        AgentTask, on_delete=models.CASCADE, related_name='evidence_records'
+    )
+    step = models.ForeignKey(
+        AgentStep,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='evidence_records',
+    )
+    evidence_type = models.CharField(max_length=64)
+    resource_ref = models.CharField(max_length=255, blank=True, default='')
+    resource_version = models.CharField(max_length=64, blank=True, default='')
+    observed_at = models.DateTimeField(null=True, blank=True)
+    validator = models.CharField(max_length=64, blank=True, default='')
+    expected = models.JSONField(default=dict, blank=True)
+    observed = models.JSONField(default=dict, blank=True)
+    claim_type = models.CharField(
+        max_length=32,
+        blank=True,
+        default='',
+        help_text='document|inference|observation',
+    )
+    storage_ref = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'orchestrator_evidence'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Evidence {self.evidence_type}:{self.id}"

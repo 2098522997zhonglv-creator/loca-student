@@ -143,6 +143,18 @@ def build_write_confirm_interrupt(
         "raw_message": confirmation.get("message") or "",
     }
     get_write_confirm_store().put(interrupt_id, store_payload)
+    # FR05.3：同步持久化审批（失败不影响内存路径）
+    try:
+        _persist_approval_request(
+            interrupt_id=interrupt_id,
+            session_id=session_id,
+            tool_name=tool_name or "execute_skill_script",
+            pending=pending,
+            summary=summary,
+            mode=mode,
+        )
+    except Exception as exc:
+        logger.warning("WriteConfirm: persist ApprovalRequest failed: %s", exc)
     logger.info(
         "WriteConfirm: stored interrupt_id=%s session_id=%s tool=%s summary=%s",
         interrupt_id,
@@ -174,6 +186,108 @@ def build_write_confirm_interrupt(
         "session_id": session_id,
         "thread_id": thread_id,
     }
+
+
+def _persist_approval_request(
+    *,
+    interrupt_id: str,
+    session_id: str,
+    tool_name: str,
+    pending: Dict[str, Any],
+    summary: str,
+    mode: str,
+) -> None:
+    from datetime import timedelta
+
+    from django.contrib.auth import get_user_model
+    from django.utils import timezone
+
+    from orchestrator_integration.agent_runtime import fingerprint_payload
+    from orchestrator_integration.models import AgentTask, ApprovalRequest
+    from langgraph_integration.models import ChatSession
+
+    session = ChatSession.objects.filter(session_id=session_id).select_related("user", "project").first()
+    if session is None or session.user_id is None:
+        return
+    task = (
+        AgentTask.objects.filter(session=session)
+        .exclude(status__in=("completed", "failed", "cancelled"))
+        .order_by("-updated_at")
+        .first()
+    )
+    ApprovalRequest.objects.update_or_create(
+        interrupt_id=interrupt_id,
+        defaults={
+            "task": task,
+            "user_id": session.user_id,
+            "project_id": session.project_id,
+            "session_id": session_id,
+            "action_name": tool_name,
+            "action_args": {"pending": pending, "mode": mode},
+            "param_fingerprint": fingerprint_payload(pending),
+            "kind": "write_confirmation",
+            "status": "pending",
+            "expires_at": timezone.now() + timedelta(minutes=30),
+            "summary": summary[:2000],
+        },
+    )
+
+
+def consume_approval(
+    interrupt_id: str,
+    *,
+    user_id: int,
+    decision: str,
+    expected_fingerprint: str = "",
+) -> Dict[str, Any]:
+    """精确消费审批（FR05.4）：条件更新，防重复/过期/参数漂移。"""
+    from django.db import transaction
+    from django.utils import timezone
+
+    from orchestrator_integration.models import ApprovalRequest
+
+    with transaction.atomic():
+        row = (
+            ApprovalRequest.objects.select_for_update()
+            .filter(interrupt_id=interrupt_id)
+            .first()
+        )
+        if row is None:
+            # 兼容仅内存缓存的旧路径
+            return {"ok": True, "mode": "memory_only", "decision": decision}
+        if row.user_id != user_id:
+            return {"ok": False, "error_code": "permission_denied"}
+        if row.status in ("consumed", "rejected", "expired", "cancelled"):
+            return {
+                "ok": False,
+                "error_code": f"approval_{row.status}",
+                "status": row.status,
+            }
+        if row.expires_at and row.expires_at <= timezone.now():
+            row.status = "expired"
+            row.save(update_fields=["status", "updated_at"])
+            return {"ok": False, "error_code": "approval_expired"}
+        if expected_fingerprint and row.param_fingerprint and (
+            expected_fingerprint != row.param_fingerprint
+        ):
+            return {"ok": False, "error_code": "param_fingerprint_mismatch"}
+        row.decision = decision
+        if decision == "approve":
+            row.status = "consumed"
+            row.consumed_at = timezone.now()
+        else:
+            row.status = "rejected"
+            row.consumed_at = timezone.now()
+        row.save(
+            update_fields=["decision", "status", "consumed_at", "updated_at"]
+        )
+        return {
+            "ok": True,
+            "status": row.status,
+            "decision": decision,
+            "action_args": row.action_args,
+            "param_fingerprint": row.param_fingerprint,
+        }
 
 
 def build_resume_user_message(

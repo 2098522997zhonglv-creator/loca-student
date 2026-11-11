@@ -1890,8 +1890,131 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertTrue(fixed.reason.startswith("route_correct"))
         self.assertEqual(fixed.allowed_skills, zone_skills(ZONE_BROWSER))
 
+    def test_stage_plan_and_auth_scope(self):
+        from orchestrator_integration.intent_router import classify_user_intent
+        from orchestrator_integration.stage_plan import (
+            build_stage_plan,
+            infer_auth_scope,
+            is_composite_request,
+        )
+
+        text = "根据知识库登录规则生成用例并保存后执行，再汇总"
+        d = classify_user_intent(text)
+        self.assertTrue(is_composite_request(text, d))
+        stages = build_stage_plan(text, d)
+        ids = [s.stage_id for s in stages]
+        self.assertIn("kb_research", ids)
+        self.assertIn("persist", ids)
+        self.assertIn("execute", ids)
+        self.assertEqual(ids[-1], "summarize")
+
+        auth = infer_auth_scope(
+            "详情页传图后加入购物车，把购物车标识给我，不要支付"
+        )
+        self.assertIn("add_to_cart", auth["allow_actions"])
+        self.assertIn("upload", auth["allow_actions"])
+        self.assertIn("pay", auth["deny_actions"])
+        self.assertIn("submit_order", auth["deny_actions"])
+
+    def test_knowledge_claim_and_product_consistency(self):
+        from orchestrator_integration.knowledge_claims import (
+            assert_target_product_consistency,
+            classify_kb_claim,
+        )
+
+        claim = classify_kb_claim(
+            text="文档写明目前仅有 143 和 dnd 展示支持，当前分支不同因此不支持",
+            source_doc="商品中心操作要点",
+        )
+        self.assertEqual(claim["claim_type"], "inference")
+        self.assertTrue(claim["warnings"])
+
+        bad = assert_target_product_consistency(
+            target_url="https://a.callie.cc/p1",
+            other_product_note="另一商品属性区为空",
+        )
+        self.assertFalse(bad["ok"])
+
 
 class BehaviorMemoryDBTests(TestCase):
+    def test_approval_consume_once(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.models import ApprovalRequest
+        from orchestrator_integration.write_confirmation import consume_approval
+
+        User = get_user_model()
+        user = User.objects.create_user(username="apr1", password="x")
+        chat = ChatSession.objects.create(
+            user=user,
+            session_id="sess-apr-1",
+            title="t",
+        )
+        ApprovalRequest.objects.create(
+            interrupt_id="write_confirm_test1",
+            user=user,
+            session_id=chat.session_id,
+            action_name="execute_skill_script",
+            action_args={"pending": {"command": "x"}},
+            param_fingerprint="abc",
+            status="pending",
+        )
+        ok1 = consume_approval(
+            "write_confirm_test1", user_id=user.id, decision="approve"
+        )
+        self.assertTrue(ok1["ok"])
+        ok2 = consume_approval(
+            "write_confirm_test1", user_id=user.id, decision="approve"
+        )
+        self.assertFalse(ok2["ok"])
+        self.assertEqual(ok2["error_code"], "approval_consumed")
+
+    def test_runtime_lease_and_budget(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import (
+            acquire_lease,
+            consume_budget,
+            create_or_resume_task,
+            task_snapshot,
+        )
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rt1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-rt-1", title="t")
+        c = TaskCommission(
+            task_id="tid123",
+            zone_id="browser",
+            playbook_id="browser_act",
+            primary_skills=frozenset({"playwright-skill"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=False,
+            channel="light",
+            max_tool_steps=5,
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="加购不要支付",
+            commission=c,
+            auth_scope={"allow_actions": ["add_to_cart"]},
+            stage_plan=[{"stage_id": "browser_interact", "goal": "x"}],
+            lease_owner="w1",
+        )
+        self.assertTrue(acquire_lease(task, "w1"))
+        self.assertFalse(acquire_lease(task, "w2"))
+        ok, _ = consume_budget(task, tool_steps=2)
+        self.assertTrue(ok)
+        bad, msg = consume_budget(task, tool_steps=10)
+        self.assertFalse(bad)
+        self.assertIn("budget_tool_steps_exceeded", msg)
+        snap = task_snapshot(task)
+        self.assertEqual(snap["task_id"], "tid123")
+        self.assertIn("events", snap)
+
     def test_record_creates_db_row_when_vector_upsert_fails(self):
         User = get_user_model()
         user = User.objects.create_user(username="beh1", password="x")

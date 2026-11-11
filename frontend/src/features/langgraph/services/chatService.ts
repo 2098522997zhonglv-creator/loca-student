@@ -40,7 +40,7 @@ interface StreamState {
   maxSteps?: number;     // Agent Loop 最大步骤数
   userMessage?: string;  // 用户发送的消息内容
   userMessageTime?: string;  // 用户消息时间（会话创建时间）
-  taskId?: number;       // Agent Task ID
+  taskId?: number | string;       // Agent Task ID
   // ⭐ 脚本生成信息
   scriptGeneration?: {
     available: boolean;
@@ -60,6 +60,11 @@ interface StreamState {
     }>;
   };
   isWaitingForApproval?: boolean; // 是否正在等待用户审批
+  /** FR10：任务阶段与验收状态 */
+  taskStatus?: string;
+  currentStage?: string;
+  acceptance?: Record<string, unknown>;
+  taskEvents?: Array<Record<string, unknown>>;
 }
 
 // Agent Loop SSE 事件类型定义（供文档和类型参考）
@@ -756,6 +761,42 @@ export async function sendChatMessageStream(
               action_requests: parsed.action_requests || [],
             };
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
+          }
+
+          // FR10：任务阶段 / 验收终态
+          if (
+            (parsed.type === 'task_started' ||
+              parsed.type === 'task_completed' ||
+              parsed.type === 'task_blocked' ||
+              parsed.type === 'task_cancelling') &&
+            streamSessionId &&
+            activeStreams.value[streamSessionId]
+          ) {
+            const stream = activeStreams.value[streamSessionId];
+            stream.taskId = parsed.task_id || stream.taskId;
+            stream.taskStatus = parsed.status || parsed.type;
+            if (parsed.payload?.stage) {
+              stream.currentStage = String(parsed.payload.stage);
+            }
+            if (parsed.acceptance) {
+              stream.acceptance = parsed.acceptance as Record<string, unknown>;
+            }
+            stream.taskEvents = [...(stream.taskEvents || []), parsed];
+            if (parsed.type === 'task_blocked' || parsed.type === 'task_completed') {
+              const reasons = Array.isArray(parsed.acceptance?.reasons)
+                ? (parsed.acceptance.reasons as string[]).join('；')
+                : '';
+              const label =
+                parsed.type === 'task_completed'
+                  ? '任务已验收完成'
+                  : `任务未完全完成${reasons ? `：${reasons}` : ''}`;
+              stream.messages.push({
+                content: label,
+                type: 'system',
+                time: formatStreamTime(),
+                isExpanded: false,
+              });
+            }
           }
 
           if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {

@@ -30,10 +30,16 @@ SideEffect = str  # read | write | irreversible
 class SkillCatalogEntry:
     name: str
     zones: FrozenSet[str]
-    side_effect: SideEffect
+    side_effect: SideEffect  # read | write | irreversible | execute | unknown
     depends_on: FrozenSet[str] = field(default_factory=frozenset)
     timeout_sec: int = 120
     actions: Dict[str, SideEffect] = field(default_factory=dict)
+    # FR06 能力扩展
+    idempotent: bool = False
+    retry_policy: str = "none"  # none | once | bounded
+    reconcile_action: str = ""
+    validator: str = ""
+    resource_keys: FrozenSet[str] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -64,15 +70,26 @@ def _parse_entry(raw: dict) -> SkillCatalogEntry:
         for k, v in (raw.get("actions") or {}).items()
         if k and v
     }
+    effect = str(raw.get("side_effect") or raw.get("effect") or "read").strip()
+    # execute_testcase / run_api 等不再仅按名称视为纯只读（FR06.1）
+    if effect == "execute":
+        effect = "execute"
     return SkillCatalogEntry(
         name=str(raw.get("name") or "").strip(),
         zones=frozenset(str(z).strip() for z in (raw.get("zones") or []) if z),
-        side_effect=str(raw.get("side_effect") or "read").strip(),
+        side_effect=effect,
         depends_on=frozenset(
             str(d).strip() for d in (raw.get("depends_on") or []) if d
         ),
         timeout_sec=int(raw.get("timeout_sec") or 120),
         actions=actions,
+        idempotent=bool(raw.get("idempotent", False)),
+        retry_policy=str(raw.get("retry_policy") or "none").strip(),
+        reconcile_action=str(raw.get("reconcile_action") or "").strip(),
+        validator=str(raw.get("validator") or "").strip(),
+        resource_keys=frozenset(
+            str(k).strip() for k in (raw.get("resource_keys") or []) if k
+        ),
     )
 
 

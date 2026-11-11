@@ -125,13 +125,19 @@ _KB_PRIORITY_HINT = """
 - 多步骤或中文引号：steps 用 --steps_file。
 
 ## 引用与诚实
-- 事实结论必须用文档名标注来源，禁止在回答里输出 [预检索N]/[结果N] 等内部编号；多来源冲突须并列说明，勿擅自二选一。
+- 事实结论必须用文档名标注来源，禁止在回答里输出 [预检索N]、[结果N] 等内部编号；多来源冲突须并列说明，勿擅自二选一。
 - 预检索提示索引为空：如实告知重建索引，不要编造。
 - 禁止编造「子代理 / functional_test_case_*」。
 - 已注入预检索时，总结不得写「未使用知识库」。
 - 账号行为偏好仅作习惯参考，事实以知识库为准。
 - Skill（含 url-reader）在本机/部署机执行，可访问内网 192.168.*；禁止编造「我是远程服务所以读不了局域网」。
 - 工具失败时只复述工具返回的 error/退出码，不要猜测网络拓扑或让用户改贴公开 URL（除非工具明确超时/连接失败）。
+
+## 知识适用性与证据（FR09）
+- 区分文档陈述 / 推断 / 本次观察；仅凭 143/dnd 与分支域名不同不能断言功能不支持，优先核对目标商品实际配置。
+- 其他商品「所见所得」观察不能替代用户指定 URL/SKU 的验证；替换目标须说明影响。
+- 知识库订单号示例不得填充本次结果；交付真实字段名、值与来源。
+- 对用户输出使用任务语言：已做事项、证据、剩余步骤与具体阻塞；禁止要求用户重发路由关键词。
 """.strip()
 
 
@@ -1540,6 +1546,53 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: Created new ChatSession: {session_id}"
                 )
 
+            # 7.1 FR04/FR08：持久化任务 + 阶段计划 + 授权范围
+            runtime_task = None
+            try:
+                from orchestrator_integration.agent_runtime import (
+                    append_event_async,
+                    create_or_resume_task_async,
+                )
+                from orchestrator_integration.stage_plan import (
+                    build_stage_plan,
+                    infer_auth_scope,
+                )
+
+                stages = [
+                    s.to_dict()
+                    for s in build_stage_plan(
+                        user_message,
+                        intent_decision,
+                        playbook_id=active_playbook.playbook_id
+                        if active_playbook
+                        else "",
+                    )
+                ]
+                auth_scope = infer_auth_scope(user_message)
+                runtime_task = await create_or_resume_task_async(
+                    session=chat_session,
+                    user=request.user,
+                    project_id=int(project_id) if project_id else None,
+                    goal=user_message,
+                    commission=task_commission,
+                    auth_scope=auth_scope,
+                    stage_plan=stages,
+                )
+                started_evt = await append_event_async(
+                    runtime_task,
+                    "task_started",
+                    status="running",
+                    payload={
+                        "stage": runtime_task.current_stage,
+                        "auth_scope": auth_scope,
+                    },
+                )
+                yield create_sse_data(started_evt)
+            except Exception as rt_err:
+                logger.warning(
+                    "AgentLoopStreamAPI: runtime task create failed: %s", rt_err
+                )
+
             # 8. 获取系统提示词（注入 Skills，便于基于知识库生成后写入平台）
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user,
@@ -2252,6 +2305,9 @@ class AgentLoopStreamAPIView(View):
                         from orchestrator_integration.execution_policy import (
                             evaluate_post_condition,
                         )
+                        from orchestrator_integration.agent_runtime import (
+                            apply_acceptance_async,
+                        )
 
                         acceptance = evaluate_post_condition(
                             post_condition=task_commission.post_condition,
@@ -2259,20 +2315,38 @@ class AgentLoopStreamAPIView(View):
                             had_unconfirmed_write=False,
                             playbook_id=task_commission.playbook_id or "",
                         )
-                        yield create_sse_data(
-                            {
-                                "type": (
-                                    "task_completed"
-                                    if acceptance.get("ok")
-                                    else "task_blocked"
-                                ),
-                                "task_id": task_commission.task_id,
-                                "status": (
-                                    "completed" if acceptance.get("ok") else "blocked"
-                                ),
-                                "acceptance": acceptance,
-                            }
-                        )
+                        evt_payload = {
+                            "type": (
+                                "task_completed"
+                                if acceptance.get("ok")
+                                else "task_blocked"
+                            ),
+                            "task_id": (
+                                getattr(runtime_task, "public_task_id", None)
+                                if "runtime_task" in locals() and runtime_task
+                                else task_commission.task_id
+                            ),
+                            "status": (
+                                "completed" if acceptance.get("ok") else "blocked"
+                            ),
+                            "acceptance": acceptance,
+                        }
+                        if "runtime_task" in locals() and runtime_task is not None:
+                            try:
+                                persisted = await apply_acceptance_async(
+                                    runtime_task, acceptance
+                                )
+                                evt_payload.update(
+                                    {
+                                        "event_id": persisted.get("event_id"),
+                                        "sequence": persisted.get("sequence"),
+                                    }
+                                )
+                            except Exception as persist_acc_err:
+                                logger.debug(
+                                    "persist acceptance failed: %s", persist_acc_err
+                                )
+                        yield create_sse_data(evt_payload)
                     except Exception as acc_err:
                         logger.warning(
                             "AgentLoopStreamAPI: runtime acceptance failed: %s",
@@ -2672,19 +2746,118 @@ class AgentLoopStopAPIView(View):
         if not session_id:
             return api_error_response("session_id is required", 400)
 
-        # 3. 设置停止信号
+        # 3. 设置停止信号 + 任务 cancelling（FR07）
         success = set_stop_signal(session_id)
+        cancel_info = {}
+        try:
+            from orchestrator_integration.agent_runtime import request_cancel
+            from orchestrator_integration.models import AgentTask
+            from langgraph_integration.models import ChatSession
+
+            chat = await sync_to_async(
+                ChatSession.objects.filter(session_id=session_id).first
+            )()
+            if chat:
+                task = await sync_to_async(
+                    lambda: AgentTask.objects.filter(session=chat)
+                    .exclude(status__in=("completed", "failed", "cancelled"))
+                    .order_by("-updated_at")
+                    .first()
+                )()
+                if task and (task.user_id is None or task.user_id == user.id):
+                    cancel_info = await sync_to_async(request_cancel)(task)
+        except Exception as stop_err:
+            logger.debug("stop task cancel mark failed: %s", stop_err)
 
         logger.info(
-            "LLM_CHAT stop user_id=%s session_id=%s success=%s",
+            "LLM_CHAT stop user_id=%s session_id=%s success=%s cancel=%s",
             user.id,
             session_id,
             success,
+            cancel_info,
         )
 
         return api_success_response(
-            "已发送停止信号", {"session_id": session_id, "success": success}
+            "已发送停止信号",
+            {
+                "session_id": session_id,
+                "success": success,
+                "status": cancel_info.get("status") or "cancelling",
+                "task_id": cancel_info.get("task_id"),
+            },
         )
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class AgentTaskSnapshotAPIView(View):
+    """任务快照与事件补取（FR10.3）。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def get(self, request, *args, **kwargs):
+        try:
+            user = await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+
+        task_id = request.GET.get("task_id") or ""
+        session_id = request.GET.get("session_id") or ""
+        after_event_id = request.GET.get("after_event_id") or ""
+        if not task_id and not session_id:
+            return api_error_response("task_id or session_id required", 400)
+
+        try:
+            from orchestrator_integration.agent_runtime import task_snapshot
+            from orchestrator_integration.models import AgentTask, TaskEvent
+
+            def _load():
+                qs = AgentTask.objects.all()
+                if task_id:
+                    task = qs.filter(public_task_id=task_id).first() or qs.filter(
+                        pk=task_id
+                    ).first()
+                else:
+                    from langgraph_integration.models import ChatSession
+
+                    chat = ChatSession.objects.filter(session_id=session_id).first()
+                    task = (
+                        AgentTask.objects.filter(session=chat)
+                        .order_by("-updated_at")
+                        .first()
+                        if chat
+                        else None
+                    )
+                if task is None:
+                    return None
+                if task.user_id and task.user_id != user.id:
+                    return "forbidden"
+                snap = task_snapshot(task)
+                if after_event_id:
+                    after = TaskEvent.objects.filter(event_id=after_event_id).first()
+                    if after:
+                        snap["events"] = [
+                            e
+                            for e in snap.get("events") or []
+                            if (e.get("sequence") or 0) > after.sequence
+                        ]
+                return snap
+
+            data = await sync_to_async(_load)()
+            if data == "forbidden":
+                return api_error_response("permission_denied", 403)
+            if data is None:
+                return api_error_response("task_not_found", 404)
+            return api_success_response("ok", data)
+        except Exception as e:
+            logger.error("AgentTaskSnapshotAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -2748,7 +2921,42 @@ class AgentLoopResumeAPIView(View):
         write_confirm_resume = is_write_confirm_interrupt(interrupt_id)
         write_confirm_pending = None
         if write_confirm_resume:
+            # FR05.4：先消费持久化审批
+            consumed: Dict[str, Any] = {"ok": True, "mode": "memory_only"}
+            try:
+                from orchestrator_integration.write_confirmation import consume_approval
+
+                consumed = await sync_to_async(consume_approval)(
+                    interrupt_id,
+                    user_id=user.id,
+                    decision=decision_type,
+                )
+                if (
+                    not consumed.get("ok")
+                    and consumed.get("mode") != "memory_only"
+                    and consumed.get("error_code")
+                ):
+                    yield create_sse_data(
+                        {
+                            "type": "error",
+                            "error_code": consumed.get("error_code"),
+                            "message": f"审批无法消费: {consumed.get('error_code')}",
+                        }
+                    )
+                    return
+            except Exception as consume_err:
+                logger.warning(
+                    "AgentLoopResumeAPI: consume_approval failed: %s", consume_err
+                )
+
             write_confirm_pending = get_write_confirm_store().pop(interrupt_id)
+            if write_confirm_pending is None and consumed.get("ok") and consumed.get(
+                "action_args"
+            ):
+                write_confirm_pending = {
+                    "pending": (consumed.get("action_args") or {}).get("pending"),
+                    "mode": (consumed.get("action_args") or {}).get("mode"),
+                }
             if write_confirm_pending is None:
                 yield create_sse_data(
                     {

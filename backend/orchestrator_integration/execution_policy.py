@@ -118,7 +118,8 @@ def plan_batch_execution(
     effects = [
         command_side_effect(c.get("command"), c.get("skill_name")) for c in cmds
     ]
-    has_write = any(e in ("write", "irreversible") for e in effects)
+    # execute（跑用例/API）有副作用，不可与写操作并行（FR06.1）
+    has_write = any(e in ("write", "irreversible", "execute") for e in effects)
     has_irreversible = any(e == "irreversible" for e in effects)
     notes: List[str] = []
 
