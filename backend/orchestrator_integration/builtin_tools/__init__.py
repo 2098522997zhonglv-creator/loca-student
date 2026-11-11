@@ -7,6 +7,7 @@
 注意：Diagram 工具（display_diagram, edit_diagram）已移至 loca_stude-Tools MCP
 """
 
+from .meta_tools import get_meta_tools
 from .skill_tools import get_skill_tools
 
 import logging
@@ -22,10 +23,12 @@ def get_builtin_tools(
     user_write_approved: bool = None,
     allowed_skill_names: set = None,
     allow_execute: bool = True,
+    include_meta_tools: bool = True,
 ) -> list:
     """获取所有内置工具。
 
-    allowed_skill_names / allow_execute：由 Skill 分区传入，限制本轮可执行的 skill。
+    allowed_skill_names / allow_execute：由 Skill 分区/任务立项传入。
+    include_meta_tools：Escape Hatch / 降级元工具（小工具面常驻）。
     """
     tools = []
 
@@ -39,6 +42,10 @@ def get_builtin_tools(
         allow_execute=allow_execute,
     )
     tools.extend(skill_tools)
+    if include_meta_tools and allow_execute:
+        meta = get_meta_tools()
+        tools.extend(meta)
+        logger.info("[BuiltinTools] 加载 %s 个元工具(Escape Hatch)", len(meta))
     logger.info(
         "[BuiltinTools] 加载 %s 个 Skill 工具 allow_execute=%s allowlist=%s",
         len(skill_tools),

@@ -32,6 +32,8 @@ class ToolCallTelemetry:
     rejected_by_allowlist: bool = False
     rejected_by_catalog: bool = False
     error_kind: str = ""
+    # planning | tool | business | concurrency
+    attribution: str = ""
     tools_mounted: List[str] = field(default_factory=list)
     session_id: str = ""
     user_id: Optional[int] = None
@@ -53,6 +55,7 @@ def record_tool_telemetry(
     rejected_by_allowlist: bool = False,
     rejected_by_catalog: bool = False,
     error_kind: str = "",
+    attribution: str = "",
     tools_mounted: Optional[List[str]] = None,
     session_id: str = "",
     user_id: Optional[int] = None,
@@ -68,6 +71,7 @@ def record_tool_telemetry(
         rejected_by_allowlist=bool(rejected_by_allowlist),
         rejected_by_catalog=bool(rejected_by_catalog),
         error_kind=error_kind or "",
+        attribution=attribution or "",
         tools_mounted=list(tools_mounted or []),
         session_id=session_id or "",
         user_id=user_id,
@@ -77,7 +81,7 @@ def record_tool_telemetry(
     payload = event.to_log_dict()
     logger.info(
         "tool_telemetry zone=%s playbook=%s tool=%s skill=%s ok=%s ms=%.1f "
-        "allowlist_reject=%s catalog_reject=%s kind=%s",
+        "allowlist_reject=%s catalog_reject=%s kind=%s attr=%s",
         event.zone,
         event.playbook,
         event.tool_name,
@@ -87,6 +91,7 @@ def record_tool_telemetry(
         event.rejected_by_allowlist,
         event.rejected_by_catalog,
         event.error_kind,
+        event.attribution,
     )
     try:
         _TELEMETRY_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -175,6 +180,11 @@ def aggregate_telemetry(limit: int = 2000) -> Dict[str, Any]:
             "unauthorized_write_blocks": unauth_write,
             "privilege_escalation_blocks": privilege,
             "catalog_rejects": catalog_n,
+            "attribution_counts": dict(
+                Counter(e.attribution for e in events if e.attribution).most_common()
+            ),
+            "escape_denied": sum(1 for e in events if e.error_kind == "escape_denied"),
+            "degraded_draft": sum(1 for e in events if e.error_kind == "degraded_draft"),
         },
     }
 
@@ -227,6 +237,7 @@ def _load_jsonl(limit: int) -> List[ToolCallTelemetry]:
                     rejected_by_allowlist=bool(d.get("rejected_by_allowlist")),
                     rejected_by_catalog=bool(d.get("rejected_by_catalog")),
                     error_kind=d.get("error_kind") or "",
+                    attribution=d.get("attribution") or "",
                     tools_mounted=list(d.get("tools_mounted") or []),
                     session_id=d.get("session_id") or "",
                     user_id=d.get("user_id"),

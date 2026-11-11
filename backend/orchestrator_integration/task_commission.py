@@ -1,0 +1,211 @@
+"""任务立项：主类完整授权 / 辅类询问授权 + 高频剧本短路标记。
+
+在 AgentLoop 挂载工具前完成分类，避免全量工具面与越权扩权。
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass, field
+from typing import FrozenSet, Optional, Set
+
+from orchestrator_integration.intent_router import IntentDecision, KbAccessPolicy
+from orchestrator_integration.playbooks import (
+    PLAYBOOK_PLATFORM_READ,
+    PLAYBOOK_PLATFORM_WRITE,
+    PLAYBOOK_TESTCASE_EXECUTE,
+    PLAYBOOK_TICKET_KB,
+    PLAYBOOK_URL_READ,
+    Playbook,
+)
+from orchestrator_integration.skill_zones import (
+    ZONE_EXECUTE,
+    ZONE_KB_QA,
+    ZONE_PLATFORM,
+    ZONE_TICKET_KB,
+    ZONE_WEB,
+    SkillZone,
+)
+
+# 轻量通道：只读/执行；重量通道：强副作用写入
+CHANNEL_LIGHT = "light"
+CHANNEL_HEAVY = "heavy"
+
+
+@dataclass
+class TaskCommission:
+    task_id: str
+    zone_id: str
+    playbook_id: str
+    primary_skills: FrozenSet[str]
+    auxiliary_skills: FrozenSet[str]
+    short_circuit: bool
+    draft_writes: bool
+    channel: str
+    max_escape_hatches: int = 1
+    max_tool_steps: int = 8
+    escape_used: int = 0
+    granted_auxiliary: Set[str] = field(default_factory=set)
+    post_condition: str = ""
+
+    def effective_allowlist(self) -> Optional[Set[str]]:
+        if self.zone_id == ZONE_KB_QA:
+            return set()
+        if not self.primary_skills and not self.granted_auxiliary:
+            return None if self.zone_id == "general" else set()
+        return set(self.primary_skills) | set(self.granted_auxiliary)
+
+    def can_escape(self) -> bool:
+        return self.escape_used < self.max_escape_hatches
+
+    def grant_auxiliary(self, skill_name: str) -> tuple[bool, str]:
+        name = (skill_name or "").strip()
+        if not name:
+            return False, "skill_name 为空"
+        if name in self.primary_skills:
+            return True, f"「{name}」已在主类授权内"
+        if name not in self.auxiliary_skills:
+            return (
+                False,
+                f"「{name}」不在本任务辅类清单，禁止扩展。辅类: "
+                + (", ".join(sorted(self.auxiliary_skills)) or "(无)"),
+            )
+        if not self.can_escape():
+            return False, "Escape Hatch 已用尽（最多 1 次），请改派任务或人工托管"
+        self.granted_auxiliary.add(name)
+        self.escape_used += 1
+        return True, f"已授权辅类 Skill「{name}」（escape {self.escape_used}/{self.max_escape_hatches}）"
+
+
+def _split_primary_aux(
+    zone: SkillZone, playbook: Optional[Playbook]
+) -> tuple[FrozenSet[str], FrozenSet[str]]:
+    preferred = list(playbook.preferred_skills) if playbook else []
+    zone_all = set(zone.allowed_skills) if zone.allowed_skills else set()
+
+    if zone.zone_id == ZONE_EXECUTE:
+        # 主类只挂核心执行面；其余进辅类（需 Escape Hatch）
+        core = ["ui-automation", "loca-stude"]
+        primary = frozenset(
+            s for s in core if (not zone_all or s in zone_all)
+        ) or frozenset({"ui-automation", "loca-stude"})
+        aux_candidates = set(preferred or []) | (zone_all or {"api-automation"})
+        aux = frozenset(aux_candidates - set(primary))
+        return primary, aux
+
+    if zone.zone_id == ZONE_WEB:
+        return frozenset({"url-reader"}), frozenset()
+
+    if zone.zone_id == ZONE_TICKET_KB:
+        core = ["workorder-knowledge", "playwright-skill"]
+        primary = frozenset(
+            s for s in core if (not zone_all or s in zone_all)
+        ) or frozenset(core)
+        aux = frozenset(({"loca-stude"} | (zone_all or set())) - set(primary))
+        return primary, aux
+
+    if zone.zone_id == ZONE_PLATFORM:
+        if playbook and playbook.playbook_id == PLAYBOOK_PLATFORM_READ:
+            return frozenset({"loca-stude"}), frozenset(
+                (zone_all - {"loca-stude"}) if zone_all else {"ui-automation", "api-automation"}
+            )
+        primary = frozenset({"loca-stude"})
+        aux = frozenset(
+            (zone_all - primary) if zone_all else {"ui-automation", "api-automation"}
+        )
+        return primary, aux
+
+    if zone.allowed_skills:
+        skills = list(zone.allowed_skills)
+        primary = frozenset(skills[:2])
+        aux = frozenset(skills[2:])
+        return primary, aux
+
+    return frozenset(), frozenset()
+
+
+def _post_condition(playbook: Optional[Playbook], zone: SkillZone) -> str:
+    if not playbook:
+        return ""
+    mapping = {
+        PLAYBOOK_TESTCASE_EXECUTE: "执行结果已返回且未夹带未确认写入",
+        PLAYBOOK_URL_READ: "url-reader 产出可读正文或明确错误原文",
+        PLAYBOOK_TICKET_KB: "工单字段已汇总；若 upsert 则须用户确认后才写入",
+        PLAYBOOK_PLATFORM_WRITE: "仅草稿/确认后写入；未确认不得落库",
+        PLAYBOOK_PLATFORM_READ: "只读查询有真实工具结果",
+    }
+    return mapping.get(playbook.playbook_id, f"zone={zone.zone_id} 完成用户目标且无越权写入")
+
+
+def commission_task(
+    *,
+    message: str,
+    zone: SkillZone,
+    playbook: Optional[Playbook],
+    decision: IntentDecision,
+    kb_policy: Optional[KbAccessPolicy] = None,
+) -> TaskCommission:
+    primary, aux = _split_primary_aux(zone, playbook)
+    pb_id = playbook.playbook_id if playbook else ""
+    short = bool(
+        playbook
+        and pb_id
+        in {
+            PLAYBOOK_TESTCASE_EXECUTE,
+            PLAYBOOK_URL_READ,
+            PLAYBOOK_PLATFORM_READ,
+            PLAYBOOK_TICKET_KB,
+        }
+    )
+    # 工单沉淀入库 / 平台写入：短路提示仍开，但走重量通道 + 草稿写
+    heavy = bool(
+        pb_id == PLAYBOOK_PLATFORM_WRITE
+        or (
+            pb_id == PLAYBOOK_TICKET_KB
+            and any(
+                h in (message or "")
+                for h in ("沉淀", "写入知识库", "upsert", "同步到知识库")
+            )
+        )
+        or (zone.zone_id == ZONE_PLATFORM and decision.primary == "write")
+    )
+    draft = heavy or pb_id == PLAYBOOK_PLATFORM_WRITE
+    return TaskCommission(
+        task_id=uuid.uuid4().hex[:12],
+        zone_id=zone.zone_id,
+        playbook_id=pb_id,
+        primary_skills=primary,
+        auxiliary_skills=aux,
+        short_circuit=short,
+        draft_writes=draft,
+        channel=CHANNEL_HEAVY if heavy else CHANNEL_LIGHT,
+        post_condition=_post_condition(playbook, zone),
+    )
+
+
+def commission_hint(commission: TaskCommission) -> str:
+    lines = [
+        "# 任务立项（服务端）",
+        f"- task_id: {commission.task_id}",
+        f"- zone: {commission.zone_id} playbook: {commission.playbook_id or '(无)'}",
+        f"- 通道: {commission.channel} short_circuit={commission.short_circuit} draft_writes={commission.draft_writes}",
+        f"- 主类 Skill（完整授权）: {', '.join(sorted(commission.primary_skills)) or '(无)'}",
+        f"- 辅类 Skill（需询问/Escape Hatch）: {', '.join(sorted(commission.auxiliary_skills)) or '(无)'}",
+        f"- Escape Hatch 剩余: {commission.max_escape_hatches - commission.escape_used}",
+        f"- 步数预算: ≤{commission.max_tool_steps}；扩权最多 {commission.max_escape_hatches} 次",
+    ]
+    if commission.post_condition:
+        lines.append(f"- 退出断言: {commission.post_condition}")
+    if commission.short_circuit:
+        lines.append(
+            "- 本轮为高频剧本短路：禁止探索主类以外 Skill；不要 knowledge_search 绕路。"
+        )
+    if commission.draft_writes:
+        lines.append(
+            "- 写入走草稿态：未用户确认前不得真实落库；先展示摘要再确认。"
+        )
+    lines.append(
+        "- 工具不足时只可调用 request_tool_expansion 一次申请辅类；"
+        "仍不足则降级为草稿/人工说明，禁止胡乱绕过。"
+    )
+    return "\n".join(lines)

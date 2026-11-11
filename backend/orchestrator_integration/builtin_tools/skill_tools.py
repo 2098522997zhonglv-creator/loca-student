@@ -266,8 +266,21 @@ def _needs_write_confirmation_payload(
             "只读/执行类命令已先执行；写入类命令仍需用户确认，本轮未执行写入。"
             "请向用户汇报已执行结果，再列出待写入内容，以“是否确认写入？”结束。"
         )
+    draft_mode = False
+    try:
+        from orchestrator_integration.telemetry_context import get_telemetry_context
+
+        draft_mode = bool(get_telemetry_context().draft_writes)
+    except Exception:
+        draft_mode = False
+    if draft_mode:
+        message = (
+            "【草稿态】写入未落库，仅生成待确认变更草稿。"
+            + message
+        )
     payload = {
         "status": "needs_confirmation",
+        "mode": "draft" if draft_mode else "confirm",
         "message": message,
         "pending": {
             "skill_name": skill_name,
@@ -698,6 +711,28 @@ def get_skill_tools(
         name = (skill_name or "").strip()
         if not name:
             return None
+        # 任务立项主/辅授权（优先于静态分区白名单收紧）
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            commission = ctx.commission
+            if commission is not None:
+                granted = commission.effective_allowlist()
+                if granted is not None and name not in granted:
+                    if name in commission.auxiliary_skills:
+                        return (
+                            f"Skill「{name}」属于辅类，尚未授权。"
+                            "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
+                            "或请用户明确授权后再用。"
+                        )
+                    return (
+                        f"Skill「{name}」不在本任务主类授权内。"
+                        f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
+                        "禁止跨任务扩权；不足时用 report_task_blocked 降级。"
+                    )
+        except Exception:
+            pass
         if allowed_names is None:
             return None
         if not allowed_names:

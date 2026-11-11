@@ -843,6 +843,54 @@ class AgentSmartnessTests(SimpleTestCase):
             )
         )
 
+    def test_task_commission_primary_aux_and_escape_hatch(self):
+        from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools
+        from orchestrator_integration.intent_router import (
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.playbooks import resolve_playbook
+        from orchestrator_integration.skill_zones import resolve_skill_zone
+        from orchestrator_integration.task_commission import (
+            commission_task,
+        )
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        text = "确认执行测试用例 35"
+        d = classify_user_intent(text)
+        p = decide_kb_access_policy(text, d)
+        z = resolve_skill_zone(text, d, p)
+        pb = resolve_playbook(text, z, d, p)
+        c = commission_task(
+            message=text, zone=z, playbook=pb, decision=d, kb_policy=p
+        )
+        self.assertTrue(c.short_circuit)
+        self.assertEqual(c.channel, "light")
+        self.assertIn("ui-automation", c.primary_skills)
+        self.assertTrue(c.can_escape())
+        ok, _ = c.grant_auxiliary("api-automation")
+        self.assertTrue(ok)
+        self.assertFalse(c.can_escape())
+        ok2, msg2 = c.grant_auxiliary("workorder-knowledge")
+        self.assertFalse(ok2)
+
+        set_telemetry_context(
+            TelemetryContext(zone=z.zone_id, commission=c, playbook=pb.playbook_id)
+        )
+        tools = {t.name: t for t in get_meta_tools()}
+        denied = tools["request_tool_expansion"].invoke(
+            {"skill_name": "workorder-knowledge", "reason": "test"}
+        )
+        self.assertIn("denied", denied)
+
+        blocked = tools["report_task_blocked"].invoke(
+            {"summary": "缺权限", "missing_capability": "refund"}
+        )
+        self.assertIn("degraded", blocked)
+
     def test_skill_governance_blocks_cross_skill_and_execute_write(self):
         from orchestrator_integration.skill_governance import (
             reject_cross_skill_batch,

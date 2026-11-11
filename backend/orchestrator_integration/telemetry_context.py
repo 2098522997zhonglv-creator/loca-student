@@ -1,10 +1,13 @@
-"""请求级观测上下文（zone / playbook / mounted tools），供 skill 工具写入 telemetry。"""
+"""请求级观测上下文（zone / playbook / mounted tools / 任务立项），供 skill 工具写入 telemetry。"""
 
 from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional, Set
+
+if TYPE_CHECKING:
+    from orchestrator_integration.task_commission import TaskCommission
 
 
 @dataclass
@@ -15,6 +18,10 @@ class TelemetryContext:
     session_id: str = ""
     user_id: Optional[int] = None
     specialist_domain: str = ""
+    commission: Optional["TaskCommission"] = None
+    granted_skills: Set[str] = field(default_factory=set)
+    short_circuit: bool = False
+    draft_writes: bool = False
 
 
 _CTX: ContextVar[Optional[TelemetryContext]] = ContextVar(

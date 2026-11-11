@@ -1298,25 +1298,56 @@ class AgentLoopStreamAPIView(View):
                 playbook_hint,
                 resolve_playbook,
             )
+            from orchestrator_integration.task_commission import (
+                commission_hint,
+                commission_task,
+            )
             from orchestrator_integration.telemetry_context import (
                 TelemetryContext,
                 set_telemetry_context,
             )
 
+            # 剧本前置：先命中高频路径，再立项主/辅授权（未命中才走更宽动态面）
+            active_playbook = resolve_playbook(
+                user_message, skill_zone, _early_decision, _early_kb_policy
+            )
+            task_commission = commission_task(
+                message=user_message,
+                zone=skill_zone,
+                playbook=active_playbook,
+                decision=_early_decision,
+                kb_policy=_early_kb_policy,
+            )
             specialist_spec, specialist_hint_text, specialist_allow = (
                 run_specialist_prep(skill_zone, user_message)
             )
             # 未挂知识库时即使分区是 kb_qa 也挂 execute（无处可答；写入另有确认门）
             mount_execute = skill_zone.allow_execute or not kb_qa_mode
-            skill_allowlist = (
-                skill_zone.effective_allowlist()
-                if skill_zone.allow_execute
-                else None
-            )
+            # 小工具面 = 任务主类（完整授权）；辅类需 Escape Hatch
+            skill_allowlist = task_commission.effective_allowlist()
+            if skill_allowlist is None and skill_zone.allow_execute:
+                skill_allowlist = skill_zone.effective_allowlist()
+            if not skill_zone.allow_execute and kb_qa_mode:
+                skill_allowlist = set()
             if specialist_allow is not None and skill_allowlist is not None:
                 skill_allowlist = skill_allowlist & specialist_allow
             elif specialist_allow is not None:
                 skill_allowlist = specialist_allow
+
+            # 短路轮：去掉知识库工具，避免预检索干扰极速路径
+            if task_commission.short_circuit and tools:
+                tools = [
+                    t
+                    for t in tools
+                    if getattr(t, "name", "") != "knowledge_search"
+                ]
+                logger.info(
+                    "AgentLoopStreamAPI: 剧本短路 short_circuit=True 已移除 knowledge_search "
+                    "playbook=%s channel=%s",
+                    task_commission.playbook_id,
+                    task_commission.channel,
+                )
+
             builtin_tools = get_builtin_tools(
                 user_id=request.user.id,
                 project_id=int(project_id),
@@ -1325,15 +1356,18 @@ class AgentLoopStreamAPIView(View):
                 user_write_approved=user_write_approved,
                 allowed_skill_names=skill_allowlist,
                 allow_execute=mount_execute,
+                include_meta_tools=mount_execute,
             )
             tools.extend(builtin_tools)
             logger.info(
                 "AgentLoopStreamAPI: Added %s builtin tools zone=%s allow_execute=%s "
-                "allowlist=%s specialist=%s%s",
+                "allowlist=%s task=%s short_circuit=%s specialist=%s%s",
                 len(builtin_tools),
                 skill_zone.zone_id,
                 skill_zone.allow_execute,
                 sorted(skill_allowlist) if skill_allowlist is not None else None,
+                task_commission.task_id,
+                task_commission.short_circuit,
                 specialist_spec.domain if specialist_spec and specialist_spec.active else None,
                 " (与知识库并存)" if kb_qa_mode else "",
             )
@@ -1342,16 +1376,25 @@ class AgentLoopStreamAPIView(View):
             intent_decision, tools, intent_hint, kb_policy = apply_intent_routing(
                 user_message,
                 tools,
-                kb_active=kb_qa_mode,
+                kb_active=kb_qa_mode and not task_commission.short_circuit,
                 prefetch_query=_prefetch_for_policy,
                 skill_zone=skill_zone,
             )
-            active_playbook = resolve_playbook(
-                user_message, skill_zone, intent_decision, kb_policy
-            )
+            # 短路时强制保留元工具
+            if task_commission.short_circuit:
+                meta_names = {"request_tool_expansion", "report_task_blocked"}
+                kept_meta = [
+                    t for t in builtin_tools if getattr(t, "name", "") in meta_names
+                ]
+                have = {getattr(t, "name", "") for t in tools}
+                for mt in kept_meta:
+                    if getattr(mt, "name", "") not in have:
+                        tools.append(mt)
             pb_hint = playbook_hint(active_playbook)
             if pb_hint:
                 intent_hint = f"{intent_hint}\n\n{pb_hint}" if intent_hint else pb_hint
+            ch = commission_hint(task_commission)
+            intent_hint = f"{intent_hint}\n\n{ch}" if intent_hint else ch
             if specialist_hint_text:
                 intent_hint = (
                     f"{intent_hint}\n\n{specialist_hint_text}"
@@ -1371,6 +1414,10 @@ class AgentLoopStreamAPIView(View):
                         if specialist_spec and specialist_spec.active
                         else ""
                     ),
+                    commission=task_commission,
+                    granted_skills=set(skill_allowlist or []),
+                    short_circuit=task_commission.short_circuit,
+                    draft_writes=task_commission.draft_writes,
                 )
             )
             try:
@@ -1389,11 +1436,14 @@ class AgentLoopStreamAPIView(View):
                 pass
             logger.info(
                 "AgentLoopStreamAPI: 意图路由 primary=%s intents=%s zone=%s "
-                "playbook=%s kb_policy=%s tools=%s allowlist=%s",
+                "playbook=%s task=%s short_circuit=%s channel=%s kb_policy=%s tools=%s allowlist=%s",
                 intent_decision.primary,
                 sorted(intent_decision.intents),
                 skill_zone.zone_id,
                 active_playbook.playbook_id if active_playbook else None,
+                task_commission.task_id,
+                task_commission.short_circuit,
+                task_commission.channel,
                 kb_policy.reason,
                 mounted_names,
                 sorted(skill_allowlist) if skill_allowlist is not None else None,
@@ -1449,7 +1499,9 @@ class AgentLoopStreamAPIView(View):
 
             # 8.0a 账号行为偏好预检索（失败静默）
             _prefetch_query = _prefetch_query_early
-            _skip_prefetch = bool(kb_policy.skip_prefetch)
+            _skip_prefetch = bool(
+                kb_policy.skip_prefetch or task_commission.short_circuit
+            )
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,
