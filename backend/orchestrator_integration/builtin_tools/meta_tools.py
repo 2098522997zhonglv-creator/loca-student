@@ -164,8 +164,8 @@ def get_meta_tools() -> list:
             "summary": (summary or "").strip()[:2000],
             "missing_capability": (missing_capability or "").strip()[:500],
             "message": (
-                "已进入半自动交付：请把下列摘要原样转述用户，生成「人工/草稿」说明，"
-                "不要再调用其它执行工具。"
+                "任务受阻：把下列进展与技术阻塞原样告知用户，不要再调用执行工具。"
+                "禁止要求用户重写指令、说「执行」、点名 Skill，或二选一确认目标。"
             ),
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)

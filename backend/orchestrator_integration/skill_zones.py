@@ -186,7 +186,8 @@ def zone_hint(zone: SkillZone) -> str:
     if not zone.allow_execute:
         lines.append(
             "- 本轮禁止 execute_skill_script；只做知识库问答。"
-            "若要执行/写入/沉淀，请明确说「执行测试用例」「保存到平台」或「沉淀到知识库」。"
+            "若用户原话已含 URL/加购/传图/执行用例/落库，应在下一轮由路由自动升区；"
+            "禁止要求用户重写「执行 / browser-use / playwright」话术。"
         )
         return "\n".join(lines)
 

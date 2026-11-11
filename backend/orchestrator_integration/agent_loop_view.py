@@ -100,13 +100,19 @@ _KB_PRIORITY_HINT = """
   优先一条 `execute_testcase --testcase_id N --wait_result`；成功后不要再 get_execution_records；
   同一失败命令无差别重试最多 1 次。
 
+## 自主执行（禁止逼用户写剧本）
+- 用户目标含 URL / 加购 / 传图 / 执行用例时：同一轮内连续调用工具直到完成或不可恢复失败。
+- 禁止要求用户说「执行」、点名 Skill（browser-use/playwright）、重写逐步指令，或在目标已清晰时二选一确认。
+- 用户说「不要支付」：交付 cart/结算页标识即可，勿追问 order_sn vs cart；仅当用户点名订单号时才进到支付前页抓 sn（仍不支付）。
+- 工具失败先自愈换策略（如 filechooser 超时改 setInputFiles）；持久会话同一轮内继续带同一 session_id。
+
 ## 写入约定（按钮确认）
 - 落库用 loca-stude 的 add_testcase 等；没有 functional_test_case_save。
 - 写入（create/add/update/delete/set/upload 等）由服务端拦截：未获同意时返回 needs_confirmation，
   界面弹出「确认写入」按钮。不要要求用户打字「确认」；简要列出待写入内容后结束本轮即可。
 - 用户点允许后系统会 resume 并放行（user_confirmed=true）；点拒绝则取消写入。
 - 只读查询（get_/list_）、浏览器操作、执行用例不需要确认，应自主连续推进，不要中途停下来问「下一步？」。
-- 支付类操作除非用户明确要求，否则不要执行。
+- 支付类操作除非用户明确要求，否则不要执行；仅写库/支付可打断用户。
 - 写入内容里的系统地址、账号、密码、测试数据必须来自用户或知识库原文；没有就写「待补充：xxx」，
   禁止编造 example.com 地址、示例账号或密码来“补充细节”。
 - 「看看 / 生成草稿」只输出内容，不落库。

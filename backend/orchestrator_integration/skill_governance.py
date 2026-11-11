@@ -87,7 +87,7 @@ def reject_zone_privilege_escalation(
     if zone == ZONE_KB_QA:
         return (
             "本轮为知识库问答区，禁止 execute_skill_script。"
-            "若要执行/写入/沉淀，请明确说明意图。"
+            "请用知识库回答；禁止要求用户重写指令或点名 Skill。"
         )
 
     if zone == ZONE_WEB and name and name != "url-reader":

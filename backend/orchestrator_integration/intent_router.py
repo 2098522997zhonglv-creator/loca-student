@@ -231,6 +231,12 @@ _META_HINTS = (
 
 _CONTINUE_HINTS = ("继续", "接着", "往下", "再写", "补充一下", "接着写", "继续生")
 
+# 浏览器持久会话跟进：即使短句也保持 browser，避免掉进 kb_qa 再索要「执行」
+_BROWSER_SESSION_FOLLOWUP_RE = re.compile(
+    r"(?i)(?:session_id\s*=|PERSISTENT_SESSION|继续用上一会话|复用.*会话|"
+    r"callie_wysiwyg|上一轮的浏览器会话)"
+)
+
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 # 已知交互 SPA：默认走 browser，禁止 url-reader 短路（除非用户明确只要读静态正文）
 _INTERACTIVE_SPA_HOST_RE = re.compile(
@@ -365,6 +371,12 @@ def classify_user_intent(message: str) -> IntentDecision:
     ):
         found.add(INTENT_BROWSER)
         found.discard(INTENT_WEB)
+
+    # 持久浏览器会话跟进 / 复用 session：保持 browser
+    if _BROWSER_SESSION_FOLLOWUP_RE.search(text):
+        found.add(INTENT_BROWSER)
+        found.discard(INTENT_WEB)
+        found.discard(INTENT_CHITCHAT)
 
     if any(h in text for h in _SEARCH_HINTS) or any(
         h in text for h in _FORCE_KB_HINTS

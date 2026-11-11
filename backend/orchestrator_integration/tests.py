@@ -1614,7 +1614,7 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertTrue(c.short_circuit)
         self.assertEqual(c.primary_skills, frozenset({"playwright-skill"}))
         self.assertEqual(c.effective_allowlist(), {"playwright-skill"})
-        self.assertGreaterEqual(c.max_tool_steps, 8)
+        self.assertGreaterEqual(c.max_tool_steps, 28)
 
         # 纯问答含「购物车」：仍走 kb_qa，不升 browser
         qa = "购物车逻辑是什么"
@@ -1649,6 +1649,81 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertNotIn(INTENT_WEB, ds.intents)
         zs = resolve_skill_zone(spa, ds, decide_kb_access_policy(spa, ds))
         self.assertEqual(zs.zone_id, ZONE_BROWSER)
+
+    def test_autonomy_no_user_script_prompts_and_session_followup(self):
+        from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools
+        from orchestrator_integration.intent_router import (
+            INTENT_BROWSER,
+            classify_user_intent,
+            decide_kb_access_policy,
+        )
+        from orchestrator_integration.playbooks import (
+            PLAYBOOK_BROWSER_ACT,
+            resolve_playbook,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_BROWSER,
+            ZONE_KB_QA,
+            resolve_skill_zone,
+            zone_hint,
+        )
+        from orchestrator_integration.task_commission import (
+            commission_hint,
+            commission_task,
+        )
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        kb_zone = resolve_skill_zone(
+            "购物车逻辑是什么",
+            classify_user_intent("购物车逻辑是什么"),
+            decide_kb_access_policy(
+                "购物车逻辑是什么", classify_user_intent("购物车逻辑是什么")
+            ),
+        )
+        self.assertEqual(kb_zone.zone_id, ZONE_KB_QA)
+        zh = zone_hint(kb_zone)
+        self.assertNotIn("请明确说", zh)
+        self.assertNotIn("用 browser-use 执行", zh)
+        self.assertIn("禁止要求用户重写", zh)
+
+        follow = (
+            "继续：复用 session_id=callie_wysiwyg_cart 与测试图 wysiwyg_test_photo.png"
+        )
+        df = classify_user_intent(follow)
+        self.assertIn(INTENT_BROWSER, df.intents)
+        zf = resolve_skill_zone(follow, df, decide_kb_access_policy(follow, df))
+        self.assertEqual(zf.zone_id, ZONE_BROWSER)
+        pbf = resolve_playbook(follow, zf, df, decide_kb_access_policy(follow, df))
+        self.assertEqual(pbf.playbook_id, PLAYBOOK_BROWSER_ACT)
+        cf = commission_task(
+            message=follow, zone=zf, playbook=pbf, decision=df, kb_policy=None
+        )
+        self.assertGreaterEqual(cf.max_tool_steps, 28)
+        self.assertIn("cart", cf.post_condition.lower())
+        ch = commission_hint(cf)
+        self.assertIn("禁止要求用户点名 Skill", ch)
+        self.assertNotIn("请明确说", ch)
+
+        set_telemetry_context(TelemetryContext(zone=zf.zone_id, commission=cf))
+        try:
+            blocked = {
+                t.name: t for t in get_meta_tools()
+            }["report_task_blocked"].invoke(
+                {"summary": "filechooser timeout", "missing_capability": "upload"}
+            )
+            self.assertIn("禁止要求用户重写指令", blocked)
+            self.assertNotIn("请明确说", blocked)
+            self.assertNotIn("browser-use 执行", blocked)
+        finally:
+            set_telemetry_context(None)
+
+        ok, budget_msg = cf.consume_tool_step(cf.max_tool_steps + 1)
+        self.assertFalse(ok)
+        self.assertIn("禁止要求用户重写指令", budget_msg)
+        self.assertNotIn("请调用 report_task_blocked 降级，禁止继续重试", budget_msg)
 
     def test_escape_hatch_grant_syncs_skill_allowlist(self):
         from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools

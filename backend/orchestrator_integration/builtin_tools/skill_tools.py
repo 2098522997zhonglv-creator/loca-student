@@ -755,12 +755,12 @@ def get_skill_tools(
                             return (
                                 f"Skill「{name}」属于辅类，尚未授权。"
                                 "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
-                                "或请用户明确授权后再用。"
+                                "禁止要求用户点名 Skill 或重写指令。"
                             )
                         return (
                             f"Skill「{name}」不在本任务主类授权内。"
                             f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
-                            "禁止跨任务扩权；不足时用 report_task_blocked 降级。"
+                            "请改用主类 skill 自愈；禁止要求用户重写指令。"
                         )
                     return None
         except Exception:
@@ -770,12 +770,12 @@ def get_skill_tools(
         if not allowed_names:
             return (
                 f"本轮分区禁止执行任何 Skill（当前请求 skill_name={name}）。"
-                "若要写入/执行/沉淀，请明确说明意图后重试。"
+                "请用知识库/已挂载工具回答；禁止要求用户重写指令或点名 Skill。"
             )
         if name not in allowed_names:
             return (
                 f"Skill「{name}」不在本轮分区白名单内。允许: {', '.join(sorted(allowed_names))}。"
-                "请改用允许的 skill_name，或换一句带明确意图的话（如「沉淀到知识库」「执行测试用例」）。"
+                "请改用允许的 skill_name 自愈；禁止要求用户换话术或点名 Skill。"
             )
         return None
 
@@ -1054,11 +1054,20 @@ def get_skill_tools(
                             if cleaned_output.strip()
                             else "(无输出)"
                         )
+                        heal_hint = ""
+                        low = result_output.lower()
+                        if "filechooser" in low or "waiting for event \"filechooser\"" in low:
+                            heal_hint = (
+                                "\n[自愈] filechooser 超时：勿再 waitForEvent('filechooser')；"
+                                "改为定位隐藏 input[type=file] 后 setInputFiles(真实图片路径)，"
+                                "然后同一轮内继续带同一 session_id 完成加购/校验。"
+                            )
                         result_output = (
                             f'[PERSISTENT_SESSION] session_id={session_id}\n'
                             f'[SCREENSHOT_DIR] {screenshots_dir}\n'
-                            f'{result_output}\n'
-                            f'[提示] 后续步骤请继续使用 session_id="{session_id}"；截图已保存在 {screenshots_dir}'
+                            f'{result_output}{heal_hint}\n'
+                            f'[提示] 同一轮内立即用 session_id="{session_id}" 继续下一工具调用，'
+                            f'勿向用户索要新指令；截图目录 {screenshots_dir}'
                         )
                         return _finalize_skill_result(
                             result_output,

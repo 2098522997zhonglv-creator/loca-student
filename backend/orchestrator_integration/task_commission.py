@@ -72,7 +72,8 @@ class TaskCommission:
             return (
                 False,
                 f"工具步数预算已用尽（{self.tool_steps_used}/{self.max_tool_steps}）。"
-                "请调用 report_task_blocked 降级，禁止继续重试。",
+                "请用已有工具结果尽量交付关键结果（cart/订单标识/截图/错误原文），"
+                "禁止要求用户重写指令或点名 Skill；仅当完全无任何结果可汇报时才可 report_task_blocked。",
             )
         self.tool_steps_used += n
         return True, f"steps {self.tool_steps_used}/{self.max_tool_steps}"
@@ -157,7 +158,7 @@ def _post_condition(playbook: Optional[Playbook], zone: SkillZone) -> str:
     mapping = {
         PLAYBOOK_TESTCASE_EXECUTE: "执行结果已返回且未夹带未确认写入",
         PLAYBOOK_URL_READ: "url-reader 产出可读正文或明确错误原文",
-        PLAYBOOK_BROWSER_ACT: "浏览器交互已完成并回报关键结果（订单号/状态/截图）",
+        PLAYBOOK_BROWSER_ACT: "浏览器交互已完成并回报关键结果（cart/订单标识/截图/页面状态）",
         PLAYBOOK_TICKET_KB: "工单字段已汇总；若 upsert 则须用户确认后才写入",
         PLAYBOOK_PLATFORM_WRITE: "仅草稿/确认后写入；未确认不得落库",
         PLAYBOOK_PLATFORM_READ: "只读查询有真实工具结果",
@@ -186,9 +187,9 @@ def commission_task(
             PLAYBOOK_TICKET_KB,
         }
     )
-    # 浏览器交互步数更多（导航+传图+加购），轻量通道放宽预算
+    # 浏览器交互步数更多（导航+传图+加购+重试），轻量通道放宽预算
     if pb_id == PLAYBOOK_BROWSER_ACT:
-        step_cap_override = 10
+        step_cap_override = 28
     else:
         step_cap_override = None
     # 工单沉淀入库 / 平台写入：短路提示仍开，但走重量通道 + 草稿写
@@ -230,11 +231,12 @@ def commission_hint(commission: TaskCommission) -> str:
         f"- zone: {commission.zone_id} playbook: {commission.playbook_id or '(无)'}",
         f"- 通道: {commission.channel} short_circuit={commission.short_circuit} draft_writes={commission.draft_writes}",
         f"- 主类 Skill（完整授权）: {', '.join(sorted(commission.primary_skills)) or '(无)'}",
-        f"- 辅类 Skill（需询问/Escape Hatch）: {', '.join(sorted(commission.auxiliary_skills)) or '(无)'}",
+        f"- 辅类 Skill（Escape Hatch 内部扩权）: {', '.join(sorted(commission.auxiliary_skills)) or '(无)'}",
         f"- Escape Hatch 剩余: {commission.max_escape_hatches - commission.escape_used}",
         f"- 步数预算: {commission.tool_steps_used}/{commission.max_tool_steps}；"
         f"扩权最多 {commission.max_escape_hatches} 次；轻量失败重试≤{commission.max_light_retries}",
         "- Fork-Join：只读可 parallel；写入/不可逆强制串行且 irreversible 置末",
+        "- 禁止要求用户点名 Skill、说「执行」、或重写逐步剧本；不够就 request_tool_expansion 或换主类 skill 自愈。",
     ]
     if commission.post_condition:
         lines.append(f"- 退出断言: {commission.post_condition}")
@@ -244,11 +246,11 @@ def commission_hint(commission: TaskCommission) -> str:
         )
     if commission.draft_writes:
         lines.append(
-            "- 写入走草稿态：未用户确认前不得真实落库；先展示摘要再确认。"
+            "- 写入走草稿态：未用户确认前不得真实落库；界面按钮确认，勿要求用户打字。"
         )
     lines.append(
         "- 工具不足时只可调用 request_tool_expansion 一次申请辅类；"
-        "仍不足则降级为草稿/人工说明，禁止胡乱绕过。"
+        "仍不足则用已有结果交付，禁止向用户索要新指令。"
     )
     lines.append(
         "- 结束前调用 assert_task_postcondition；失败不得宣称任务完成。"
