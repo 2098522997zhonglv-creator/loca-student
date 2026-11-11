@@ -97,6 +97,43 @@ def get_meta_tools() -> list:
         )
 
     @langchain_tool
+    def assert_task_postcondition(had_unconfirmed_write: bool = False) -> str:
+        """对任务退出条件做确定性断言（不靠模型自评）。
+
+        在即将结束回复前调用；失败则应 report_task_blocked 或继续补齐，不得宣称已完成。
+
+        Args:
+            had_unconfirmed_write: 本轮是否仍有未确认写入挂起
+        """
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+        from orchestrator_integration.telemetry_context import get_telemetry_context
+        from orchestrator_integration.tool_telemetry import record_tool_telemetry
+
+        ctx = get_telemetry_context()
+        commission = ctx.commission
+        if commission is None:
+            return json.dumps(
+                {"ok": False, "reasons": ["无任务立项"]}, ensure_ascii=False
+            )
+        verdict = evaluate_post_condition(
+            post_condition=commission.post_condition,
+            tool_results=list(commission.last_tool_results),
+            had_unconfirmed_write=bool(had_unconfirmed_write),
+            playbook_id=commission.playbook_id,
+        )
+        record_tool_telemetry(
+            zone=commission.zone_id,
+            playbook=commission.playbook_id,
+            tool_name="assert_task_postcondition",
+            success=bool(verdict.get("ok")),
+            error_kind="" if verdict.get("ok") else "postcondition_failed",
+            attribution="" if verdict.get("ok") else "planning",
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
+        )
+        return json.dumps(verdict, ensure_ascii=False, indent=2)
+
+    @langchain_tool
     def report_task_blocked(summary: str, missing_capability: str = "") -> str:
         """任务无法由当前工具面完成时的降级出口（草稿/人工托管说明）。
 
@@ -133,4 +170,4 @@ def get_meta_tools() -> list:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    return [request_tool_expansion, report_task_blocked]
+    return [request_tool_expansion, assert_task_postcondition, report_task_blocked]

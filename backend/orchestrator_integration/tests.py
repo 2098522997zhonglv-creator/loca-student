@@ -843,6 +843,105 @@ class AgentSmartnessTests(SimpleTestCase):
             )
         )
 
+    def test_execution_policy_fork_join_and_attribution(self):
+        from orchestrator_integration.execution_policy import (
+            classify_attribution,
+            evaluate_post_condition,
+            plan_batch_execution,
+        )
+        from orchestrator_integration.task_commission import CHANNEL_LIGHT
+
+        err, plan = plan_batch_execution(
+            [
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action delete_testcase --case_id 1",
+                },
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action get_projects",
+                },
+            ],
+            want_parallel=True,
+            channel=CHANNEL_LIGHT,
+        )
+        # 轻量通道禁 irreversible
+        self.assertIsNotNone(err)
+
+        err2, plan2 = plan_batch_execution(
+            [
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action get_modules --project_id 1",
+                },
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action get_projects",
+                },
+            ],
+            want_parallel=True,
+            channel=CHANNEL_LIGHT,
+        )
+        self.assertIsNone(err2)
+        self.assertTrue(plan2.parallel)
+
+        err3, plan3 = plan_batch_execution(
+            [
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action add_testcase --name a",
+                },
+                {
+                    "skill_name": "loca-stude",
+                    "command": "python x.py --action get_projects",
+                },
+            ],
+            want_parallel=True,
+            channel="heavy",
+        )
+        self.assertIsNone(err3)
+        self.assertFalse(plan3.parallel)
+        # write 串行；get 可在 write 前
+        self.assertIn("get_projects", plan3.ordered_commands[0]["command"])
+
+        self.assertEqual(
+            classify_attribution(error_kind="allowlist"), "planning"
+        )
+        self.assertEqual(
+            classify_attribution(result_text="余额不足无法下单"), "business"
+        )
+        self.assertEqual(
+            classify_attribution(result_text="HTTP 500 traceback"), "tool"
+        )
+
+        verdict = evaluate_post_condition(
+            post_condition="x",
+            tool_results=["ok"],
+            had_unconfirmed_write=True,
+            playbook_id="testcase_execute",
+        )
+        self.assertFalse(verdict["ok"])
+
+        from orchestrator_integration.task_commission import TaskCommission
+
+        c = TaskCommission(
+            task_id="t1",
+            zone_id="execute",
+            playbook_id="testcase_execute",
+            primary_skills=["loca-stude"],
+            auxiliary_skills=[],
+            short_circuit=True,
+            draft_writes=False,
+            channel=CHANNEL_LIGHT,
+            max_tool_steps=2,
+        )
+        ok1, _ = c.consume_tool_step(1)
+        ok2, _ = c.consume_tool_step(1)
+        ok3, detail = c.consume_tool_step(1)
+        self.assertTrue(ok1 and ok2)
+        self.assertFalse(ok3)
+        self.assertIn("预算已用尽", detail)
+
     def test_task_commission_primary_aux_and_escape_hatch(self):
         from orchestrator_integration.builtin_tools.meta_tools import get_meta_tools
         from orchestrator_integration.intent_router import (
@@ -890,6 +989,18 @@ class AgentSmartnessTests(SimpleTestCase):
             {"summary": "缺权限", "missing_capability": "refund"}
         )
         self.assertIn("degraded", blocked)
+
+        self.assertIn("assert_task_postcondition", tools)
+        c.last_tool_results.append("execute_testcase ok")
+        verdict = tools["assert_task_postcondition"].invoke(
+            {"had_unconfirmed_write": False}
+        )
+        self.assertIn('"ok": true', verdict)  # json.dumps 默认空格
+        # 有未确认写入时断言应失败
+        bad = tools["assert_task_postcondition"].invoke(
+            {"had_unconfirmed_write": True}
+        )
+        self.assertIn('"ok": false', bad)
 
     def test_skill_governance_blocks_cross_skill_and_execute_write(self):
         from orchestrator_integration.skill_governance import (

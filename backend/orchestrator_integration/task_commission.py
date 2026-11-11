@@ -44,9 +44,12 @@ class TaskCommission:
     channel: str
     max_escape_hatches: int = 1
     max_tool_steps: int = 8
+    max_light_retries: int = 1
     escape_used: int = 0
+    tool_steps_used: int = 0
     granted_auxiliary: Set[str] = field(default_factory=set)
     post_condition: str = ""
+    last_tool_results: list = field(default_factory=list)
 
     def effective_allowlist(self) -> Optional[Set[str]]:
         if self.zone_id == ZONE_KB_QA:
@@ -57,6 +60,20 @@ class TaskCommission:
 
     def can_escape(self) -> bool:
         return self.escape_used < self.max_escape_hatches
+
+    def budget_remaining(self) -> int:
+        return max(0, self.max_tool_steps - self.tool_steps_used)
+
+    def consume_tool_step(self, n: int = 1) -> tuple[bool, str]:
+        """消耗工具步数预算；超限则拒绝。"""
+        if self.tool_steps_used + n > self.max_tool_steps:
+            return (
+                False,
+                f"工具步数预算已用尽（{self.tool_steps_used}/{self.max_tool_steps}）。"
+                "请调用 report_task_blocked 降级，禁止继续重试。",
+            )
+        self.tool_steps_used += n
+        return True, f"steps {self.tool_steps_used}/{self.max_tool_steps}"
 
     def grant_auxiliary(self, skill_name: str) -> tuple[bool, str]:
         name = (skill_name or "").strip()
@@ -170,6 +187,9 @@ def commission_task(
         or (zone.zone_id == ZONE_PLATFORM and decision.primary == "write")
     )
     draft = heavy or pb_id == PLAYBOOK_PLATFORM_WRITE
+    channel = CHANNEL_HEAVY if heavy else CHANNEL_LIGHT
+    # 轻量短路路径收紧步数；重量路径稍宽但仍有帽
+    step_cap = 4 if (short and channel == CHANNEL_LIGHT) else (6 if heavy else 8)
     return TaskCommission(
         task_id=uuid.uuid4().hex[:12],
         zone_id=zone.zone_id,
@@ -178,7 +198,8 @@ def commission_task(
         auxiliary_skills=aux,
         short_circuit=short,
         draft_writes=draft,
-        channel=CHANNEL_HEAVY if heavy else CHANNEL_LIGHT,
+        channel=channel,
+        max_tool_steps=step_cap,
         post_condition=_post_condition(playbook, zone),
     )
 
@@ -192,7 +213,9 @@ def commission_hint(commission: TaskCommission) -> str:
         f"- 主类 Skill（完整授权）: {', '.join(sorted(commission.primary_skills)) or '(无)'}",
         f"- 辅类 Skill（需询问/Escape Hatch）: {', '.join(sorted(commission.auxiliary_skills)) or '(无)'}",
         f"- Escape Hatch 剩余: {commission.max_escape_hatches - commission.escape_used}",
-        f"- 步数预算: ≤{commission.max_tool_steps}；扩权最多 {commission.max_escape_hatches} 次",
+        f"- 步数预算: {commission.tool_steps_used}/{commission.max_tool_steps}；"
+        f"扩权最多 {commission.max_escape_hatches} 次；轻量失败重试≤{commission.max_light_retries}",
+        "- Fork-Join：只读可 parallel；写入/不可逆强制串行且 irreversible 置末",
     ]
     if commission.post_condition:
         lines.append(f"- 退出断言: {commission.post_condition}")
@@ -207,5 +230,8 @@ def commission_hint(commission: TaskCommission) -> str:
     lines.append(
         "- 工具不足时只可调用 request_tool_expansion 一次申请辅类；"
         "仍不足则降级为草稿/人工说明，禁止胡乱绕过。"
+    )
+    lines.append(
+        "- 结束前调用 assert_task_postcondition；失败不得宣称任务完成。"
     )
     return "\n".join(lines)

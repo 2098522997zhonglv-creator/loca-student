@@ -1382,7 +1382,11 @@ class AgentLoopStreamAPIView(View):
             )
             # 短路时强制保留元工具
             if task_commission.short_circuit:
-                meta_names = {"request_tool_expansion", "report_task_blocked"}
+                meta_names = {
+                    "request_tool_expansion",
+                    "assert_task_postcondition",
+                    "report_task_blocked",
+                }
                 kept_meta = [
                     t for t in builtin_tools if getattr(t, "name", "") in meta_names
                 ]

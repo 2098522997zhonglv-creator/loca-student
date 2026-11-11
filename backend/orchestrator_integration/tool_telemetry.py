@@ -185,6 +185,15 @@ def aggregate_telemetry(limit: int = 2000) -> Dict[str, Any]:
             ),
             "escape_denied": sum(1 for e in events if e.error_kind == "escape_denied"),
             "degraded_draft": sum(1 for e in events if e.error_kind == "degraded_draft"),
+            "budget_exceeded": sum(
+                1 for e in events if e.error_kind == "budget_exceeded"
+            ),
+            "postcondition_failed": sum(
+                1 for e in events if e.error_kind == "postcondition_failed"
+            ),
+            "light_channel_irreversible_blocks": sum(
+                1 for e in events if e.error_kind == "light_channel_irreversible"
+            ),
         },
     }
 

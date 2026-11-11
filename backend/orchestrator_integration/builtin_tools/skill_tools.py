@@ -756,12 +756,17 @@ def get_skill_tools(
         rejected_by_allowlist: bool = False,
         rejected_by_catalog: bool = False,
         error_kind: str = "",
+        result_text: str = "",
     ) -> None:
         try:
+            from orchestrator_integration.execution_policy import classify_attribution
             from orchestrator_integration.telemetry_context import get_telemetry_context
             from orchestrator_integration.tool_telemetry import record_tool_telemetry
 
             ctx = get_telemetry_context()
+            attr = classify_attribution(
+                error_kind=error_kind, result_text=result_text
+            )
             record_tool_telemetry(
                 zone=ctx.zone,
                 playbook=ctx.playbook,
@@ -772,12 +777,58 @@ def get_skill_tools(
                 rejected_by_allowlist=rejected_by_allowlist,
                 rejected_by_catalog=rejected_by_catalog,
                 error_kind=error_kind,
+                attribution=attr,
                 tools_mounted=ctx.tools_mounted,
                 session_id=ctx.session_id or (current_chat_session_id or ""),
                 user_id=ctx.user_id if ctx.user_id is not None else current_user_id,
             )
         except Exception as exc:
             logger.debug("skill telemetry 失败: %s", exc)
+
+    def _consume_budget(n: int = 1) -> Optional[str]:
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            commission = get_telemetry_context().commission
+            if commission is None:
+                return None
+            ok, detail = commission.consume_tool_step(n)
+            if not ok:
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name="budget",
+                    success=False,
+                    error_kind="budget_exceeded",
+                    result_text=detail,
+                )
+                return detail
+        except Exception:
+            return None
+        return None
+
+    def _channel() -> str:
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+            from orchestrator_integration.task_commission import CHANNEL_LIGHT
+
+            c = get_telemetry_context().commission
+            return c.channel if c else CHANNEL_LIGHT
+        except Exception:
+            from orchestrator_integration.task_commission import CHANNEL_LIGHT
+
+            return CHANNEL_LIGHT
+
+    def _record_result_snippet(text: str) -> None:
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            c = get_telemetry_context().commission
+            if c is not None:
+                c.last_tool_results.append(str(text or "")[:1500])
+                if len(c.last_tool_results) > 20:
+                    c.last_tool_results = c.last_tool_results[-20:]
+        except Exception:
+            pass
 
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
@@ -1139,6 +1190,7 @@ def get_skill_tools(
             except ValueError as exc:
                 return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
+        from orchestrator_integration.execution_policy import plan_batch_execution
         from orchestrator_integration.skill_catalog import (
             catalog_reject_unregistered_write,
         )
@@ -1151,6 +1203,10 @@ def get_skill_tools(
 
         def _zone_id() -> str:
             return (get_telemetry_context().zone or "").strip()
+
+        budget_err = _consume_budget(1)
+        if budget_err:
+            return budget_err
 
         # 批量执行模式
         if commands:
@@ -1166,8 +1222,25 @@ def get_skill_tools(
                     success=False,
                     rejected_by_allowlist=True,
                     error_kind="cross_skill",
+                    result_text=cross,
                 )
                 return cross
+
+            plan_err, batch_plan = plan_batch_execution(
+                commands, want_parallel=bool(parallel), channel=_channel()
+            )
+            if plan_err:
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name="batch",
+                    success=False,
+                    error_kind="batch_plan_reject",
+                    result_text=plan_err,
+                )
+                return plan_err
+            commands = batch_plan.ordered_commands
+            for note in batch_plan.notes:
+                logger.info("[execute_skill_script] 批次策略: %s", note)
 
             for c in commands:
                 if not isinstance(c, dict):
@@ -1181,6 +1254,7 @@ def get_skill_tools(
                         success=False,
                         rejected_by_allowlist=True,
                         error_kind="allowlist",
+                        result_text=blocked,
                     )
                     return blocked
                 catalog_block = catalog_reject_unregistered_write(
@@ -1196,6 +1270,7 @@ def get_skill_tools(
                         success=False,
                         rejected_by_catalog=True,
                         error_kind="unregistered_write",
+                        result_text=catalog_block,
                     )
                     return catalog_block
                 priv = reject_zone_privilege_escalation(
@@ -1211,6 +1286,7 @@ def get_skill_tools(
                         success=False,
                         rejected_by_allowlist=True,
                         error_kind="privilege",
+                        result_text=priv,
                     )
                     return priv
 
@@ -1313,17 +1389,11 @@ def get_skill_tools(
                     executed_readonly=executed_readonly or None,
                 )
 
-            run_parallel = bool(parallel) and len(commands) > 1
-            if mutating_cmds and run_parallel:
-                logger.info(
-                    "[execute_skill_script] 批量含写入，强制串行（忽略 parallel=true）"
-                )
-                run_parallel = False
-
+            run_parallel = bool(batch_plan.parallel)
             logger.info(
                 f"[execute_skill_script] 批量模式: {len(commands)} 条命令, "
                 f"parallel={run_parallel}, max_workers={max_workers}, "
-                f"user_confirmed={user_confirmed}"
+                f"user_confirmed={user_confirmed}, notes={list(batch_plan.notes)}"
             )
 
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
@@ -1353,14 +1423,7 @@ def get_skill_tools(
             logger.info(
                 f"[execute_skill_script] 批量完成: {success_count} 成功, {error_count} 失败"
             )
-            _emit_telemetry(
-                tool_name="execute_skill_script",
-                skill_name="batch",
-                success=error_count == 0,
-                error_kind="" if error_count == 0 else "batch_partial_error",
-            )
-
-            return json.dumps(
+            out = json.dumps(
                 {
                     "summary": {
                         "total": len(commands),
@@ -1368,12 +1431,22 @@ def get_skill_tools(
                         "error": error_count,
                         "parallel": run_parallel,
                         "user_confirmed": user_confirmed,
+                        "policy_notes": list(batch_plan.notes),
                     },
                     "results": [r for r in results if r is not None],
                 },
                 ensure_ascii=False,
                 indent=2,
             )
+            _record_result_snippet(out)
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name="batch",
+                success=error_count == 0,
+                error_kind="" if error_count == 0 else "batch_partial_error",
+                result_text=out[:800],
+            )
+            return out
 
         # 单个执行模式
         if not skill_name or not command:
@@ -1388,6 +1461,7 @@ def get_skill_tools(
                 success=False,
                 rejected_by_allowlist=True,
                 error_kind="allowlist",
+                result_text=blocked,
             )
             return blocked
 
@@ -1400,6 +1474,7 @@ def get_skill_tools(
                 success=False,
                 rejected_by_catalog=True,
                 error_kind="unregistered_write",
+                result_text=catalog_block,
             )
             return catalog_block
 
@@ -1416,10 +1491,33 @@ def get_skill_tools(
                 success=False,
                 rejected_by_allowlist=True,
                 error_kind="privilege",
+                result_text=priv,
             )
             return priv
 
-        if is_mutating_skill_command(command) and not _write_allowed(user_confirmed, user_write_approved):
+        from orchestrator_integration.execution_policy import command_side_effect
+        from orchestrator_integration.task_commission import CHANNEL_LIGHT
+
+        side = command_side_effect(command, skill_name)
+        if side == "irreversible" and _channel() == CHANNEL_LIGHT:
+            msg = (
+                "轻量通道禁止 irreversible 动作；请走重量通道/草稿确认后再执行。"
+            )
+            logger.info(
+                "[execute_skill_script] 轻量通道拒 irreversible skill=%s", skill_name
+            )
+            _emit_telemetry(
+                tool_name="execute_skill_script",
+                skill_name=skill_name,
+                success=False,
+                error_kind="light_channel_irreversible",
+                result_text=msg,
+            )
+            return msg
+
+        if is_mutating_skill_command(command) and not _write_allowed(
+            user_confirmed, user_write_approved
+        ):
             logger.info(
                 "[execute_skill_script] 写入未确认，拒绝执行 skill=%s", skill_name
             )
@@ -1445,6 +1543,7 @@ def get_skill_tools(
                 skill_name=skill_name,
                 success=False,
                 error_kind="prefer_url_reader",
+                result_text=redirect,
             )
             return redirect
 
@@ -1455,12 +1554,28 @@ def get_skill_tools(
                     isinstance(result, str)
                     and result.startswith("错误")
                 )
+                # 轻量通道：失败再试 1 次
+                from orchestrator_integration.task_commission import CHANNEL_LIGHT
+
+                if not ok and _channel() == CHANNEL_LIGHT:
+                    logger.info(
+                        "[execute_skill_script] 轻量通道失败，重试 1 次 skill=%s",
+                        skill_name,
+                    )
+                    result = _execute_single_skill_script(
+                        skill_name, command, session_id
+                    )
+                    ok = not (
+                        isinstance(result, str) and result.startswith("错误")
+                    )
+                _record_result_snippet(str(result))
                 _emit_telemetry(
                     tool_name="execute_skill_script",
                     skill_name=skill_name,
                     success=ok,
                     duration_ms=timer.elapsed_ms,
                     error_kind="" if ok else "execute_error",
+                    result_text=str(result)[:800],
                 )
                 return result
             except Exception as exc:
@@ -1470,6 +1585,7 @@ def get_skill_tools(
                     success=False,
                     duration_ms=timer.elapsed_ms,
                     error_kind="exception",
+                    result_text=str(exc)[:800],
                 )
                 raise exc
 
