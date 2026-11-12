@@ -1131,8 +1131,10 @@ class AgentLoopStreamAPIView(View):
     def _update_session_token_usage(
         self, session_id: str, input_tokens: int, output_tokens: int,
         cache_read_tokens: int = 0, user_id=None, project_id=None,
+        *,
+        duration_ms: int = 0,
     ):
-        """更新会话的 Token 使用统计，同时写入独立的 TokenUsageRecord"""
+        """更新会话 Token 统计，并扣减 AgentTask 持久化预算（FR07.1/7.2）。"""
         try:
             from django.db.models import F
             from django.utils import timezone
@@ -1163,6 +1165,37 @@ class AgentLoopStreamAPIView(View):
             )
         except Exception as e:
             logger.warning(f"Failed to create TokenUsageRecord: {e}")
+
+        # 持久化任务预算：模型 Token + 本轮耗时
+        try:
+            from orchestrator_integration.agent_runtime import consume_budget
+            from orchestrator_integration.models import AgentTask
+
+            total = int(input_tokens or 0) + int(output_tokens or 0)
+            if total <= 0 and duration_ms <= 0:
+                return
+            chat = ChatSession.objects.filter(session_id=session_id).first()
+            if chat is None:
+                return
+            task = (
+                AgentTask.objects.filter(session=chat)
+                .exclude(status__in=("completed", "failed", "cancelled"))
+                .order_by("-updated_at")
+                .first()
+            )
+            if task is None:
+                return
+            ok, detail = consume_budget(
+                task, tokens=total, duration_ms=max(0, int(duration_ms or 0))
+            )
+            if not ok:
+                logger.warning(
+                    "AgentTask token/duration budget exceeded session=%s detail=%s",
+                    session_id,
+                    detail,
+                )
+        except Exception as e:
+            logger.debug("Failed to consume agent task token budget: %s", e)
 
     async def authenticate_request(self, request):
         """JWT 认证"""
@@ -2926,6 +2959,8 @@ class AgentTaskSnapshotAPIView(View):
             from orchestrator_integration.models import AgentTask, TaskEvent
 
             def _load():
+                from orchestrator_integration.agent_runtime import assert_task_access
+
                 qs = AgentTask.objects.all()
                 if task_id:
                     task = qs.filter(public_task_id=task_id).first() or qs.filter(
@@ -2935,6 +2970,11 @@ class AgentTaskSnapshotAPIView(View):
                     from langgraph_integration.models import ChatSession
 
                     chat = ChatSession.objects.filter(session_id=session_id).first()
+                    if chat is not None and getattr(chat, "user_id", None) not in (
+                        None,
+                        user.id,
+                    ):
+                        return "forbidden"
                     task = (
                         AgentTask.objects.filter(session=chat)
                         .order_by("-updated_at")
@@ -2944,11 +2984,16 @@ class AgentTaskSnapshotAPIView(View):
                     )
                 if task is None:
                     return None
-                if task.user_id and task.user_id != user.id:
+                access = assert_task_access(
+                    task, user_id=user.id, session_id=session_id or ""
+                )
+                if not access.get("ok"):
                     return "forbidden"
                 snap = task_snapshot(task)
                 if after_event_id:
-                    after = TaskEvent.objects.filter(event_id=after_event_id).first()
+                    after = TaskEvent.objects.filter(
+                        event_id=after_event_id, task=task
+                    ).first()
                     if after:
                         snap["events"] = [
                             e

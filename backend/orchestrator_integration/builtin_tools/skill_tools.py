@@ -28,6 +28,102 @@ logger = logging.getLogger("orchestrator_integration")
 
 _playwright_session_manager: Optional[PlaywrightSessionManager] = None
 _playwright_session_manager_lock = threading.Lock()
+
+
+class SkillExecutionCancelled(Exception):
+    """用户停止信号打断子进程（FR07.3）。"""
+
+
+def _current_stop_session_id() -> str:
+    try:
+        from orchestrator_integration.telemetry_context import get_telemetry_context
+
+        return (get_telemetry_context().session_id or "").strip()
+    except Exception:
+        return ""
+
+
+def _should_stop_execution(session_id: str = "") -> bool:
+    try:
+        from orchestrator_integration.stop_signal import should_stop
+
+        sid = session_id or _current_stop_session_id()
+        return bool(sid and should_stop(sid))
+    except Exception:
+        return False
+
+
+def _run_shell_cancellable(
+    exec_command: str,
+    *,
+    cwd: str,
+    env: dict,
+    timeout: int = 120,
+    text_mode: bool = True,
+    session_id: str = "",
+):
+    """可取消的 shell 执行：轮询停止信号并终止进程组（FR07.3）。"""
+    import signal
+
+    sid = session_id or _current_stop_session_id()
+    if _should_stop_execution(sid):
+        raise SkillExecutionCancelled("任务已停止，拒绝启动新的工具动作")
+
+    popen_kwargs = {
+        "args": exec_command,
+        "shell": True,
+        "cwd": cwd,
+        "env": env,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "start_new_session": True,
+    }
+    if text_mode:
+        popen_kwargs.update({"text": True, "encoding": "utf-8", "errors": "replace"})
+
+    proc = subprocess.Popen(**popen_kwargs)
+    deadline = time.time() + max(1, int(timeout))
+    try:
+        while True:
+            if _should_stop_execution(sid):
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                raise SkillExecutionCancelled("任务已停止，子进程已终止")
+            rc = proc.poll()
+            if rc is not None:
+                stdout, stderr = proc.communicate()
+                return subprocess.CompletedProcess(
+                    args=exec_command, returncode=rc, stdout=stdout, stderr=stderr
+                )
+            if time.time() >= deadline:
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except Exception:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                raise subprocess.TimeoutExpired(exec_command, timeout)
+            time.sleep(0.4)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 _ARTIFACT_EXTENSIONS = {
     ".drawio",
     ".png",
@@ -934,7 +1030,7 @@ def get_skill_tools(
         except Exception as exc:
             logger.debug("skill telemetry 失败: %s", exc)
 
-    def _consume_budget(n: int = 1) -> Optional[str]:
+    def _consume_budget(n: int = 1, *, duration_ms: int = 0) -> Optional[str]:
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
@@ -948,7 +1044,11 @@ def get_skill_tools(
 
                     task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
                     if task is not None:
-                        ok_db, detail_db = consume_budget(task, tool_steps=n)
+                        ok_db, detail_db = consume_budget(
+                            task,
+                            tool_steps=n,
+                            duration_ms=max(0, int(duration_ms or 0)),
+                        )
                         if not ok_db:
                             _emit_telemetry(
                                 tool_name="execute_skill_script",
@@ -1266,14 +1366,14 @@ def get_skill_tools(
             exec_cwd = screenshots_dir if skill_name == "playwright-cli" else skill_dir
 
             if platform.system() == "Windows":
-                # Windows cmd 默认使用 GBK 编码，使用 None 让 subprocess 自动检测
-                result = subprocess.run(
+                # Windows：字节模式 + 智能解码；仍支持停止信号打断
+                result = _run_shell_cancellable(
                     exec_command,
-                    shell=True,
                     cwd=exec_cwd,
-                    capture_output=True,
-                    timeout=120,
                     env=env,
+                    timeout=120,
+                    text_mode=False,
+                    session_id=session_id or "",
                 )
 
                 # 智能解码：先尝试 UTF-8（现代工具通常输出 UTF-8），失败再用 GBK（Windows cmd 默认）
@@ -1285,19 +1385,16 @@ def get_skill_tools(
                     except UnicodeDecodeError:
                         return data.decode("gbk", errors="replace")
 
-                stdout = strip_terminal_control_sequences(smart_decode(result.stdout))
-                stderr = strip_terminal_control_sequences(smart_decode(result.stderr))
+                stdout = strip_terminal_control_sequences(smart_decode(result.stdout or b""))
+                stderr = strip_terminal_control_sequences(smart_decode(result.stderr or b""))
             else:
-                result = subprocess.run(
+                result = _run_shell_cancellable(
                     exec_command,
-                    shell=True,
                     cwd=exec_cwd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
                     env=env,
-                    encoding="utf-8",
-                    errors="replace",
+                    timeout=120,
+                    text_mode=True,
+                    session_id=session_id or "",
                 )
                 stdout = strip_terminal_control_sequences(result.stdout or "")
                 stderr = strip_terminal_control_sequences(result.stderr or "")
@@ -1340,6 +1437,17 @@ def get_skill_tools(
                 command=command or "",
             )
 
+        except SkillExecutionCancelled as cancel_exc:
+            logger.info("[execute_skill_script] 已按停止信号取消: %s", cancel_exc)
+            from orchestrator_integration.tool_result import ToolResult, new_operation_id
+
+            return ToolResult(
+                status="cancelled",
+                operation_id=new_operation_id(),
+                error_code="cancelled_by_user",
+                summary=str(cancel_exc),
+                data={"raw_text": str(cancel_exc)},
+            ).to_tool_text()
         except subprocess.TimeoutExpired:
             logger.error("[execute_skill_script] 执行超时")
             from orchestrator_integration.tool_result import classify_skill_output
@@ -1432,6 +1540,16 @@ def get_skill_tools(
         def _zone_id() -> str:
             return (get_telemetry_context().zone or "").strip()
 
+        if _should_stop_execution():
+            return json.dumps(
+                {
+                    "status": "cancelled",
+                    "error_code": "cancelled_by_user",
+                    "message": "任务已停止，拒绝启动新的工具动作",
+                },
+                ensure_ascii=False,
+            )
+
         budget_err = _consume_budget(1)
         if budget_err:
             return budget_err
@@ -1467,6 +1585,22 @@ def get_skill_tools(
                 )
                 return plan_err
             commands = batch_plan.ordered_commands
+            from orchestrator_integration.step_deps import (
+                resolve_output_refs,
+                validate_batch_deps,
+            )
+            from orchestrator_integration.tool_result import classify_skill_output
+
+            dep_err = validate_batch_deps(commands)
+            if dep_err:
+                _emit_telemetry(
+                    tool_name="execute_skill_script",
+                    skill_name="batch",
+                    success=False,
+                    error_kind="batch_plan_reject",
+                    result_text=dep_err,
+                )
+                return dep_err
             for note in batch_plan.notes:
                 logger.info("[execute_skill_script] 批次策略: %s", note)
 
@@ -1532,18 +1666,47 @@ def get_skill_tools(
                 user_confirmed, user_write_approved
             )
 
+            outputs_by_step: dict[str, dict] = {}
+
             def execute_single(idx: int, cmd: dict[str, str]) -> dict[str, object]:
                 cmd_skill_name = cmd.get("skill_name")
                 cmd_command = cmd.get("command")
                 cmd_session_id = cmd.get("session_id")
+                step_id = str(cmd.get("step_id") or "").strip()
+
+                if _should_stop_execution():
+                    return {
+                        "index": idx,
+                        "step_id": step_id or None,
+                        "skill_name": cmd_skill_name,
+                        "command": cmd_command,
+                        "status": "cancelled",
+                        "error": "任务已停止，跳过剩余动作",
+                    }
 
                 if not cmd_skill_name or not cmd_command:
                     return {
                         "index": idx,
+                        "step_id": step_id or None,
                         "skill_name": cmd_skill_name,
                         "command": cmd_command,
                         "error": "缺少 skill_name 或 command",
                     }
+
+                ref_err, resolved_cmd = resolve_output_refs(
+                    str(cmd_command), outputs_by_step
+                )
+                if ref_err:
+                    return {
+                        "index": idx,
+                        "step_id": step_id or None,
+                        "skill_name": cmd_skill_name,
+                        "command": cmd_command,
+                        "status": "skipped",
+                        "skip_reason": ref_err,
+                        "error": ref_err,
+                    }
+                cmd_command = resolved_cmd
 
                 redirect = prefer_url_reader_instead(cmd_skill_name, cmd_command)
                 if redirect:
@@ -1553,6 +1716,7 @@ def get_skill_tools(
                     )
                     return {
                         "index": idx,
+                        "step_id": step_id or None,
                         "skill_name": cmd_skill_name,
                         "command": cmd_command,
                         "result": redirect,
@@ -1562,15 +1726,32 @@ def get_skill_tools(
                     result = _execute_single_skill_script(
                         cmd_skill_name, cmd_command, cmd_session_id
                     )
+                    classified = classify_skill_output(
+                        text=str(result or ""),
+                        skill_name=str(cmd_skill_name or ""),
+                        command=str(cmd_command or ""),
+                    )
+                    if step_id:
+                        outputs_by_step[step_id] = {
+                            "status": classified.status,
+                            "data": classified.data,
+                            "resource_id": classified.resource_id,
+                            "resource_type": classified.resource_type,
+                        }
                     return {
                         "index": idx,
+                        "step_id": step_id or None,
                         "skill_name": cmd_skill_name,
                         "command": cmd_command,
                         "result": result,
+                        "status": classified.status,
                     }
                 except Exception as e:
+                    if step_id:
+                        outputs_by_step[step_id] = {"status": "failed", "data": {}}
                     return {
                         "index": idx,
+                        "step_id": step_id or None,
                         "skill_name": cmd_skill_name,
                         "command": cmd_command,
                         "error": str(e),
@@ -1627,7 +1808,6 @@ def get_skill_tools(
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
             from orchestrator_integration.tool_result import (
                 ToolResult,
-                classify_skill_output,
                 summarize_batch_statuses,
             )
 

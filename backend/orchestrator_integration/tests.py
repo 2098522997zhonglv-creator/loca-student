@@ -2386,6 +2386,155 @@ class BehaviorMemoryDBTests(TestCase):
         self.assertIn("knowledge_search", ev.summary_text)
 
 
+class RemainingRequirementGapTests(TestCase):
+    """剩余缺口接线回归：Token 预算、步骤依赖、取消传播、核对落库。"""
+
+    def test_session_token_usage_consumes_task_budget(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_loop_view import AgentLoopStreamAPIView
+        from orchestrator_integration.agent_runtime import create_or_resume_task
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="tokgate", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-tok-gate", title="t")
+        c = TaskCommission(
+            task_id="tg1",
+            zone_id="general",
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset(),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+            max_tokens=50,
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="x",
+            commission=c,
+            lease_owner="w1",
+        )
+        AgentLoopStreamAPIView()._update_session_token_usage(
+            chat.session_id, 20, 20, user_id=user.id
+        )
+        task.refresh_from_db()
+        self.assertEqual(task.budget.get("used_tokens"), 40)
+        # 超限不抛异常，且不累加 used_tokens
+        AgentLoopStreamAPIView()._update_session_token_usage(
+            chat.session_id, 20, 0, user_id=user.id
+        )
+        task.refresh_from_db()
+        self.assertEqual(task.budget.get("used_tokens"), 40)
+
+    def test_step_deps_ref_and_cycle(self):
+        from orchestrator_integration.step_deps import (
+            resolve_output_refs,
+            validate_batch_deps,
+        )
+
+        err = validate_batch_deps(
+            [
+                {"step_id": "a", "depends_on": ["b"], "command": "x"},
+                {"step_id": "b", "depends_on": ["a"], "command": "y"},
+            ]
+        )
+        self.assertIn("环", err or "")
+        miss, raw = resolve_output_refs(
+            "python x.py --id ${a.case_id}",
+            {"a": {"status": "failed", "data": {"case_id": "9"}}},
+        )
+        self.assertIsNotNone(miss)
+        ok, resolved = resolve_output_refs(
+            "python x.py --id ${a.case_id}",
+            {"a": {"status": "succeeded", "data": {"case_id": "42"}}},
+        )
+        self.assertIsNone(ok)
+        self.assertIn("42", resolved)
+
+    def test_unknown_step_stores_reconcile_plan(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import (
+            create_or_resume_task,
+            record_step_result,
+        )
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rec1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-rec-1", title="t")
+        c = TaskCommission(
+            task_id="rec",
+            zone_id="execute",
+            playbook_id="testcase_execute",
+            primary_skills=frozenset({"ui-automation"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=False,
+            channel="light",
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="执行",
+            commission=c,
+            lease_owner="w1",
+        )
+        step = record_step_result(
+            task,
+            tool_name="ui-automation",
+            tool_input={"command": "execute"},
+            structured={
+                "status": "unknown",
+                "operation_id": "op-u1",
+                "summary": "超时",
+                "data": {"execution_id": "exec-9"},
+                "idempotency_key": "idem-abc",
+            },
+            summary="错误: 超时",
+        )
+        self.assertEqual(step.status, "unknown")
+        self.assertIn("reconcile", step.evidence or {})
+        self.assertTrue((step.evidence or {}).get("reconcile", {}).get("must_reconcile"))
+        self.assertEqual((step.evidence or {}).get("idempotency_key"), "idem-abc")
+
+    def test_stop_signal_blocks_new_skill_action(self):
+        from orchestrator_integration.builtin_tools.skill_tools import (
+            SkillExecutionCancelled,
+            _run_shell_cancellable,
+            _should_stop_execution,
+        )
+        from orchestrator_integration.stop_signal import (
+            clear_stop_signal,
+            set_stop_signal,
+        )
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        set_telemetry_context(TelemetryContext(session_id="sess-stop-skill"))
+        set_stop_signal("sess-stop-skill")
+        try:
+            self.assertTrue(_should_stop_execution())
+            with self.assertRaises(SkillExecutionCancelled):
+                _run_shell_cancellable(
+                    "echo hi",
+                    cwd="/tmp",
+                    env=dict(**__import__("os").environ),
+                    timeout=5,
+                    session_id="sess-stop-skill",
+                )
+        finally:
+            clear_stop_signal("sess-stop-skill")
+            set_telemetry_context(None)
+
+
 class AuditFlowRegressionTests(TestCase):
     """2026-11-12 复查报告 FLOW/边界回归。"""
 

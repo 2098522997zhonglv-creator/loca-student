@@ -2527,9 +2527,34 @@ watch(htmlPreviewVisible, async (visible) => {
   }
 });
 
+async function restoreTaskProgressFromSnapshot(targetSessionId?: string) {
+  // FR10.3 / AC18：断线或切回页面后按 task_id + after_event_id 补取
+  const sid = targetSessionId || sessionId.value || getSessionIdFromStorage() || '';
+  if (!sid) return;
+  const stream = activeStreams.value[sid];
+  const evts = stream?.taskEvents || [];
+  const lastEvt = evts.length ? evts[evts.length - 1] : undefined;
+  const afterId = lastEvt?.event_id ? String(lastEvt.event_id) : '';
+  const snap = await fetchTaskSnapshot({
+    taskId: stream?.taskId,
+    sessionId: sid,
+    afterEventId: afterId || undefined,
+  });
+  if (snap) {
+    applyTaskSnapshotToStream(sid, snap);
+  }
+}
+
+const onDocumentVisibilityChange = () => {
+  if (document.visibilityState === 'visible') {
+    void restoreTaskProgressFromSnapshot();
+  }
+};
+
 onMounted(async () => {
   window.addEventListener('message', handleDiagramPreviewMessage);
   document.addEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
+  document.addEventListener('visibilitychange', onDocumentVisibilityChange);
 
   // ⭐加载保存的提示词ID
   loadSavedPromptId();
@@ -2573,6 +2598,8 @@ onMounted(async () => {
   
   // 检查提示词状态（如果没有会自动弹出管理弹窗）
   await checkPromptStatus();
+
+  await restoreTaskProgressFromSnapshot();
   
   // 标记onMounted完成
   isMountedLoadComplete = true;
@@ -2608,19 +2635,7 @@ onActivated(async () => {
   // 4. 如果是同一个会话，检查是否有正在进行的流需要恢复显示
   else if (storedSessionId && activeStreams.value[storedSessionId]) {
     console.log(`Resuming stream display for current session ${storedSessionId}.`);
-    // FR10.3：按 task_id + after_event_id 补取事件
-    const stream = activeStreams.value[storedSessionId];
-    const evts = stream.taskEvents || [];
-    const lastEvt = evts.length ? evts[evts.length - 1] : undefined;
-    const afterId = lastEvt?.event_id ? String(lastEvt.event_id) : '';
-    const snap = await fetchTaskSnapshot({
-      taskId: stream.taskId,
-      sessionId: storedSessionId,
-      afterEventId: afterId || undefined,
-    });
-    if (snap) {
-      applyTaskSnapshotToStream(storedSessionId, snap);
-    }
+    await restoreTaskProgressFromSnapshot(storedSessionId);
     // 如果流在后台已经完成，但UI没有及时更新，这里重新加载历史记录
     if (activeStreams.value[storedSessionId].isComplete) {
       await loadChatHistory();
@@ -2628,10 +2643,7 @@ onActivated(async () => {
     }
   } else if (storedSessionId) {
     // 无本地流时也尝试恢复任务阶段条
-    const snap = await fetchTaskSnapshot({ sessionId: storedSessionId });
-    if (snap) {
-      applyTaskSnapshotToStream(storedSessionId, snap);
-    }
+    await restoreTaskProgressFromSnapshot(storedSessionId);
   }
 
   // 5. 页面激活后滚动到最新消息
@@ -2642,6 +2654,7 @@ onActivated(async () => {
 onUnmounted(() => {
   window.removeEventListener('message', handleDiagramPreviewMessage);
   document.removeEventListener('fullscreenchange', syncHtmlPreviewFullscreenState);
+  document.removeEventListener('visibilitychange', onDocumentVisibilityChange);
   pendingTitleRefreshTimers.forEach(timer => window.clearTimeout(timer));
   pendingTitleRefreshTimers.clear();
   // 组件卸载时，终止任何正在进行的流式请求

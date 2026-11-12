@@ -522,6 +522,26 @@ def record_step_result(
     step_status = status_map.get(str(status), "unknown")
     if step_status not in dict(AgentStep.STATUS_CHOICES):
         step_status = "unknown"
+    evidence = dict(structured.get("evidence") or {})
+    # FR06.3：unknown 步骤附带核对计划，恢复时禁止盲目重放
+    if step_status == "unknown":
+        try:
+            from orchestrator_integration.reconcile import build_reconcile_plan
+
+            plan = build_reconcile_plan(
+                skill_name=tool_name or "",
+                text=summary or structured.get("summary") or "",
+                status="unknown",
+                structured=structured,
+            )
+            evidence["reconcile"] = plan
+            structured = dict(structured)
+            structured["reconcile"] = plan
+        except Exception:
+            pass
+    if structured.get("idempotency_key"):
+        evidence["idempotency_key"] = structured.get("idempotency_key")
+
     step = AgentStep.objects.create(
         task=task,
         step_number=step_number,
@@ -533,7 +553,7 @@ def record_step_result(
         tool_output_summary=(summary or structured.get("summary") or "")[:2000],
         operation_id=structured.get("operation_id") or "",
         structured_result=structured,
-        evidence=structured.get("evidence") or {},
+        evidence=evidence,
         attempt_count=1,
         duration_ms=int(structured.get("duration_ms") or 0),
         param_fingerprint=fingerprint_payload(tool_input),
