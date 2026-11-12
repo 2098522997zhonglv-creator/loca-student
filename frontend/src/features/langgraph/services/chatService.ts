@@ -215,6 +215,7 @@ export interface AgentLoopNonStreamResponse {
   context_limit: number;
   interrupt?: {
     interrupt_id: string;
+    kind?: string;
     action_requests: Array<{
       name: string;
       args: Record<string, unknown>;

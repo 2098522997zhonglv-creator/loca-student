@@ -184,6 +184,7 @@ import {
 } from '@/features/langgraph/services/chatService';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts, initializeUserPrompts } from '@/features/prompts/services/promptService';
+import type { UserPrompt } from '@/features/prompts/types/prompt';
 import { toArray } from '@/utils/responseHelpers';
 import type { ChatRequest, ChatHistoryMessage, ChatSessionDetail } from '@/features/langgraph/types/chat';
 import type { LlmConfig } from '@/features/langgraph/types/llmConfig';
@@ -2421,7 +2422,7 @@ const handlePromptsUpdated = async () => {
       });
 
       if (response.status === 'success') {
-        const allPrompts = toArray(response.data);
+        const allPrompts = toArray<UserPrompt>(response.data);
         const currentPromptExists = allPrompts.some(prompt => prompt.id === selectedPromptId.value);
 
         if (!currentPromptExists) {
@@ -2536,7 +2537,7 @@ async function restoreTaskProgressFromSnapshot(targetSessionId?: string) {
   const lastEvt = evts.length ? evts[evts.length - 1] : undefined;
   const afterId = lastEvt?.event_id ? String(lastEvt.event_id) : '';
   const snap = await fetchTaskSnapshot({
-    taskId: stream?.taskId,
+    taskId: stream?.taskId != null ? String(stream.taskId) : undefined,
     sessionId: sid,
     afterEventId: afterId || undefined,
   });
