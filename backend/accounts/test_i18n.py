@@ -59,4 +59,10 @@ class ApiLocalizationTests(APITestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(payload['message'], 'Request succeeded')
-        self.assertIsInstance(payload['data'], list)
+        # 分页契约：data 为 {count, results} 或兼容旧版 list
+        data = payload['data']
+        if isinstance(data, dict) and 'results' in data:
+            self.assertIsInstance(data['results'], list)
+            self.assertGreaterEqual(int(data.get('count') or 0), 1)
+        else:
+            self.assertIsInstance(data, list)

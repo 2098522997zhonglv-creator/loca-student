@@ -97,7 +97,7 @@ export const getTestSuiteList = async (
     });
 
     if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload(response.data.data);
+      const { results, count } = normalizeListPayload<TestSuite>(response.data.data);
       return {
         success: true,
         data: results,

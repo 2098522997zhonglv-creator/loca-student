@@ -2830,3 +2830,123 @@ class AuditFlowRegressionTests(TestCase):
         task.refresh_from_db()
         self.assertEqual(task.current_stage, "generate_draft")
         self.assertNotEqual(task.status, "completed")
+
+
+class McpToolResultAdapterTests(SimpleTestCase):
+    def test_mcp_list_and_json_adapted_to_tool_result(self):
+        from orchestrator_integration.tool_result import adapt_mcp_tool_result
+
+        tr = adapt_mcp_tool_result(
+            [{"type": "text", "text": '{"success": false, "code": 400, "message": "bad"}'}],
+            tool_name="demo_mcp",
+        )
+        self.assertEqual(tr.status, "failed")
+        self.assertEqual(tr.evidence.get("adapter"), "mcp")
+        self.assertIn("demo_mcp", tr.evidence.get("tool_name", ""))
+
+        ok = adapt_mcp_tool_result(
+            {"success": True, "data": {"cart_id": "c1"}},
+            tool_name="cart_tool",
+        )
+        self.assertEqual(ok.status, "succeeded")
+        self.assertEqual(ok.resource_type, "cart_id")
+        self.assertEqual(ok.resource_id, "c1")
+
+        already = adapt_mcp_tool_result(
+            {
+                "status": "succeeded",
+                "operation_id": "op1",
+                "data": {"x": 1},
+                "summary": "done",
+            }
+        )
+        self.assertEqual(already.operation_id, "op1")
+        self.assertEqual(already.data.get("x"), 1)
+
+
+class RemoteIdempotencyDedupeTests(SimpleTestCase):
+    """证明：携带 Idempotency-Key 的远端写入可去重（本地模拟服务端）。"""
+
+    def test_remote_server_dedupes_by_idempotency_key(self):
+        import json
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        store = {"seen": {}, "calls": 0}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(length)
+                key = self.headers.get("Idempotency-Key") or self.headers.get(
+                    "X-Idempotency-Key"
+                )
+                store["calls"] += 1
+                if key and key in store["seen"]:
+                    payload = dict(store["seen"][key])
+                    payload["deduped"] = True
+                    data = json.dumps(payload).encode()
+                    self.send_response(200)
+                else:
+                    payload = {
+                        "success": True,
+                        "data": {"id": store["calls"]},
+                        "deduped": False,
+                    }
+                    if key:
+                        store["seen"][key] = payload
+                    data = json.dumps(payload).encode()
+                    self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                return
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            import urllib.request
+
+            from orchestrator_integration.idempotency import (
+                build_idempotency_key,
+                idempotency_env,
+            )
+
+            key = build_idempotency_key(
+                task_id="t-idem",
+                skill_name="loca-stude",
+                command="python x.py --action add_testcase --name demo",
+            )
+            env = idempotency_env(
+                task_id="t-idem",
+                skill_name="loca-stude",
+                command="python x.py --action add_testcase --name demo",
+            )
+            self.assertEqual(env["IDEMPOTENCY_KEY"], key)
+
+            def _post():
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/write",
+                    data=b'{"name":"demo"}',
+                    headers={
+                        "Content-Type": "application/json",
+                        "Idempotency-Key": key,
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    return json.loads(resp.read().decode())
+
+            first = _post()
+            second = _post()
+            self.assertFalse(first.get("deduped"))
+            self.assertTrue(second.get("deduped"))
+            self.assertEqual(first["data"]["id"], second["data"]["id"])
+            self.assertEqual(store["calls"], 2)
+        finally:
+            server.shutdown()

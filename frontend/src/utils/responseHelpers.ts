@@ -72,8 +72,8 @@ export function isSuccessfulListPayload(payload: unknown): boolean {
 }
 
 export type ParsedListResponse<T> =
-  | { ok: true; results: T[]; count: number; code?: number }
-  | { ok: false; error: string; code?: number }
+  | { ok: true; results: T[]; count: number; code?: number; error?: string }
+  | { ok: false; error: string; code?: number; results?: T[]; count?: number }
 
 /**
  * Parse axios `response.data` for list APIs.

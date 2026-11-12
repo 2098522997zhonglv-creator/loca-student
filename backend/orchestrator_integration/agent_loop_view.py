@@ -759,41 +759,39 @@ async def _prepare_agent_loop_human_message(
     return human_message_content, additional_kwargs, display_message
 
 
-def process_mcp_tool_output(content: Any) -> tuple:
+def process_mcp_tool_output(content: Any, *, tool_name: str = "") -> tuple:
     """
-    处理 MCP 工具返回的内容，提取实际数据并生成摘要
-
-    Args:
-        content: 工具返回的原始内容
+    处理 MCP/检索工具返回内容，统一适配为 ToolResult 文本 + 摘要（FR01.1）。
 
     Returns:
         tuple: (processed_content, summary)
     """
-    # 处理 MCP 工具返回的列表格式，提取 text 内容
-    if isinstance(content, list) and len(content) == 1:
-        first_item = content[0]
-        if isinstance(first_item, dict) and first_item.get("type") == "text":
-            text_content = first_item.get("text")
-            if text_content is not None:
-                content = text_content
-            # text 为 None 或空时保留原始列表格式
+    from orchestrator_integration.tool_result import adapt_mcp_tool_result
 
-    # 确保 content 可序列化
-    if content is None:
-        content = ""
-    elif not isinstance(content, (str, dict, list, int, float, bool)):
-        content = str(content)
-
-    # 生成摘要
-    if isinstance(content, str):
-        summary = content[:200]
-    else:
-        try:
-            summary = json.dumps(content, ensure_ascii=False)[:200]
-        except (TypeError, ValueError):
-            summary = str(content)[:200]
-
-    return content, summary
+    try:
+        tr = adapt_mcp_tool_result(content, tool_name=tool_name or "")
+        text = tr.to_tool_text()
+        return text, (tr.summary or text)[:200]
+    except Exception:
+        # 兜底：保持旧行为，避免工具出口中断 SSE
+        raw = content
+        if isinstance(raw, list) and len(raw) == 1:
+            first_item = raw[0]
+            if isinstance(first_item, dict) and first_item.get("type") == "text":
+                if first_item.get("text") is not None:
+                    raw = first_item.get("text")
+        if raw is None:
+            raw = ""
+        elif not isinstance(raw, (str, dict, list, int, float, bool)):
+            raw = str(raw)
+        if isinstance(raw, str):
+            summary = raw[:200]
+        else:
+            try:
+                summary = json.dumps(raw, ensure_ascii=False)[:200]
+            except (TypeError, ValueError):
+                summary = str(raw)[:200]
+        return raw, summary
 
 
 def _tool_result_sse_events(
@@ -808,7 +806,7 @@ def _tool_result_sse_events(
     生成 tool_result SSE，若输出为 needs_confirmation 则追加写库确认 interrupt。
     返回 (events, write_confirm_emitted)。
     """
-    content, summary = process_mcp_tool_output(content)
+    content, summary = process_mcp_tool_output(content, tool_name=tool_name or "")
     events: List[Dict[str, Any]] = [
         {
             "type": "tool_result",

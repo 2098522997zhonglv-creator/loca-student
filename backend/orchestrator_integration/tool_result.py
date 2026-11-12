@@ -410,6 +410,78 @@ def classify_skill_output(
     )
 
 
+def adapt_mcp_tool_result(
+    content: Any,
+    *,
+    tool_name: str = "",
+    duration_ms: float = 0.0,
+) -> ToolResult:
+    """将 MCP / 检索工具原始出口适配为统一 ToolResult（FR01.1）。
+
+    覆盖：
+    - MCP content 列表（[{type:text,text:...}]）
+    - 已是 ToolResult dict
+    - JSON / 纯文本业务结果
+    """
+    raw: Any = content
+    if isinstance(raw, list):
+        texts: List[str] = []
+        for item in raw:
+            if isinstance(item, dict) and item.get("type") == "text":
+                texts.append(str(item.get("text") or ""))
+            elif isinstance(item, str):
+                texts.append(item)
+            else:
+                try:
+                    texts.append(json.dumps(item, ensure_ascii=False))
+                except (TypeError, ValueError):
+                    texts.append(str(item))
+        raw = "\n".join(texts) if texts else json.dumps(raw, ensure_ascii=False)
+
+    if isinstance(raw, dict) and raw.get("status") in {
+        "succeeded",
+        "failed",
+        "unknown",
+        "needs_confirmation",
+        "skipped",
+        "cancelled",
+    }:
+        # 已是 ToolResult 形态
+        return ToolResult(
+            status=str(raw.get("status")),
+            operation_id=str(raw.get("operation_id") or new_operation_id()),
+            data=dict(raw.get("data") or {}),
+            error_code=str(raw.get("error_code") or ""),
+            retryable=bool(raw.get("retryable", False)),
+            evidence=dict(raw.get("evidence") or {}),
+            duration_ms=float(raw.get("duration_ms") or duration_ms or 0.0),
+            exit_code=raw.get("exit_code"),
+            output_ref=str(raw.get("output_ref") or ""),
+            execution_method=str(raw.get("execution_method") or ""),
+            resource_type=str(raw.get("resource_type") or ""),
+            resource_id=str(raw.get("resource_id") or ""),
+            source_url=str(raw.get("source_url") or ""),
+            observed_at=str(raw.get("observed_at") or ""),
+            summary=str(raw.get("summary") or "")[:500],
+        )
+
+    if isinstance(raw, (dict, list, int, float, bool)):
+        text = json.dumps(raw, ensure_ascii=False)
+    else:
+        text = str(raw or "")
+
+    result = classify_skill_output(
+        text=text,
+        duration_ms=duration_ms,
+        skill_name=tool_name or "mcp",
+        command=f"mcp:{tool_name}",
+    )
+    result.evidence = dict(result.evidence or {})
+    result.evidence["adapter"] = "mcp"
+    result.evidence["tool_name"] = tool_name or ""
+    return result
+
+
 def summarize_batch_statuses(results: List[ToolResult]) -> Dict[str, Any]:
     counts = {
         "succeeded": 0,

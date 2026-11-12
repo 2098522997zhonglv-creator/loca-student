@@ -205,7 +205,7 @@ export const getTestCaseList = async (projectId: number, params?: PaginationPara
     });
 
     if (response.data && response.data.status === 'success') {
-      const { results, count } = normalizeListPayload(response.data.data);
+      const { results, count } = normalizeListPayload<TestCase>(response.data.data);
       return {
         success: true,
         data: results,

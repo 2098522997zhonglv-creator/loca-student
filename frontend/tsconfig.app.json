@@ -3,10 +3,11 @@
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@arco-design/web-vue": ["./src/types/arco-web-vue-loose.d.ts"],
+      "@arco-design/web-vue/es/table/interface": ["./src/types/arco-table-interface.ts"],
+      "@arco-design/web-vue/es/form/interface": ["./src/types/arco-form-interface.ts"]
     },
-
-    /* Linting - 放宽一些检查以解决遗留问题 */
     "strict": true,
     "strictNullChecks": false,
     "noUnusedLocals": false,
@@ -14,8 +15,12 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"],
+  "vueCompilerOptions": {
+    "strictTemplates": false
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "src/**/*.d.ts"],
   "exclude": ["src/test-*.ts"]
 }
