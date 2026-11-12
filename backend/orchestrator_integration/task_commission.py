@@ -47,6 +47,8 @@ class TaskCommission:
     max_escape_hatches: int = 1
     max_tool_steps: int = 8
     max_light_retries: int = 1
+    max_tokens: int = 0
+    max_duration_ms: int = 0
     escape_used: int = 0
     tool_steps_used: int = 0
     granted_auxiliary: Set[str] = field(default_factory=set)

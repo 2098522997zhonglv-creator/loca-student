@@ -20,12 +20,14 @@ def build_idempotency_key(
     action: str = "",
     resource_key: str = "",
 ) -> str:
+    # FLOW08：散列完整规范化命令，禁止截断导致不同参数碰撞
+    normalized_cmd = " ".join((command or "").split())
     raw = json.dumps(
         {
             "task_id": task_id or "",
             "skill": skill_name or "",
             "action": action or "",
-            "command": (command or "")[:800],
+            "command": normalized_cmd,
             "resource": resource_key or "",
         },
         ensure_ascii=False,

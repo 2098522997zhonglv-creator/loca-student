@@ -2159,6 +2159,42 @@ class AgentLoopStreamAPIView(View):
                                                     logger.info(
                                                         "AgentLoopStreamAPI: Write confirm interrupt emitted"
                                                     )
+                                                    # FLOW01：审批等待时释放租约，供 resume 接管
+                                                    try:
+                                                        from orchestrator_integration.agent_runtime import (
+                                                            park_for_approval,
+                                                        )
+
+                                                        if (
+                                                            agent_runtime
+                                                            and agent_runtime.task
+                                                            is not None
+                                                        ):
+                                                            interrupt_evt = next(
+                                                                (
+                                                                    e
+                                                                    for e in events
+                                                                    if e.get("type")
+                                                                    == "interrupt"
+                                                                ),
+                                                                {},
+                                                            )
+                                                            await sync_to_async(
+                                                                park_for_approval
+                                                            )(
+                                                                agent_runtime.task,
+                                                                interrupt_id=str(
+                                                                    interrupt_evt.get(
+                                                                        "interrupt_id"
+                                                                    )
+                                                                    or ""
+                                                                ),
+                                                            )
+                                                    except Exception as park_err:
+                                                        logger.warning(
+                                                            "park_for_approval failed: %s",
+                                                            park_err,
+                                                        )
                                                 await sync_to_async(
                                                     _record_tool_behavior_safe
                                                 )(
@@ -2801,8 +2837,7 @@ class AgentLoopStopAPIView(View):
         if not session_id:
             return api_error_response("session_id is required", 400)
 
-        # 3. 设置停止信号 + 任务 cancelling（FR07）
-        success = set_stop_signal(session_id)
+        # 3. 先校验会话归属（FLOW05 / FR05.1），再设停止信号
         cancel_info = {}
         try:
             from orchestrator_integration.agent_runtime import request_cancel
@@ -2812,17 +2847,35 @@ class AgentLoopStopAPIView(View):
             chat = await sync_to_async(
                 ChatSession.objects.filter(session_id=session_id).first
             )()
-            if chat:
-                task = await sync_to_async(
-                    lambda: AgentTask.objects.filter(session=chat)
-                    .exclude(status__in=("completed", "failed", "cancelled"))
-                    .order_by("-updated_at")
-                    .first()
-                )()
-                if task and (task.user_id is None or task.user_id == user.id):
-                    cancel_info = await sync_to_async(request_cancel)(task)
+            if chat is None:
+                return api_error_response("session not found", 404)
+            chat_owner_id = getattr(chat, "user_id", None)
+            if chat_owner_id is not None and int(chat_owner_id) != int(user.id):
+                return api_error_response(
+                    "无权停止该会话",
+                    403,
+                    {"error_code": ["permission_denied"]},
+                )
+
+            task = await sync_to_async(
+                lambda: AgentTask.objects.filter(session=chat)
+                .exclude(status__in=("completed", "failed", "cancelled"))
+                .order_by("-updated_at")
+                .first()
+            )()
+            if task is not None:
+                if task.user_id is not None and int(task.user_id) != int(user.id):
+                    return api_error_response(
+                        "无权停止该任务",
+                        403,
+                        {"error_code": ["permission_denied"]},
+                    )
+                cancel_info = await sync_to_async(request_cancel)(task)
         except Exception as stop_err:
             logger.debug("stop task cancel mark failed: %s", stop_err)
+            return api_error_response(f"停止失败: {stop_err}", 500)
+
+        success = set_stop_signal(session_id)
 
         logger.info(
             "LLM_CHAT stop user_id=%s session_id=%s success=%s cancel=%s",
@@ -3487,6 +3540,41 @@ class AgentLoopResumeAPIView(View):
                                                     logger.info(
                                                         "AgentLoopResumeAPI: Write confirm interrupt emitted"
                                                     )
+                                                    try:
+                                                        from orchestrator_integration.agent_runtime import (
+                                                            park_for_approval,
+                                                        )
+
+                                                        if (
+                                                            agent_runtime
+                                                            and agent_runtime.task
+                                                            is not None
+                                                        ):
+                                                            interrupt_evt = next(
+                                                                (
+                                                                    e
+                                                                    for e in events
+                                                                    if e.get("type")
+                                                                    == "interrupt"
+                                                                ),
+                                                                {},
+                                                            )
+                                                            await sync_to_async(
+                                                                park_for_approval
+                                                            )(
+                                                                agent_runtime.task,
+                                                                interrupt_id=str(
+                                                                    interrupt_evt.get(
+                                                                        "interrupt_id"
+                                                                    )
+                                                                    or ""
+                                                                ),
+                                                            )
+                                                    except Exception as park_err:
+                                                        logger.warning(
+                                                            "resume park_for_approval failed: %s",
+                                                            park_err,
+                                                        )
                                                 await sync_to_async(
                                                     _record_tool_behavior_safe
                                                 )(

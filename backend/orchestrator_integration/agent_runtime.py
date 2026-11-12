@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -75,19 +76,48 @@ def create_or_resume_task(
         task = existing
         if not acquire_lease(task, owner):
             return task
-        task.goal = goal or task.goal
+        # 继续语义：保留原目标与授权，不覆盖 goal（AC17）
+        scope = dict(task.task_scope or {})
+        if not scope.get("raw_goal"):
+            scope["raw_goal"] = task.goal or ""
+        scope["continue_message"] = (goal or "")[:2000]
+        task.task_scope = scope
         if auth_scope:
             merged = dict(task.auth_scope or {})
-            merged.update(auth_scope)
+            # 只合并显式新增 allow；deny 并集；不删除原授权
+            allow = set(merged.get("allow_actions") or [])
+            deny = set(merged.get("deny_actions") or [])
+            allow |= set(auth_scope.get("allow_actions") or [])
+            deny |= set(auth_scope.get("deny_actions") or [])
+            # 原 deny 优先：不得因继续话术放宽
+            allow -= deny
+            merged["allow_actions"] = sorted(allow)
+            merged["deny_actions"] = sorted(deny)
+            for k, v in auth_scope.items():
+                if k not in {"allow_actions", "deny_actions"} and k not in merged:
+                    merged[k] = v
             task.auth_scope = merged
         task.save(
-            update_fields=["goal", "auth_scope", "updated_at", "lease_owner", "lease_expires_at", "status"]
+            update_fields=[
+                "task_scope",
+                "auth_scope",
+                "updated_at",
+                "lease_owner",
+                "lease_expires_at",
+                "status",
+            ]
         )
         return task
 
     budget = dict(DEFAULT_BUDGET)
     if commission is not None:
         budget["max_tool_steps"] = int(getattr(commission, "max_tool_steps", 28) or 28)
+        max_tokens = int(getattr(commission, "max_tokens", 0) or 0)
+        if max_tokens:
+            budget["max_tokens"] = max_tokens
+        max_duration = int(getattr(commission, "max_duration_ms", 0) or 0)
+        if max_duration:
+            budget["max_duration_ms"] = max_duration
     public_id = getattr(commission, "task_id", None) or _new_public_id()
     stages = stage_plan or []
     current_stage = stages[0]["stage_id"] if stages else ""
@@ -155,10 +185,13 @@ def try_claim_execution(
                 "status": row.status,
                 "task_id": row.public_task_id or str(row.id),
             }
+        # 审批等待中允许 resume 接管租约（FLOW01）
+        awaiting = row.status == "awaiting_approval"
         lease_ok = (
             not row.lease_owner
             or row.lease_owner == owner
             or (row.lease_expires_at and row.lease_expires_at <= now)
+            or awaiting
         )
         if not lease_ok:
             return {
@@ -213,11 +246,37 @@ def heartbeat_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
     return bool(n)
 
 
-def release_lease(task, owner: str) -> None:
+def release_lease(task, owner: str = "") -> None:
     from orchestrator_integration.models import AgentTask
 
-    AgentTask.objects.filter(pk=task.pk, lease_owner=owner).update(
-        lease_owner="", lease_expires_at=None, updated_at=timezone.now()
+    qs = AgentTask.objects.filter(pk=task.pk)
+    if owner:
+        qs = qs.filter(lease_owner=owner)
+    qs.update(lease_owner="", lease_expires_at=None, updated_at=timezone.now())
+    task.lease_owner = ""
+    task.lease_expires_at = None
+
+
+def park_for_approval(task, *, interrupt_id: str = "") -> None:
+    """写入确认发出时释放租约并进入 awaiting_approval，供 resume 接管（FLOW01）。"""
+    from orchestrator_integration.models import AgentTask
+
+    AgentTask.objects.filter(pk=task.pk).exclude(
+        status__in=("completed", "failed", "cancelled", "cancelling")
+    ).update(
+        status="awaiting_approval",
+        lease_owner="",
+        lease_expires_at=None,
+        updated_at=timezone.now(),
+    )
+    task.status = "awaiting_approval"
+    task.lease_owner = ""
+    task.lease_expires_at = None
+    append_event(
+        task,
+        "approval_required",
+        status="awaiting_approval",
+        payload={"interrupt_id": interrupt_id or ""},
     )
 
 
@@ -296,12 +355,15 @@ def consume_budget(
         max_steps = int(budget.get("max_tool_steps", 28) or 28)
         max_retries = int(budget.get("max_retries", 3) or 3)
         max_duration = int(budget.get("max_duration_ms", 0) or 0)
+        max_tokens = int(budget.get("max_tokens", 0) or 0)
         if tool_steps and next_steps > max_steps:
             return False, f"budget_tool_steps_exceeded:{next_steps}/{max_steps}"
         if retries and next_retries > max_retries:
             return False, f"budget_retries_exceeded:{next_retries}/{max_retries}"
         if max_duration and duration_ms and next_duration > max_duration:
             return False, f"budget_duration_exceeded:{next_duration}/{max_duration}"
+        if tokens and max_tokens and next_tokens > max_tokens:
+            return False, f"budget_tokens_exceeded:{next_tokens}/{max_tokens}"
         budget["used_tool_steps"] = next_steps
         budget["used_retries"] = next_retries
         budget["used_tokens"] = next_tokens
@@ -351,18 +413,38 @@ def request_cancel(task) -> Dict[str, Any]:
 
 
 def finalize_cancel(task, *, force: bool = False) -> Dict[str, Any]:
-    """确认在途结束后标记 cancelled（FR07.4）。"""
+    """确认在途结束后标记 cancelled（FR07.4 / FLOW04）。
+
+    unknown 且带外部 execution/operation 的步骤视为未核对副作用，禁止宣称已取消。
+    """
     from orchestrator_integration.models import AgentStep, AgentTask
 
-    in_flight = AgentStep.objects.filter(
-        task=task, status__in=("pending", "running")
-    ).count()
-    if in_flight and not force:
+    in_flight = list(
+        AgentStep.objects.filter(task=task, status__in=("pending", "running")).values(
+            "step_id", "status", "operation_id"
+        )[:50]
+    )
+    uncertain = []
+    for s in AgentStep.objects.filter(task=task, status="unknown").values(
+        "step_id", "operation_id", "structured_result", "tool_output_summary"
+    )[:50]:
+        structured = s.get("structured_result") or {}
+        data = structured.get("data") if isinstance(structured, dict) else {}
+        has_ext = bool(
+            s.get("operation_id")
+            or (isinstance(data, dict) and data.get("execution_id"))
+            or "execution_id" in str(s.get("tool_output_summary") or "")
+        )
+        if has_ext:
+            uncertain.append(s)
+    if (in_flight or uncertain) and not force:
         return {
             "status": "cancelling",
             "task_id": task.public_task_id or str(task.id),
-            "in_flight_count": in_flight,
-            "note": "仍有在途步骤，保持 cancelling",
+            "in_flight_count": len(in_flight),
+            "uncertain_count": len(uncertain),
+            "uncertain_steps": uncertain,
+            "note": "仍有在途或未核对外部动作，保持 cancelling，不能视为业务影响已停止",
         }
     AgentTask.objects.filter(pk=task.pk, status="cancelling").update(
         status="cancelled",
@@ -376,6 +458,7 @@ def finalize_cancel(task, *, force: bool = False) -> Dict[str, Any]:
         "status": "cancelled",
         "task_id": task.public_task_id or str(task.id),
         "in_flight_count": 0,
+        "uncertain_count": 0,
     }
 
 
@@ -772,15 +855,62 @@ def format_probe_hint(probe: Dict[str, Any]) -> str:
 def stage_acceptance_heuristic(
     stage_id: str, tool_results: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """阶段级启发式验收（AC16）：用于自动推进，非整任务终态。"""
+    """阶段级启发式验收（AC16）：用于自动推进，非整任务终态。
+
+    失败/拒绝文本不得仅凭动作名被当作已完成（FLOW07）。
+    """
     joined = "\n".join(str(x) for x in (tool_results or []) if x)
     sid = stage_id or ""
+    low = joined.lower()
+    failure_markers = (
+        '"status": "failed"',
+        '"status":"failed"',
+        "permission denied",
+        "权限不足",
+        "无权限",
+        "余额不足",
+        "业务拒绝",
+        "错误:",
+        "错误：",
+        "timeout",
+        "超时",
+    )
+    if any(m in low or m in joined for m in failure_markers):
+        # 允许 execute 阶段报告「测试失败终态」为完成；其它阶段失败不得推进
+        if sid not in {"execute", "execute_testcase"} or "终态" not in joined:
+            if not (
+                sid in {"execute", "execute_testcase"}
+                and any(k in joined for k in ("终态", "execution_id", "get_execution_records"))
+                and '"status": "failed"' not in joined  # tool failed vs test failed
+            ):
+                if any(
+                    m in low
+                    for m in (
+                        "permission denied",
+                        "权限不足",
+                        "无权限",
+                        "余额不足",
+                        "业务拒绝",
+                    )
+                ) or '"status": "failed"' in joined or '"status":"failed"' in joined:
+                    return {
+                        "ok": False,
+                        "reason": "failure_evidence_present",
+                        "stage_id": sid,
+                    }
+                if any(m in low for m in ("timeout", "超时")) and "终态" not in joined:
+                    return {
+                        "ok": False,
+                        "reason": "timeout_without_terminal",
+                        "stage_id": sid,
+                    }
+
     ok = False
     reason = ""
     if sid in {"kb_research", "single"} and (
         "预检索" in joined
         or "knowledge_search" in joined
-        or "来源" in joined
+        or ("来源" in joined and "失败" not in joined)
         or '"status": "succeeded"' in joined
     ):
         ok, reason = True, "kb_or_generic_evidence"
@@ -788,19 +918,26 @@ def stage_acceptance_heuristic(
         k in joined for k in ("草稿", "testcase", "steps", "用例")
     ):
         ok, reason = True, "draft_markers"
-    elif sid == "persist" and any(
-        k in joined for k in ("testcase_id", "case_id", "id=", "创建成功", "add_testcase")
-    ):
-        ok, reason = True, "persist_id"
+    elif sid == "persist":
+        # 必须有真实产物 ID，禁止仅凭 add_testcase 命令名
+        if re.search(
+            r"(testcase_id|case_id)\s*[:=]\s*[A-Za-z0-9_-]+|创建成功.*id|\"id\"\s*:\s*\d+",
+            joined,
+            re.I,
+        ):
+            ok, reason = True, "persist_id"
+        else:
+            ok, reason = False, "persist_missing_id"
     elif sid in {"execute", "execute_testcase"} and any(
-        k in joined
-        for k in ("execution_id", "终态", "passed", "failed", "get_execution_records")
+        k in joined for k in ("execution_id", "终态", "get_execution_records")
     ):
         ok, reason = True, "execution_evidence"
-    elif sid == "browser_interact" and any(
-        k in joined for k in ("cart_id", "cart_item", "Add To Cart", "预览")
+    elif sid == "browser_interact" and re.search(
+        r"(cart_id|cart_item_id)\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+",
+        joined,
+        re.I,
     ):
-        ok, reason = True, "browser_partial"
+        ok, reason = True, "browser_typed_id"
     elif sid == "summarize":
         ok, reason = True, "summarize_ready"
     return {"ok": ok, "reason": reason, "stage_id": sid}
@@ -998,17 +1135,21 @@ class AgentRuntime:
     def accept(self, acceptance: Dict[str, Any]) -> Dict[str, Any]:
         if self.task is None:
             return {}
-        # 多阶段：非末阶段验收通过只推进，不标 completed
+        # 多阶段：未到末阶段不得标 completed；推进只由 maybe_advance 负责（FLOW02）
         stages = self.task.stage_plan or []
         if len(stages) > 1 and acceptance.get("ok"):
             ids = [str(s.get("stage_id") or "") for s in stages if isinstance(s, dict)]
             cur = self.task.current_stage or ""
             if cur and ids and cur != ids[-1]:
-                adv = advance_task_stage(self.task, force=True)
                 return {
                     "type": "stage_changed",
                     "status": "running",
-                    "payload": adv,
+                    "payload": {
+                        "current_stage": cur,
+                        "advanced": False,
+                        "reason": "not_last_stage_defer_completion",
+                        "plan_version": self.task.plan_version,
+                    },
                     "deferred_completion": True,
                 }
         return apply_acceptance(self.task, acceptance)

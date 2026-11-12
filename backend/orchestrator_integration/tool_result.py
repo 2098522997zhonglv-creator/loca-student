@@ -70,6 +70,26 @@ def infer_execution_method(text: str) -> str:
     return ""
 
 
+_ID_FIELD_RE = re.compile(
+    r"(cart_id|cart_item_id|checkout_id|order_id|order_sn)\s*[:=]\s*"
+    r"(?!unknown\b|null\b|none\b|n/?a\b|undefined\b)([A-Za-z0-9][A-Za-z0-9_-]{2,})",
+    re.I,
+)
+_BUSINESS_REJECT_RE = re.compile(
+    r"余额不足|库存不足|权限不足|无权限|已存在|不存在|状态不允许|业务校验|"
+    r"business[_ ]?error|rejected by policy|permission denied",
+    re.I,
+)
+
+
+def extract_typed_identifiers(text: str) -> Dict[str, str]:
+    """从工具输出提取类型化业务标识（忽略 unknown/null）。"""
+    found: Dict[str, str] = {}
+    for m in _ID_FIELD_RE.finditer(text or ""):
+        found[m.group(1).lower()] = m.group(2)
+    return found
+
+
 def classify_skill_output(
     *,
     text: str,
@@ -115,71 +135,107 @@ def classify_skill_output(
                 code = None
 
     method = infer_execution_method(raw)
+    ids = extract_typed_identifiers(raw)
+    primary_type = next(iter(ids), "")
+    primary_id = ids.get(primary_type, "") if primary_type else ""
     evidence: Dict[str, Any] = {
         "skill_name": skill_name or "",
         "command_preview": (command or "")[:240],
     }
     if method:
         evidence["execution_method"] = method
+    if ids:
+        evidence["identifiers"] = ids
+
+    def _with_ids(tr: ToolResult) -> ToolResult:
+        if primary_type:
+            tr.resource_type = primary_type
+            tr.resource_id = primary_id
+        return tr
 
     if code is not None and code != 0:
-        return ToolResult(
-            status="failed",
-            operation_id=op_id,
-            data={"raw_text": raw},
-            error_code="nonzero_exit",
-            retryable=False,
-            evidence=evidence,
-            duration_ms=duration_ms,
-            exit_code=code,
-            execution_method=method,
-            summary=f"命令失败 exit_code={code}",
-            observed_at=observed,
+        return _with_ids(
+            ToolResult(
+                status="failed",
+                operation_id=op_id,
+                data={"raw_text": raw},
+                error_code="nonzero_exit",
+                retryable=False,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary=f"命令失败 exit_code={code}",
+                observed_at=observed,
+            )
         )
 
     if _TIMEOUT_RE.search(raw) and (
         "错误" in raw or "Timeout" in raw or "timeout" in raw.lower()
     ):
         # 超时可能已提交副作用 → unknown（FR01.2）
-        return ToolResult(
-            status="unknown",
-            operation_id=op_id,
-            data={"raw_text": raw},
-            error_code="timeout_unknown",
-            retryable=True,
-            evidence=evidence,
-            duration_ms=duration_ms,
-            exit_code=code,
-            execution_method=method,
-            summary="超时，执行结果未知，禁止推断未执行",
-            observed_at=observed,
+        return _with_ids(
+            ToolResult(
+                status="unknown",
+                operation_id=op_id,
+                data={"raw_text": raw},
+                error_code="timeout_unknown",
+                retryable=True,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary="超时，执行结果未知，禁止推断未执行",
+                observed_at=observed,
+            )
         )
 
     if raw.startswith("错误:") or raw.startswith("错误："):
-        return ToolResult(
-            status="failed",
-            operation_id=op_id,
-            data={"raw_text": raw},
-            error_code="execute_error",
-            retryable=False,
-            evidence=evidence,
-            duration_ms=duration_ms,
-            exit_code=code,
-            execution_method=method,
-            summary=raw[:300],
-            observed_at=observed,
+        return _with_ids(
+            ToolResult(
+                status="failed",
+                operation_id=op_id,
+                data={"raw_text": raw},
+                error_code="execute_error",
+                retryable=False,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary=raw[:300],
+                observed_at=observed,
+            )
         )
 
-    return ToolResult(
-        status="succeeded",
-        operation_id=op_id,
-        data={"raw_text": raw},
-        evidence=evidence,
-        duration_ms=duration_ms,
-        exit_code=0 if code is None else code,
-        execution_method=method,
-        summary=(raw[:280] + ("…" if len(raw) > 280 else "")),
-        observed_at=observed,
+    if _BUSINESS_REJECT_RE.search(raw):
+        return _with_ids(
+            ToolResult(
+                status="failed",
+                operation_id=op_id,
+                data={"raw_text": raw},
+                error_code="business_rejected",
+                retryable=False,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary="业务拒绝，不得记为成功",
+                observed_at=observed,
+            )
+        )
+
+    return _with_ids(
+        ToolResult(
+            status="succeeded",
+            operation_id=op_id,
+            data={"raw_text": raw, "identifiers": ids} if ids else {"raw_text": raw},
+            evidence=evidence,
+            duration_ms=duration_ms,
+            exit_code=0 if code is None else code,
+            execution_method=method,
+            summary=(raw[:280] + ("…" if len(raw) > 280 else "")),
+            observed_at=observed,
+        )
     )
 
 
@@ -197,14 +253,23 @@ def summarize_batch_statuses(results: List[ToolResult]) -> Dict[str, Any]:
             counts[r.status] += 1
         elif r.status == "succeeded":
             counts["succeeded"] += 1
-    batch_ok = counts["failed"] == 0 and counts["unknown"] == 0
+    # 含 skipped/failed/unknown/cancelled/待确认 均不得报整批成功
+    batch_ok = (
+        counts["failed"] == 0
+        and counts["unknown"] == 0
+        and counts["skipped"] == 0
+        and counts["cancelled"] == 0
+        and counts["needs_confirmation"] == 0
+        and counts["succeeded"] == len(results)
+        and len(results) > 0
+    )
     return {
         "ok": batch_ok,
         "counts": counts,
         "total": len(results),
         "message": (
             "整批成功"
-            if batch_ok and counts["needs_confirmation"] == 0
-            else "批次含失败/未知/待确认，不得报告整批成功"
+            if batch_ok
+            else "批次含失败/未知/跳过/待确认，不得报告整批成功"
         ),
     }

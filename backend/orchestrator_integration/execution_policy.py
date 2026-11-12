@@ -38,11 +38,31 @@ _BROWSER_TIMEOUT_RE = re.compile(
     re.IGNORECASE,
 )
 _BROWSER_SUCCESS_MARKERS = re.compile(
-    r"add\s*to\s*cart|加入购物车|cart_id|cart_item|/cart/|购物车|"
-    r"1/1|preview|预览刷新|order_sn|订单号",
+    r"(?<!failed\s)(?<!failing\s)add\s*to\s*cart(?!\s*failed)|"
+    r"加入购物车(?!失败)|"
+    r"cart_id\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+|"
+    r"cart_item_id\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+|"
+    r"/cart/|"
+    r"已加入购物车|"
+    r"1/1|"
+    r"preview\s*(refresh|更新|已刷新)|预览刷新|"
+    r"order_sn\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+|"
+    r"订单号\s*[:=]\s*\S+",
+    re.IGNORECASE,
+)
+_TYPED_ID_RE = re.compile(
+    r"(cart_id|cart_item_id|checkout_id|order_id|order_sn)\s*[:=]\s*"
+    r"(?!unknown\b|null\b|none\b|n/?a\b|undefined\b)([A-Za-z0-9][A-Za-z0-9_-]{2,})",
     re.IGNORECASE,
 )
 _UPLOAD_COUNT_ONLY_RE = re.compile(r"0/1\s*[→\-~]+\s*1/1|计数.*1/1", re.IGNORECASE)
+_NEGATED_SUCCESS_RE = re.compile(
+    r"(add\s*to\s*cart|加入购物车|上传|upload|preview|预览).{0,12}"
+    r"(failed|fail|失败|未|不|超时|timeout)|"
+    r"(failed|fail|失败|超时|timeout|未刷新|not\s+refresh).{0,16}"
+    r"(add\s*to\s*cart|加入购物车|上传|preview|预览)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -197,26 +217,43 @@ def resolve_dependent_skips(
     return out
 
 
-def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
-    """浏览器上传/加购逐项验收（FR03.5 / FR03.6 / AC26）。"""
+def evaluate_browser_checkpoints(
+    joined: str,
+    *,
+    auth_scope: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """浏览器上传/加购逐项验收（FR03.5 / FR03.6 / AC26 / FLOW06）。"""
     text = joined or ""
+    typed = list(_TYPED_ID_RE.finditer(text))
+    negated = bool(_NEGATED_SUCCESS_RE.search(text))
+    # 否定/失败语境中的成功关键词不算成功证据；unknown 标识不算成功
+    has_success = bool(typed) and not negated
+    if not has_success and not negated and not _BROWSER_TIMEOUT_RE.search(text):
+        if re.search(
+            r"已加入购物车|Add To Cart ok|preview\s*(refresh|已刷新)|预览刷新",
+            text,
+            re.I,
+        ) and not re.search(r"\bfailed\b|失败", text, re.I):
+            has_success = True
+    if (_BROWSER_TIMEOUT_RE.search(text) or re.search(r"\bfailed\b|失败", text, re.I)) and not typed:
+        has_success = False
+
     checks = {
         "has_timeout_or_tool_error": bool(_BROWSER_TIMEOUT_RE.search(text)),
-        "has_success_marker": bool(_BROWSER_SUCCESS_MARKERS.search(text)),
+        "has_success_marker": has_success,
         "count_only_1_1": bool(_UPLOAD_COUNT_ONLY_RE.search(text)),
         "has_preview_evidence": bool(
-            re.search(r"预览|preview.*(refresh|更新|变化)|素材", text, re.I)
-        ),
-        "has_cart_evidence": bool(
-            re.search(r"cart_id|cart_item|/cart/|加入购物车|add\s*to\s*cart", text, re.I)
-        ),
-        "has_typed_identifier": bool(
             re.search(
-                r"(cart_id|cart_item_id|checkout_id|order_id|order_sn)\s*[:=]\s*\S+",
+                r"预览刷新|preview\s*(refresh|更新|已刷新)|素材已关联",
                 text,
                 re.I,
             )
+        )
+        and not re.search(r"preview\s*not\s*refresh|预览.*未|未刷新", text, re.I),
+        "has_cart_evidence": bool(
+            re.search(r"cart_id|cart_item|/cart/|加入购物车|add\s*to\s*cart", text, re.I)
         ),
+        "has_typed_identifier": bool(typed),
         "has_product_link_evidence": bool(
             re.search(r"目标商品|同一商品|素材关联|custom.*(image|photo)|sku", text, re.I)
         ),
@@ -234,6 +271,12 @@ def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
         ok = False
         reasons.append("浏览器工具超时/失败且无成功业务证据，验收不通过")
 
+    # FLOW06：失败叙述 + unknown 标识不得过关
+    if re.search(r"\bfailed\b|失败", text, re.I) and not checks["has_typed_identifier"]:
+        ok = False
+        if "业务失败证据存在" not in "".join(reasons):
+            reasons.append("业务失败证据存在且无有效类型化标识，验收不通过")
+
     # AC24/AC25：仅 1/1 计数不够；filechooser 失败不算原生选择器成功
     if checks["execution_method"] == "filechooser_failed":
         ok = False
@@ -246,6 +289,13 @@ def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
     if checks["has_cart_evidence"] and not checks["has_typed_identifier"]:
         ok = False
         reasons.append("加购有动作证据但未捕获类型化标识（cart_id/cart_item_id 等）")
+
+    # 原生对话框要求不得被 set_input 满足
+    scope = auth_scope or {}
+    req = str(scope.get("upload_method_requirement") or "")
+    if req == "native_or_filechooser" and checks["execution_method"] == "set_input":
+        ok = False
+        reasons.append("要求原生文件选择器/filechooser，setInputFiles/set_input 不满足")
 
     return {"ok": ok, "reasons": reasons, "checks": checks}
 
@@ -340,12 +390,41 @@ def evaluate_post_condition(
             reasons.append("执行区门禁拒绝")
         if "needs_confirmation" in joined and "create_ui" in joined.lower():
             pass
+        # 超时且无执行记录不得通过
+        if re.search(r"timeout|超时", joined, re.I) and not re.search(
+            r"execution_id|终态|get_execution_records", joined, re.I
+        ):
+            ok = False
+            reasons.append("用例执行超时且无执行记录，验收不通过")
+        if _BUSINESS_RE.search(joined) and not re.search(
+            r'"status"\s*:\s*"succeeded"|终态.*passed', joined, re.I
+        ):
+            ok = False
+            reasons.append("业务拒绝不得记为成功")
     elif playbook_id == "platform_write":
-        if "needs_confirmation" not in joined and "error" in joined.lower():
+        # 字段名 error_code 不是失败；仅真实失败态才拒绝
+        scrubbed = re.sub(
+            r"error[_-]?code\s*[\"']?\s*[:=]\s*[\"']?[^,\"'\s}\]]*",
+            "",
+            joined,
+            flags=re.I,
+        )
+        scrubbed = re.sub(r'"error_code"\s*:\s*[^,}\]]+', "", scrubbed, flags=re.I)
+        real_fail = bool(
+            re.search(
+                r'"status"\s*:\s*"(failed|error)"|"ok"\s*:\s*false|"success"\s*:\s*false',
+                joined,
+                re.I,
+            )
+        ) or (
+            "needs_confirmation" not in joined
+            and bool(re.search(r"(?<![_\w])error(?![_\w])", scrubbed, re.I))
+        )
+        if real_fail and "needs_confirmation" not in joined:
             ok = False
             reasons.append("写入路径异常且无确认草稿")
     elif playbook_id == "browser_act":
-        browser = evaluate_browser_checkpoints(joined)
+        browser = evaluate_browser_checkpoints(joined, auth_scope=auth_scope)
         extra["browser_checks"] = browser.get("checks")
         if not browser.get("ok", True):
             ok = False
@@ -372,10 +451,18 @@ def evaluate_post_condition(
     # 浏览器：结构化 failed/unknown 且无成功证据 → 不得完成（AC06）
     if playbook_id == "browser_act" and (
         '"status": "failed"' in joined or '"status": "unknown"' in joined
-    ) and not _BROWSER_SUCCESS_MARKERS.search(joined):
+    ) and not _TYPED_ID_RE.search(joined):
         ok = False
         if "工具结果含 failed/unknown 且无成功证据" not in reasons:
             reasons.append("工具结果含 failed/unknown 且无成功证据")
+
+    # 业务拒绝一律不得标成功（任意剧本）
+    if _BUSINESS_RE.search(joined) and not re.search(
+        r'"status"\s*:\s*"succeeded"|业务成功|验收通过', joined, re.I
+    ):
+        ok = False
+        if "业务拒绝不得记为成功" not in reasons:
+            reasons.append("业务拒绝不得记为成功")
 
     return {
         "ok": ok,

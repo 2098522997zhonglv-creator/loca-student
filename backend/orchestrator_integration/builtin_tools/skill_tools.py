@@ -938,7 +938,28 @@ def get_skill_tools(
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
-            commission = get_telemetry_context().commission
+            ctx = get_telemetry_context()
+            commission = ctx.commission
+            # 先扣持久化任务预算（FLOW03），再扣内存立项计数
+            if ctx.runtime_task_id:
+                try:
+                    from orchestrator_integration.agent_runtime import consume_budget
+                    from orchestrator_integration.models import AgentTask
+
+                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+                    if task is not None:
+                        ok_db, detail_db = consume_budget(task, tool_steps=n)
+                        if not ok_db:
+                            _emit_telemetry(
+                                tool_name="execute_skill_script",
+                                skill_name="budget",
+                                success=False,
+                                error_kind="budget_exceeded",
+                                result_text=detail_db,
+                            )
+                            return detail_db
+                except Exception as persist_err:
+                    logger.debug("persist budget consume failed: %s", persist_err)
             if commission is None:
                 return None
             ok, detail = commission.consume_tool_step(n)
@@ -1604,6 +1625,24 @@ def get_skill_tools(
             )
 
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
+            from orchestrator_integration.tool_result import (
+                ToolResult,
+                classify_skill_output,
+                summarize_batch_statuses,
+            )
+
+            def _result_failed(item: Optional[dict[str, object]]) -> bool:
+                if item is None:
+                    return True
+                if "error" in item:
+                    return True
+                text = str(item.get("result") or "")
+                classified = classify_skill_output(
+                    text=text,
+                    skill_name=str(item.get("skill_name") or ""),
+                    command=str(item.get("command") or ""),
+                )
+                return classified.status in {"failed", "unknown"}
 
             if run_parallel:
                 with ThreadPoolExecutor(
@@ -1617,18 +1656,67 @@ def get_skill_tools(
                         idx = future_to_idx[future]
                         results[idx] = future.result()
             else:
+                # FR02.2：串行遇失败前置条件后跳过后续
+                stop_rest = False
                 for idx, cmd in enumerate(commands):
+                    if stop_rest:
+                        results[idx] = {
+                            "index": idx,
+                            "skill_name": cmd.get("skill_name")
+                            if isinstance(cmd, dict)
+                            else None,
+                            "command": cmd.get("command")
+                            if isinstance(cmd, dict)
+                            else None,
+                            "status": "skipped",
+                            "skip_reason": "dependency_failed",
+                            "error": "前置步骤失败，已跳过",
+                        }
+                        continue
                     results[idx] = execute_single(idx, cmd)
+                    if _result_failed(results[idx]):
+                        stop_rest = True
 
-            success_count = sum(
-                1
-                for r in results
-                if r is not None and "result" in r and "error" not in r
-            )
-            error_count = len(results) - success_count
+            tool_results: list[ToolResult] = []
+            for r in results:
+                if r is None:
+                    continue
+                if r.get("status") == "skipped":
+                    tool_results.append(
+                        ToolResult(
+                            status="skipped",
+                            operation_id=f"skip-{r.get('index')}",
+                            summary=str(r.get("skip_reason") or "skipped"),
+                        )
+                    )
+                    continue
+                if "error" in r and "result" not in r:
+                    tool_results.append(
+                        ToolResult(
+                            status="failed",
+                            operation_id=f"err-{r.get('index')}",
+                            error_code="batch_item_error",
+                            summary=str(r.get("error") or "error"),
+                        )
+                    )
+                    continue
+                tool_results.append(
+                    classify_skill_output(
+                        text=str(r.get("result") or ""),
+                        skill_name=str(r.get("skill_name") or ""),
+                        command=str(r.get("command") or ""),
+                    )
+                )
+            batch_summary = summarize_batch_statuses(tool_results)
+            success_count = int(batch_summary["counts"].get("succeeded", 0))
+            error_count = int(
+                batch_summary["counts"].get("failed", 0)
+            ) + int(batch_summary["counts"].get("unknown", 0))
+            skipped_count = int(batch_summary["counts"].get("skipped", 0))
 
             logger.info(
-                f"[execute_skill_script] 批量完成: {success_count} 成功, {error_count} 失败"
+                f"[execute_skill_script] 批量完成: {success_count} 成功, "
+                f"{error_count} 失败, {skipped_count} 跳过"
             )
             out = json.dumps(
                 {
@@ -1636,6 +1724,9 @@ def get_skill_tools(
                         "total": len(commands),
                         "success": success_count,
                         "error": error_count,
+                        "skipped": skipped_count,
+                        "all_success": batch_summary.get("ok", False),
+                        "message": batch_summary.get("message"),
                         "parallel": run_parallel,
                         "user_confirmed": user_confirmed,
                         "policy_notes": list(batch_plan.notes),
@@ -1649,8 +1740,8 @@ def get_skill_tools(
             _emit_telemetry(
                 tool_name="execute_skill_script",
                 skill_name="batch",
-                success=error_count == 0,
-                error_kind="" if error_count == 0 else "batch_partial_error",
+                success=bool(batch_summary.get("ok")),
+                error_kind="" if batch_summary.get("ok") else "batch_partial_error",
                 result_text=out[:800],
             )
             return out

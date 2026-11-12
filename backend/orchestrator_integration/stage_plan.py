@@ -59,29 +59,41 @@ def build_stage_plan(
     *,
     playbook_id: str = "",
 ) -> List[StageSpec]:
-    """生成有序阶段；单阶段请求返回单元素计划。"""
+    """生成有序阶段；单阶段请求返回单元素计划。
+
+    复合任务不得被 actual_route 剧本压成单阶段（FR08）。
+    """
     text = message or ""
-    if playbook_id == "browser_act" or INTENT_BROWSER in decision.intents:
-        return [
-            StageSpec(
-                stage_id="browser_interact",
-                goal="在授权范围内完成页面交互并交付真实标识",
-                tool_capabilities=["playwright-skill", "read_skill_content", "execute_skill_script"],
-                acceptance="上传/加购检查点通过且标识类型明确",
-                auth_actions=["upload", "add_to_cart"],
-            )
-        ]
-    if playbook_id == "testcase_execute":
-        return [
-            StageSpec(
-                stage_id="execute_testcase",
-                goal="执行测试用例并回报终态",
-                tool_capabilities=["ui-automation", "loca-stude", "execute_skill_script"],
-                acceptance="执行记录终态可查",
-                auth_actions=["execute_testcase"],
-            )
-        ]
-    if not is_composite_request(text, decision):
+    composite = is_composite_request(text, decision)
+    if not composite:
+        if playbook_id == "browser_act" or INTENT_BROWSER in decision.intents:
+            return [
+                StageSpec(
+                    stage_id="browser_interact",
+                    goal="在授权范围内完成页面交互并交付真实标识",
+                    tool_capabilities=[
+                        "playwright-skill",
+                        "read_skill_content",
+                        "execute_skill_script",
+                    ],
+                    acceptance="上传/加购检查点通过且标识类型明确",
+                    auth_actions=["upload", "add_to_cart"],
+                )
+            ]
+        if playbook_id == "testcase_execute":
+            return [
+                StageSpec(
+                    stage_id="execute_testcase",
+                    goal="执行测试用例并回报终态",
+                    tool_capabilities=[
+                        "ui-automation",
+                        "loca-stude",
+                        "execute_skill_script",
+                    ],
+                    acceptance="执行记录终态可查",
+                    auth_actions=["execute_testcase"],
+                )
+            ]
         return [
             StageSpec(
                 stage_id="single",
@@ -256,17 +268,44 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
         allow.append("add_to_cart")
     if any(k in text for k in ("上传", "传图", "Upload Photo", "upload")):
         allow.append("upload")
-    if any(k in text for k in ("提交订单", "下单", "结算")):
+
+    # 否定优先：不要下单/不要支付 不得因子串「下单」「支付」被误授权
+    deny_order = any(
+        k in text
+        for k in (
+            "不要下单",
+            "不要提交订单",
+            "禁止下单",
+            "不下单",
+            "不要结算",
+            "禁止提交订单",
+            "不要提交",
+        )
+    )
+    deny_pay = any(
+        k in text for k in ("不要支付", "不需要支付", "不支付", "禁止支付", "勿支付")
+    )
+    if deny_order:
+        deny.append("submit_order")
+    if deny_pay:
+        deny.append("pay")
+    if (
+        not deny_order
+        and any(k in text for k in ("提交订单", "下单", "结算"))
+        and not any(k in text for k in ("不要", "禁止", "勿", "别"))
+    ):
         allow.append("submit_order")
-    if any(k in text for k in ("支付", "付款")) and not any(
-        k in text for k in ("不要支付", "不需要支付", "不支付", "禁止支付")
+    if (
+        not deny_pay
+        and any(k in text for k in ("支付", "付款"))
+        and not any(k in text for k in ("不要", "禁止", "勿", "别", "不需要"))
     ):
         allow.append("pay")
-    if any(k in text for k in ("不要支付", "不需要支付", "不支付", "禁止支付")):
-        deny.append("pay")
     # 只说加购/不要支付 → 默认不授权 submit_order
     if "add_to_cart" in allow and "submit_order" not in allow:
         deny.append("submit_order")
+    # deny 覆盖 allow
+    allow = [a for a in allow if a not in deny]
     deliver = []
     if any(k in text for k in ("订单号", "order_sn", "oid")):
         deliver.append("order_sn")

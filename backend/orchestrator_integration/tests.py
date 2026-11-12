@@ -2227,9 +2227,12 @@ class BehaviorMemoryDBTests(TestCase):
         self.assertTrue(pre["must_reconcile"])
         cancel = request_cancel(task)
         self.assertEqual(cancel["status"], "cancelling")
-        # 有 running/pending 才算在途；unknown 不阻塞 finalize
+        # FLOW04：unknown 且带外部 execution_id 时不得宣称已取消
         fin = finalize_cancel(task)
-        self.assertEqual(fin["status"], "cancelled")
+        self.assertEqual(fin["status"], "cancelling")
+        self.assertGreaterEqual(fin.get("uncertain_count", 0), 1)
+        fin_forced = finalize_cancel(task, force=True)
+        self.assertEqual(fin_forced["status"], "cancelled")
         snap = task_snapshot(task)
         self.assertEqual(snap["task_id"], "tid123")
         self.assertIn("events", snap)
@@ -2299,9 +2302,14 @@ class BehaviorMemoryDBTests(TestCase):
         self.assertTrue(adv["advanced"])
         self.assertEqual(adv["current_stage"], "persist")
         self.assertEqual(task.plan_version, 2)
-        # 非末阶段 accept(ok) 应延迟 completed
+        # 非末阶段 accept(ok) 应延迟 completed，且不得二次推进（FLOW02）
         deferred = rt.accept({"ok": True, "reasons": []})
         self.assertTrue(deferred.get("deferred_completion"))
+        self.assertEqual(task.current_stage, "persist")
+        adv2 = rt.maybe_advance(
+            tool_results=["testcase_id=42 创建成功 id=42"]
+        )
+        self.assertTrue(adv2["advanced"])
         self.assertEqual(task.current_stage, "summarize")
         metrics = quality_metrics(user_id=user.id, limit=50)
         self.assertGreaterEqual(metrics["tasks_sampled"], 1)
@@ -2376,3 +2384,297 @@ class BehaviorMemoryDBTests(TestCase):
         ev = UserBehaviorEvent.objects.get(user=user)
         self.assertEqual(ev.event_type, "tool_call")
         self.assertIn("knowledge_search", ev.summary_text)
+
+
+class AuditFlowRegressionTests(TestCase):
+    """2026-11-12 复查报告 FLOW/边界回归。"""
+
+    def test_continue_preserves_original_goal_and_authorization(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import create_or_resume_task
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="cont1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-cont-1", title="t")
+        c = TaskCommission(
+            task_id="c1",
+            zone_id="browser",
+            playbook_id="browser_act",
+            primary_skills=frozenset({"playwright-skill"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=False,
+            channel="light",
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="详情页加购，不要下单",
+            commission=c,
+            auth_scope={
+                "allow_actions": ["add_to_cart"],
+                "deny_actions": ["submit_order"],
+            },
+            lease_owner="w1",
+        )
+        original_goal = task.goal
+        cont = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="继续完成剩下的",
+            commission=c,
+            auth_scope={"allow_actions": ["submit_order"]},
+            lease_owner="w1",
+        )
+        self.assertEqual(cont.id, task.id)
+        self.assertEqual(cont.goal, original_goal)
+        self.assertIn("add_to_cart", cont.auth_scope.get("allow_actions") or [])
+        self.assertIn("submit_order", cont.auth_scope.get("deny_actions") or [])
+        self.assertNotIn("submit_order", cont.auth_scope.get("allow_actions") or [])
+
+    def test_token_budget_enforced(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import (
+            consume_budget,
+            create_or_resume_task,
+        )
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="tok1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-tok-1", title="t")
+        c = TaskCommission(
+            task_id="tok",
+            zone_id="general",
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset(),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+            max_tokens=100,
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="x",
+            commission=c,
+            lease_owner="w1",
+        )
+        self.assertEqual(task.budget.get("max_tokens"), 100)
+        ok, _ = consume_budget(task, tokens=80)
+        self.assertTrue(ok)
+        bad, msg = consume_budget(task, tokens=30)
+        self.assertFalse(bad)
+        self.assertIn("budget_tokens_exceeded", msg)
+
+    def test_failed_cart_and_stale_preview_cannot_pass(self):
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+
+        bad = evaluate_post_condition(
+            post_condition="done",
+            tool_results=[
+                "Timeout uploading; Add To Cart failed; preview not refreshed; cart_id=unknown"
+            ],
+            playbook_id="browser_act",
+            auth_scope={"allow_actions": ["add_to_cart", "upload"]},
+        )
+        self.assertFalse(bad["ok"])
+
+    def test_negated_order_action_is_not_authorization(self):
+        from orchestrator_integration.stage_plan import infer_auth_scope
+
+        auth = infer_auth_scope("加购后把标识给我，不要下单，不要支付")
+        self.assertIn("add_to_cart", auth["allow_actions"])
+        self.assertIn("submit_order", auth["deny_actions"])
+        self.assertNotIn("submit_order", auth["allow_actions"])
+        self.assertIn("pay", auth["deny_actions"])
+
+    def test_business_rejection_cannot_be_success(self):
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+        from orchestrator_integration.tool_result import classify_skill_output
+
+        tr = classify_skill_output(text="余额不足，无法加购", skill_name="playwright-skill")
+        self.assertEqual(tr.status, "failed")
+        self.assertEqual(tr.error_code, "business_rejected")
+        acc = evaluate_post_condition(
+            post_condition="x",
+            tool_results=["余额不足，业务校验失败"],
+            playbook_id="browser_act",
+        )
+        self.assertFalse(acc["ok"])
+
+    def test_skipped_batch_cannot_be_all_success(self):
+        from orchestrator_integration.tool_result import ToolResult, summarize_batch_statuses
+
+        summary = summarize_batch_statuses(
+            [
+                ToolResult(status="succeeded", operation_id="a"),
+                ToolResult(status="skipped", operation_id="b"),
+            ]
+        )
+        self.assertFalse(summary["ok"])
+        self.assertIn("跳过", summary["message"])
+
+    def test_identifier_fields_populated_for_observed_cart(self):
+        from orchestrator_integration.tool_result import classify_skill_output
+
+        tr = classify_skill_output(
+            text="Add To Cart ok; cart_id=cart_9f3a; preview refreshed",
+            skill_name="playwright-skill",
+        )
+        self.assertEqual(tr.resource_type, "cart_id")
+        self.assertEqual(tr.resource_id, "cart_9f3a")
+
+    def test_native_dialog_requirement_not_satisfied_by_set_input(self):
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+
+        acc = evaluate_post_condition(
+            post_condition="upload",
+            tool_results=["used setInputFiles; 0/1 → 1/1"],
+            playbook_id="browser_act",
+            auth_scope={"upload_method_requirement": "native_or_filechooser"},
+        )
+        self.assertFalse(acc["ok"])
+        self.assertTrue(any("原生" in r or "set_input" in r or "setInput" in r for r in acc["reasons"]))
+
+    def test_valid_structured_write_not_rejected_by_error_code_field(self):
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+
+        acc = evaluate_post_condition(
+            post_condition="write",
+            tool_results=['{"status": "succeeded", "id": 12, "error_code": null}'],
+            playbook_id="platform_write",
+        )
+        self.assertTrue(acc["ok"])
+
+    def test_testcase_timeout_without_record_cannot_pass(self):
+        from orchestrator_integration.execution_policy import evaluate_post_condition
+
+        acc = evaluate_post_condition(
+            post_condition="exec",
+            tool_results=["错误: 命令执行超时（120秒）"],
+            playbook_id="testcase_execute",
+        )
+        self.assertFalse(acc["ok"])
+
+    def test_composite_task_not_collapsed_by_actual_route_playbook(self):
+        from orchestrator_integration.intent_router import classify_user_intent
+        from orchestrator_integration.stage_plan import build_stage_plan
+
+        text = "根据知识库登录规则生成用例并保存后执行，再汇总"
+        d = classify_user_intent(text)
+        stages = build_stage_plan(text, d, playbook_id="testcase_execute")
+        ids = [s.stage_id for s in stages]
+        self.assertGreater(len(ids), 1)
+        self.assertNotEqual(ids, ["execute_testcase"])
+
+    def test_idempotency_key_uses_full_command(self):
+        from orchestrator_integration.idempotency import build_idempotency_key
+
+        prefix = "python x.py --action add_testcase --payload " + ("A" * 850)
+        k1 = build_idempotency_key(
+            task_id="t", skill_name="loca-stude", command=prefix + " end=1"
+        )
+        k2 = build_idempotency_key(
+            task_id="t", skill_name="loca-stude", command=prefix + " end=2"
+        )
+        self.assertNotEqual(k1, k2)
+
+    def test_stage_failure_not_accepted(self):
+        from orchestrator_integration.agent_runtime import stage_acceptance_heuristic
+
+        v = stage_acceptance_heuristic(
+            "persist",
+            ['{"status": "failed", "command": "add_testcase"} permission denied'],
+        )
+        self.assertFalse(v["ok"])
+
+    def test_approval_lease_transfer(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import (
+            create_or_resume_task,
+            park_for_approval,
+            try_claim_execution,
+        )
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="lease1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-lease-1", title="t")
+        c = TaskCommission(
+            task_id="lease",
+            zone_id="platform",
+            playbook_id="platform_write",
+            primary_skills=frozenset({"loca-stude"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=True,
+            channel="heavy",
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="写库",
+            commission=c,
+            lease_owner="runner-a",
+        )
+        park_for_approval(task, interrupt_id="write_confirm_x")
+        self.assertEqual(task.status, "awaiting_approval")
+        self.assertEqual(task.lease_owner, "")
+        claim = try_claim_execution(task, "resume-b")
+        self.assertTrue(claim["acquired"])
+        self.assertEqual(claim["status"], "running")
+
+    def test_finalize_no_double_stage_advance(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_loop_finalize import (
+            RuntimeSession,
+            finalize_task_acceptance,
+        )
+        from orchestrator_integration.agent_runtime import AgentRuntime
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="stg1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-stg-1", title="t")
+        c = TaskCommission(
+            task_id="stg",
+            zone_id="general",
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset(),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+        )
+        c.last_tool_results = ['预检索完成 "status": "succeeded" 来源=doc1']
+        c.post_condition = "done"
+        rt = AgentRuntime(lease_owner="w1")
+        task = rt.start(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="复合",
+            commission=c,
+            stage_plan=[
+                {"stage_id": "kb_research", "goal": "kb"},
+                {"stage_id": "generate_draft", "goal": "draft"},
+                {"stage_id": "persist", "goal": "save"},
+            ],
+        )
+        self.assertEqual(task.current_stage, "kb_research")
+        session = RuntimeSession(runtime=rt, commission=c)
+        finalize_task_acceptance(session)
+        task.refresh_from_db()
+        self.assertEqual(task.current_stage, "generate_draft")
+        self.assertNotEqual(task.status, "completed")
