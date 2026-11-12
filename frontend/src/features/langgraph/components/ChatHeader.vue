@@ -57,6 +57,13 @@
           {{ text.toolApproval }}
         </a-button>
 
+        <a-button type="text" @click="$emit('show-agent-metrics')">
+          <template #icon>
+            <icon-bar-chart />
+          </template>
+          {{ text.agentMetrics }}
+        </a-button>
+
         <a-button v-if="hasMessages" type="text" status="danger" @click="$emit('clear-chat')">
           <template #icon>
             <icon-delete style="color: #f53f3f;" />
@@ -88,7 +95,7 @@
 import { ref, onMounted, watch, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { Button as AButton, Tag as ATag, Switch as ASwitch, Select as ASelect, Option as AOption } from '@arco-design/web-vue';
-import { IconDelete, IconSettings, IconThunderbolt, IconFile } from '@arco-design/web-vue/es/icon';
+import { IconDelete, IconSettings, IconThunderbolt, IconFile, IconBarChart } from '@arco-design/web-vue/es/icon';
 import KnowledgeBaseSelector from './KnowledgeBaseSelector.vue';
 import { getUserPrompts, getDefaultPrompt } from '@/features/prompts/services/promptService';
 import type { UserPrompt } from '@/features/prompts/types/prompt';
@@ -108,6 +115,7 @@ const text = computed(() => (
         managePrompts: 'Manage Prompts',
         llmConfig: 'LLM Config',
         toolApproval: 'Tool Approval',
+        agentMetrics: 'Quality',
         clearChat: 'Clear Chat',
       }
     : {
@@ -118,6 +126,7 @@ const text = computed(() => (
         managePrompts: '管理提示词',
         llmConfig: 'LLM配置',
         toolApproval: '工具审批',
+        agentMetrics: '质量指标',
         clearChat: '清除对话',
       }
 ));
@@ -139,6 +148,7 @@ const emit = defineEmits<{
   (e: 'clear-chat'): void;
   (e: 'show-system-prompt'): void;
   (e: 'show-tool-approval-settings'): void;
+  (e: 'show-agent-metrics'): void;
   (e: 'update:use-knowledge-base', value: boolean): void;
   (e: 'update:selected-knowledge-base-id', value: string | null): void;
   (e: 'update:similarity-threshold', value: number): void;

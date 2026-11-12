@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -163,6 +163,7 @@ class _SessionEntry:
     skill_dir: str
     proc: "_PlaywrightNodeProcess"
     last_used_monotonic: float
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 class _PlaywrightNodeProcess:
@@ -532,13 +533,58 @@ class PlaywrightSessionManager:
             run_js_args=run_js_args, env=env, timeout_seconds=int(timeout_seconds)
         )
 
-        # 执行结束后再次更新时间戳
+        # 执行结束后再次更新时间戳，并尽量刷新页面 meta
         with self._lock:
             updated = self._entries.get(session_key)
             if updated is not None:
                 updated.last_used_monotonic = time.monotonic()
+        try:
+            self.refresh_session_meta(session_key)
+        except Exception:
+            pass
 
         return output
+
+    def refresh_session_meta(self, session_key: str) -> Dict[str, Any]:
+        """调用 Node probe，更新登录/URL 元数据。"""
+        with self._lock:
+            entry = self._entries.get(session_key)
+        if entry is None:
+            return {"alive": False, "note": "session_missing"}
+        try:
+            if entry.proc._proc is None or entry.proc._proc.poll() is not None:
+                meta = {
+                    "alive": False,
+                    "logged_in": False,
+                    "last_url": "",
+                    "login_hint": "process_exited",
+                }
+                entry.meta.update(meta)
+                return meta
+            resp = entry.proc.request("probe", params={}, timeout_seconds=8)
+            state = resp.get("state") if isinstance(resp, dict) else {}
+            state = state if isinstance(state, dict) else {}
+            meta = {
+                "alive": bool(resp.get("ok")) and bool(state.get("alive", True)),
+                "page_alive": bool(state.get("pageAlive")),
+                "last_url": str(state.get("pageUrl") or ""),
+                "cookie_count": int(state.get("cookieCount") or 0),
+                "logged_in": state.get("loggedIn"),
+                "login_hint": str(state.get("loginHint") or ""),
+                "probed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            entry.meta.update(meta)
+            return meta
+        except Exception as exc:
+            meta = {
+                "alive": None,
+                "login_hint": f"probe_error:{type(exc).__name__}",
+            }
+            entry.meta.update(meta)
+            return meta
+
+    def probe_session(self, session_key: str) -> Dict[str, Any]:
+        return self.refresh_session_meta(session_key)
 
     def cleanup_expired(self) -> None:
         now = time.monotonic()

@@ -7,6 +7,7 @@
  * 协议：stdin/stdout 行分隔 JSON
  * 请求：
  *   - 心跳：{ id, method: "ping", params: {} }
+ *   - 探测：{ id, method: "probe", params: {} }  // 页面 URL / cookie / 登录启发式
  *   - 执行：{ id, method: "exec", params: { args: string[], env?: object } }
  *   - 关闭：{ id, method: "close", params: {} }
  *
@@ -410,6 +411,59 @@ state.page = page;
       try {
         if (method === 'ping') {
           send({ id, ok: true, state: { alive: true } });
+          return;
+        }
+
+        if (method === 'probe') {
+          const pageAlive =
+            !!state.page &&
+            !(typeof state.page.isClosed === 'function' && state.page.isClosed());
+          let pageUrl = null;
+          let cookieCount = 0;
+          let loggedIn = null;
+          let loginHint = 'no_page';
+          if (pageAlive) {
+            try {
+              pageUrl = typeof state.page.url === 'function' ? state.page.url() : null;
+            } catch (_) {
+              pageUrl = null;
+            }
+            try {
+              const cookies =
+                state.context && typeof state.context.cookies === 'function'
+                  ? await state.context.cookies()
+                  : [];
+              cookieCount = Array.isArray(cookies) ? cookies.length : 0;
+              const names = (cookies || []).map((c) => String(c.name || '').toLowerCase());
+              const authLike = names.some((n) =>
+                /session|token|auth|sid|jwt|login|user/.test(n)
+              );
+              if (cookieCount === 0) {
+                loggedIn = false;
+                loginHint = 'no_cookies';
+              } else if (authLike) {
+                loggedIn = true;
+                loginHint = 'auth_cookie_present';
+              } else {
+                loggedIn = null;
+                loginHint = 'cookies_present_unclassified';
+              }
+            } catch (e) {
+              loginHint = 'cookie_probe_error';
+            }
+          }
+          send({
+            id,
+            ok: true,
+            state: {
+              alive: true,
+              pageAlive,
+              pageUrl,
+              cookieCount,
+              loggedIn,
+              loginHint,
+            },
+          });
           return;
         }
 

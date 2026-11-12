@@ -155,6 +155,7 @@ const API_BASE_URL = '/lg/chat';
 const AGENT_LOOP_API_URL = '/orchestrator/agent-loop';
 // Agent Loop 停止 API 端点
 const AGENT_LOOP_STOP_API_URL = '/orchestrator/agent-loop/stop';
+const AGENT_LOOP_TASK_API_URL = '/orchestrator/agent-loop/task';
 
 // 获取API基础URL
 function getApiBaseUrl() {
@@ -764,12 +765,13 @@ export async function sendChatMessageStream(
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
           }
 
-          // FR10：任务阶段 / 验收终态
+          // FR10：任务阶段 / 验收终态 / 租约冲突状态
           if (
             (parsed.type === 'task_started' ||
               parsed.type === 'task_completed' ||
               parsed.type === 'task_blocked' ||
               parsed.type === 'task_cancelling' ||
+              parsed.type === 'task_status' ||
               parsed.type === 'step_result' ||
               parsed.type === 'stage_changed') &&
             streamSessionId &&
@@ -1090,6 +1092,109 @@ export async function batchDeleteChatHistory(
       data: { deleted_count: 0, processed_sessions: 0, failed_sessions: [] },
       errors: { detail: [response.error || 'Unknown error'] }
     };
+  }
+}
+
+/**
+ * 拉取任务快照 / 事件补取（FR10.3）
+ */
+export async function fetchTaskSnapshot(options: {
+  taskId?: string;
+  sessionId?: string;
+  afterEventId?: string;
+}): Promise<Record<string, unknown> | null> {
+  const authStore = useAuthStore();
+  const token = authStore.getAccessToken;
+  const params = new URLSearchParams();
+  if (options.taskId) params.set('task_id', options.taskId);
+  if (options.sessionId) params.set('session_id', options.sessionId);
+  if (options.afterEventId) params.set('after_event_id', options.afterEventId);
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}${AGENT_LOOP_TASK_API_URL}/?${params.toString()}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }
+    );
+    const data = await response.json();
+    if (response.ok && data.status === 'success') {
+      return (data.data || null) as Record<string, unknown> | null;
+    }
+    return null;
+  } catch (error) {
+    console.warn('[ChatService] fetchTaskSnapshot failed:', error);
+    return null;
+  }
+}
+
+/**
+ * 质量指标看板（FR10.4）
+ */
+export async function fetchAgentQualityMetrics(options?: {
+  scope?: 'user' | 'all';
+  limit?: number;
+}): Promise<Record<string, unknown> | null> {
+  const authStore = useAuthStore();
+  const token = authStore.getAccessToken;
+  const params = new URLSearchParams();
+  if (options?.scope) params.set('scope', options.scope);
+  if (options?.limit) params.set('limit', String(options.limit));
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}${AGENT_LOOP_API_URL}/metrics/?${params.toString()}`,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      }
+    );
+    const data = await response.json();
+    if (response.ok && data.status === 'success') {
+      return (data.data || null) as Record<string, unknown> | null;
+    }
+    return null;
+  } catch (error) {
+    console.warn('[ChatService] fetchAgentQualityMetrics failed:', error);
+    return null;
+  }
+}
+
+/**
+ * 用快照恢复本地流状态（刷新/断线后续传）
+ */
+export function applyTaskSnapshotToStream(
+  sessionId: string,
+  snap: Record<string, unknown>
+): void {
+  if (!activeStreams.value[sessionId]) {
+    activeStreams.value[sessionId] = {
+      content: '',
+      isComplete: false,
+      messages: [],
+    };
+  }
+  const stream = activeStreams.value[sessionId];
+  stream.taskId = String(snap.task_id || stream.taskId || '');
+  stream.taskStatus = String(snap.status || stream.taskStatus || '');
+  stream.currentStage = String(snap.current_stage || stream.currentStage || '');
+  if (Array.isArray(snap.stage_plan)) {
+    stream.stagePlan = snap.stage_plan as Array<{
+      stage_id: string;
+      goal?: string;
+      acceptance?: string;
+    }>;
+  }
+  if (snap.acceptance && typeof snap.acceptance === 'object') {
+    stream.acceptance = snap.acceptance as Record<string, unknown>;
+  }
+  const events = Array.isArray(snap.events) ? snap.events : [];
+  if (events.length) {
+    stream.taskEvents = [
+      ...(stream.taskEvents || []),
+      ...(events as Array<Record<string, unknown>>),
+    ];
   }
 }
 

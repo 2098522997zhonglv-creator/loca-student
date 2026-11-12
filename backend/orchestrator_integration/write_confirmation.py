@@ -239,8 +239,10 @@ def consume_approval(
     user_id: int,
     decision: str,
     expected_fingerprint: str = "",
+    project_id: Optional[int] = None,
+    session_id: str = "",
 ) -> Dict[str, Any]:
-    """精确消费审批（FR05.4）：条件更新，防重复/过期/参数漂移。"""
+    """精确消费审批（FR05.4）：条件更新，防重复/过期/参数漂移/跨项目。"""
     from django.db import transaction
     from django.utils import timezone
 
@@ -257,6 +259,14 @@ def consume_approval(
             return {"ok": True, "mode": "memory_only", "decision": decision}
         if row.user_id != user_id:
             return {"ok": False, "error_code": "permission_denied"}
+        if (
+            project_id is not None
+            and row.project_id is not None
+            and int(row.project_id) != int(project_id)
+        ):
+            return {"ok": False, "error_code": "project_mismatch"}
+        if session_id and row.session_id and row.session_id != session_id:
+            return {"ok": False, "error_code": "session_mismatch"}
         if row.status in ("consumed", "rejected", "expired", "cancelled"):
             return {
                 "ok": False,
@@ -267,9 +277,15 @@ def consume_approval(
             row.status = "expired"
             row.save(update_fields=["status", "updated_at"])
             return {"ok": False, "error_code": "approval_expired"}
-        if expected_fingerprint and row.param_fingerprint and (
-            expected_fingerprint != row.param_fingerprint
-        ):
+        # 优先用调用方指纹；否则用内存 pending 指纹比对（AC11）
+        fp = expected_fingerprint
+        if not fp:
+            mem = get_write_confirm_store().get(interrupt_id)
+            if isinstance(mem, dict) and mem.get("pending") is not None:
+                from orchestrator_integration.agent_runtime import fingerprint_payload
+
+                fp = fingerprint_payload(mem.get("pending"))
+        if fp and row.param_fingerprint and fp != row.param_fingerprint:
             return {"ok": False, "error_code": "param_fingerprint_mismatch"}
         row.decision = decision
         if decision == "approve":
@@ -287,6 +303,8 @@ def consume_approval(
             "decision": decision,
             "action_args": row.action_args,
             "param_fingerprint": row.param_fingerprint,
+            "task_id": row.task_id,
+            "step_id": row.step_id,
         }
 
 

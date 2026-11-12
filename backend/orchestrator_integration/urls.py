@@ -7,6 +7,7 @@ from .agent_loop_view import (
     AgentLoopStopAPIView,
     AgentLoopResumeAPIView,
     AgentTaskSnapshotAPIView,
+    AgentQualityMetricsAPIView,
 )
 
 router = DefaultRouter()
@@ -22,4 +23,10 @@ urlpatterns = [
     path('agent-loop/resume/', AgentLoopResumeAPIView.as_view(), name='agent-loop-resume'),
     # 任务快照 / 事件补取（FR10）
     path('agent-loop/task/', AgentTaskSnapshotAPIView.as_view(), name='agent-loop-task'),
+    # 质量指标看板（FR10.4）
+    path(
+        'agent-loop/metrics/',
+        AgentQualityMetricsAPIView.as_view(),
+        name='agent-loop-metrics',
+    ),
 ]

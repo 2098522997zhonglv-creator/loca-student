@@ -19,6 +19,9 @@
       </li>
     </ol>
     <p v-if="blockReason" class="task-stage-bar__block">{{ blockReason }}</p>
+    <ul v-if="blockerCodes.length" class="task-stage-bar__codes">
+      <li v-for="code in blockerCodes" :key="code">{{ code }}</li>
+    </ul>
   </div>
 </template>
 
@@ -70,6 +73,18 @@ const blockReason = computed(() => {
     return reasons.join('；');
   }
   return '';
+});
+
+const blockerCodes = computed(() => {
+  const blockers = props.acceptance?.blockers;
+  if (!Array.isArray(blockers)) return [] as string[];
+  return blockers
+    .map((b) =>
+      b && typeof b === 'object' && 'blocker_code' in b
+        ? String((b as { blocker_code: string }).blocker_code)
+        : ''
+    )
+    .filter(Boolean);
 });
 
 function isDone(stageId: string): boolean {
@@ -157,5 +172,20 @@ function isDone(stageId: string): boolean {
   margin: 6px 0 0;
   color: #b45309;
   line-height: 1.4;
+}
+.task-stage-bar__codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.task-stage-bar__codes li {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #92400e;
 }
 </style>

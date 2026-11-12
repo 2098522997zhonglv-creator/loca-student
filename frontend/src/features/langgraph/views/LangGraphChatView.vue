@@ -27,6 +27,7 @@
         @clear-chat="clearChat"
         @show-system-prompt="showSystemPromptModal"
         @show-tool-approval-settings="isToolApprovalSettingsVisible = true"
+        @show-agent-metrics="isAgentMetricsVisible = true"
         @update:use-knowledge-base="useKnowledgeBase = $event"
         @update:selected-knowledge-base-id="selectedKnowledgeBaseId = $event"
         @update:similarity-threshold="similarityThreshold = $event"
@@ -102,6 +103,8 @@
       @prompts-updated="handlePromptsUpdated"
     />
 
+    <AgentMetricsModal v-model:visible="isAgentMetricsVisible" />
+
     <!-- ⭐工具审批设置弹窗 -->
     <ToolApprovalSettingsModal
       v-model:visible="isToolApprovalSettingsVisible"
@@ -175,7 +178,9 @@ import {
   clearStreamState,
   latestContextUsage,
   stopAgentLoop,
-  resumeAgentLoop
+  resumeAgentLoop,
+  fetchTaskSnapshot,
+  applyTaskSnapshotToStream
 } from '@/features/langgraph/services/chatService';
 import { listLlmConfigs, partialUpdateLlmConfig } from '@/features/langgraph/services/llmConfigService';
 import { getUserPrompts, initializeUserPrompts } from '@/features/prompts/services/promptService';
@@ -200,6 +205,7 @@ import SystemPromptModal from '../components/SystemPromptModal.vue';
 import ToolApprovalCard from '../components/ToolApprovalCard.vue';
 import ToolApprovalSettingsModal from '../components/ToolApprovalSettingsModal.vue';
 import TaskStageBar from '../components/TaskStageBar.vue';
+import AgentMetricsModal from '../components/AgentMetricsModal.vue';
 import type { InterruptEvent } from '../components/ToolApprovalCard.vue';
 
 const { isEnglish } = useAppI18n();
@@ -550,6 +556,7 @@ const currentLlmConfig = ref<LlmConfig | null>(null);
 
 // ⭐工具审批设置弹窗
 const isToolApprovalSettingsVisible = ref(false);
+const isAgentMetricsVisible = ref(false);
 
 // 项目store
 const projectStore = useProjectStore();
@@ -2601,10 +2608,29 @@ onActivated(async () => {
   // 4. 如果是同一个会话，检查是否有正在进行的流需要恢复显示
   else if (storedSessionId && activeStreams.value[storedSessionId]) {
     console.log(`Resuming stream display for current session ${storedSessionId}.`);
+    // FR10.3：按 task_id + after_event_id 补取事件
+    const stream = activeStreams.value[storedSessionId];
+    const evts = stream.taskEvents || [];
+    const lastEvt = evts.length ? evts[evts.length - 1] : undefined;
+    const afterId = lastEvt?.event_id ? String(lastEvt.event_id) : '';
+    const snap = await fetchTaskSnapshot({
+      taskId: stream.taskId,
+      sessionId: storedSessionId,
+      afterEventId: afterId || undefined,
+    });
+    if (snap) {
+      applyTaskSnapshotToStream(storedSessionId, snap);
+    }
     // 如果流在后台已经完成，但UI没有及时更新，这里重新加载历史记录
     if (activeStreams.value[storedSessionId].isComplete) {
       await loadChatHistory();
       clearStreamState(storedSessionId);
+    }
+  } else if (storedSessionId) {
+    // 无本地流时也尝试恢复任务阶段条
+    const snap = await fetchTaskSnapshot({ sessionId: storedSessionId });
+    if (snap) {
+      applyTaskSnapshotToStream(storedSessionId, snap);
     }
   }
 

@@ -37,12 +37,26 @@ def _api_key() -> str:
     return (os.environ.get("LOCA_STUDE_API_KEY") or _DEFAULT_API_KEY).strip()
 
 
+def _idempotency_key() -> str:
+    return (
+        os.environ.get("LOCA_IDEMPOTENCY_KEY")
+        or os.environ.get("IDEMPOTENCY_KEY")
+        or os.environ.get("X_IDEMPOTENCY_KEY")
+        or ""
+    ).strip()
+
+
 def _headers() -> dict:
-    return {
+    headers = {
         "accept": "application/json",
         "Content-Type": "application/json",
         "X-API-Key": _api_key(),
     }
+    key = _idempotency_key()
+    if key:
+        headers["Idempotency-Key"] = key
+        headers["X-Idempotency-Key"] = key
+    return headers
 
 
 # 兼容旧引用

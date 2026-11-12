@@ -198,7 +198,7 @@ def resolve_dependent_skips(
 
 
 def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
-    """浏览器上传/加购逐项验收（FR03.5 / FR03.6）。"""
+    """浏览器上传/加购逐项验收（FR03.5 / FR03.6 / AC26）。"""
     text = joined or ""
     checks = {
         "has_timeout_or_tool_error": bool(_BROWSER_TIMEOUT_RE.search(text)),
@@ -209,6 +209,16 @@ def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
         ),
         "has_cart_evidence": bool(
             re.search(r"cart_id|cart_item|/cart/|加入购物车|add\s*to\s*cart", text, re.I)
+        ),
+        "has_typed_identifier": bool(
+            re.search(
+                r"(cart_id|cart_item_id|checkout_id|order_id|order_sn)\s*[:=]\s*\S+",
+                text,
+                re.I,
+            )
+        ),
+        "has_product_link_evidence": bool(
+            re.search(r"目标商品|同一商品|素材关联|custom.*(image|photo)|sku", text, re.I)
         ),
         "execution_method": "",
     }
@@ -232,8 +242,70 @@ def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
         ok = False
         reasons.append("仅计数 1/1 不能证明预览已刷新或素材正确")
 
-    # 有成功标记但无标识类型时不直接失败，由上层交付说明缺口
+    # AC26：有购物车动作时要求类型化标识；缺标识则未完全完成（AC29）
+    if checks["has_cart_evidence"] and not checks["has_typed_identifier"]:
+        ok = False
+        reasons.append("加购有动作证据但未捕获类型化标识（cart_id/cart_item_id 等）")
+
     return {"ok": ok, "reasons": reasons, "checks": checks}
+
+
+def evaluate_delivery_evidence(
+    *,
+    tool_results: Sequence[str],
+    auth_scope: Optional[Dict[str, Any]] = None,
+    target_url: str = "",
+) -> Dict[str, Any]:
+    """交付门禁（FR09.5/9.6 / FR01.5 / AC27–AC30）。"""
+    joined = "\n".join(str(x) for x in tool_results if x)
+    ok = True
+    reasons: List[str] = []
+    blockers: List[Dict[str, Any]] = []
+    scope = auth_scope or {}
+
+    # AC28：知识库示例订单号不得当作本次结果
+    if re.search(r"(示例|样例|example).{0,12}(order_sn|订单号)|不得当作本次", joined, re.I):
+        # 若同时把示例号写成交付结果则失败
+        if re.search(r"(交付|结果|order_sn)\s*[:=].*\d{15,}", joined, re.I) and (
+            "示例" in joined or "样例" in joined or "example" in joined.lower()
+        ):
+            ok = False
+            reasons.append("知识库订单号示例不得作为本次执行结果")
+            blockers.append({"blocker_code": "kb_sample_order_sn", "step": "deliver"})
+
+    # AC27：仅凭 143/dnd 域名差不断言不支持
+    if re.search(r"(仅有|只有).{0,8}(143|dnd).{0,20}(不支持|不同于)", joined, re.I):
+        if "核对" not in joined and "实际配置" not in joined and "待验证" not in joined:
+            ok = False
+            reasons.append("环境支持范围须核对目标商品实际配置，不能仅凭域名命名断言")
+            blockers.append({"blocker_code": "env_inference_unverified", "step": "kb"})
+
+    # AC30：其他商品观察不能替代目标
+    if re.search(r"(另一|其他).{0,6}商品|所见所得", joined) and target_url:
+        if target_url.rstrip("/") not in joined.replace(target_url, "", 1):
+            # 提到了其他商品但未证明与目标一致
+            if "同一商品" not in joined and "等价样本" not in joined:
+                ok = False
+                reasons.append("其他商品观察不能替代当前目标商品验证，禁止静默换商品")
+                blockers.append({"blocker_code": "wrong_product_evidence", "step": "verify"})
+
+    # 授权边界：只授权加购时若出现提交订单证据 → 越权
+    allow = set(scope.get("allow_actions") or [])
+    deny = set(scope.get("deny_actions") or [])
+    if ("submit_order" in deny or "pay" in deny) and re.search(
+        r"submit[_ ]?order|提交订单|下单成功", joined, re.I
+    ):
+        if "add_to_cart" in allow and "submit_order" not in allow:
+            ok = False
+            reasons.append("仅授权加购时不得提交订单（即使用户禁止支付）")
+            blockers.append({"blocker_code": "order_beyond_auth", "step": "checkout"})
+
+    return {
+        "ok": ok,
+        "reasons": reasons,
+        "blockers": blockers,
+        "partial_ok": bool(joined.strip()) and not ok,
+    }
 
 
 def evaluate_post_condition(
@@ -242,12 +314,15 @@ def evaluate_post_condition(
     tool_results: Sequence[str],
     had_unconfirmed_write: bool = False,
     playbook_id: str = "",
+    auth_scope: Optional[Dict[str, Any]] = None,
+    target_url: str = "",
 ) -> Dict[str, Any]:
     """确定性后置断言（不靠模型自评）。"""
     joined = "\n".join(str(x) for x in tool_results if x)
     ok = True
     reasons: List[str] = []
     extra: Dict[str, Any] = {}
+    blockers: List[Dict[str, Any]] = []
 
     if had_unconfirmed_write:
         ok = False
@@ -279,6 +354,17 @@ def evaluate_post_condition(
             ok = False
             reasons.append("浏览器任务无工具结果可用于断言")
 
+    delivery = evaluate_delivery_evidence(
+        tool_results=tool_results,
+        auth_scope=auth_scope,
+        target_url=target_url,
+    )
+    if not delivery.get("ok", True):
+        ok = False
+        reasons.extend(delivery.get("reasons") or [])
+        blockers.extend(delivery.get("blockers") or [])
+    extra["delivery"] = delivery
+
     if post_condition and not reasons and not joined.strip():
         ok = False
         reasons.append("无工具结果可用于断言")
@@ -295,6 +381,7 @@ def evaluate_post_condition(
         "ok": ok,
         "post_condition": post_condition,
         "reasons": reasons,
+        "blockers": blockers,
         "playbook_id": playbook_id,
         **extra,
     }

@@ -1946,7 +1946,12 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertIn("不得当作本次执行结果", annotated)
 
     def test_retry_policy_and_dependent_skips(self):
-        from orchestrator_integration.execution_policy import resolve_dependent_skips
+        from orchestrator_integration.execution_policy import (
+            evaluate_delivery_evidence,
+            evaluate_post_condition,
+            resolve_dependent_skips,
+        )
+        from orchestrator_integration.reconcile import build_reconcile_plan
         from orchestrator_integration.retry_policy import decide_retry
         from orchestrator_integration.skill_catalog import reload_skill_catalog
 
@@ -1985,6 +1990,17 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertFalse(biz.allow)
 
+        # AC13：超时必须先核对，禁止重放
+        plan = build_reconcile_plan(
+            skill_name="ui-automation",
+            text="execute_testcase timeout execution_id=e99",
+            status="unknown",
+        )
+        self.assertTrue(plan["must_reconcile"])
+        self.assertFalse(plan["allow_replay"])
+        self.assertEqual(plan["reconcile_action"], "get_execution_records")
+        self.assertEqual(plan["resource_keys"].get("execution_id"), "e99")
+
         planned = resolve_dependent_skips(
             [
                 {"step_id": "a", "status": "failed", "depends_on": [], "on_failure": "stop_dependents"},
@@ -1996,10 +2012,39 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertEqual(by_id["b"]["status"], "skipped")
         self.assertEqual(by_id["c"]["status"], "pending")
 
+        # AC28 / AC22 交付门禁
+        delivery = evaluate_delivery_evidence(
+            tool_results=[
+                "示例 order_sn=12345678901234567 交付结果 order_sn=12345678901234567"
+            ],
+            auth_scope={"allow_actions": ["add_to_cart"], "deny_actions": ["pay", "submit_order"]},
+        )
+        self.assertFalse(delivery["ok"])
+        order_block = evaluate_delivery_evidence(
+            tool_results=["提交订单成功 order_sn=999"],
+            auth_scope={"allow_actions": ["add_to_cart"], "deny_actions": ["pay", "submit_order"]},
+        )
+        self.assertFalse(order_block["ok"])
+
+        # AC26/AC29：加购无类型化标识 → 未完全完成
+        acc = evaluate_post_condition(
+            post_condition="x",
+            tool_results=["Add To Cart ok; preview refreshed; 已加入购物车"],
+            playbook_id="browser_act",
+            auth_scope={"allow_actions": ["add_to_cart"]},
+        )
+        self.assertFalse(acc["ok"])
+        self.assertTrue(any("类型化标识" in r for r in acc["reasons"]))
+
     def test_stage_mount_and_probe_hint(self):
         from orchestrator_integration.agent_runtime import (
             format_probe_hint,
             probe_browser_resources,
+        )
+        from orchestrator_integration.idempotency import (
+            build_idempotency_key,
+            idempotency_env,
+            should_inject_idempotency,
         )
         from orchestrator_integration.intent_router import classify_user_intent
         from orchestrator_integration.stage_plan import (
@@ -2026,6 +2071,55 @@ class AgentSmartnessTests(SimpleTestCase):
         sess = probe_browser_resources(session_id="sess-not-exist-xyz")
         self.assertIs(sess["probe_result"]["session"]["alive"], False)
         self.assertFalse(sess["ok_to_reuse"])
+        self.assertIn("login_state", sess["probe_result"]["session"])
+
+        # 域名探测字段存在（localhost 结果依赖环境，只断言结构）
+        dom = probe_browser_resources(target_url="https://127.0.0.1/")
+        self.assertIn("domain", dom["probe_result"])
+        self.assertIn("ok", dom["probe_result"]["domain"])
+
+        # Skill 脚本会读取 IDEMPOTENCY_KEY 写入请求头
+        import importlib
+        import os
+        import sys
+        from pathlib import Path
+
+        skill_dir = (
+            Path(__file__).resolve().parents[2]
+            / "bundled_skills"
+            / "loca_stude_skills"
+        )
+        if str(skill_dir) not in sys.path:
+            sys.path.insert(0, str(skill_dir))
+        os.environ["IDEMPOTENCY_KEY"] = "unit-test-idem-key"
+        try:
+            import loca_stude_tools as lst
+
+            importlib.reload(lst)
+            hdr = lst._headers()
+            self.assertEqual(hdr.get("Idempotency-Key"), "unit-test-idem-key")
+        finally:
+            os.environ.pop("IDEMPOTENCY_KEY", None)
+
+        self.assertTrue(
+            should_inject_idempotency(
+                "loca-stude", "python x.py --action add_testcase"
+            )
+        )
+        self.assertFalse(
+            should_inject_idempotency(
+                "loca-stude", "python x.py --action get_testcases"
+            )
+        )
+        cmd = "python x.py --action add_testcase --name demo"
+        key = build_idempotency_key(
+            task_id="t1", skill_name="loca-stude", command=cmd
+        )
+        env = idempotency_env(
+            task_id="t1", skill_name="loca-stude", command=cmd
+        )
+        self.assertEqual(env.get("IDEMPOTENCY_KEY"), key)
+        self.assertIn("LOCA_IDEMPOTENCY_NOTE", env)
 
 
 class BehaviorMemoryDBTests(TestCase):
@@ -2066,10 +2160,17 @@ class BehaviorMemoryDBTests(TestCase):
         from langgraph_integration.models import ChatSession
         from orchestrator_integration.agent_runtime import (
             acquire_lease,
+            assert_task_access,
             consume_budget,
             create_or_resume_task,
+            finalize_cancel,
+            heartbeat_lease,
+            request_cancel,
+            resume_preflight,
             task_snapshot,
+            try_claim_execution,
         )
+        from orchestrator_integration.models import AgentStep
         from orchestrator_integration.task_commission import TaskCommission
 
         User = get_user_model()
@@ -2097,15 +2198,166 @@ class BehaviorMemoryDBTests(TestCase):
             lease_owner="w1",
         )
         self.assertTrue(acquire_lease(task, "w1"))
-        self.assertFalse(acquire_lease(task, "w2"))
-        ok, _ = consume_budget(task, tool_steps=2)
+        # AC08：他人无法抢租约
+        claim2 = try_claim_execution(task, "w2")
+        self.assertFalse(claim2["acquired"])
+        self.assertEqual(claim2["error_code"], "lease_held")
+        self.assertTrue(heartbeat_lease(task, "w1"))
+        self.assertFalse(heartbeat_lease(task, "w2"))
+        access = assert_task_access(task, user_id=user.id, session_id="sess-rt-1")
+        self.assertTrue(access["ok"])
+        bad_access = assert_task_access(task, user_id=user.id + 99)
+        self.assertFalse(bad_access["ok"])
+        ok, _ = consume_budget(task, tool_steps=2, retries=1, duration_ms=100)
         self.assertTrue(ok)
+        self.assertEqual(task.budget.get("used_retries"), 1)
         bad, msg = consume_budget(task, tool_steps=10)
         self.assertFalse(bad)
         self.assertIn("budget_tool_steps_exceeded", msg)
+        AgentStep.objects.create(
+            task=task,
+            step_number=1,
+            step_id="op-unknown-1",
+            status="unknown",
+            tool_name="ui-automation",
+            tool_output_summary="execute_testcase timeout waiting for result",
+            structured_result={"status": "unknown", "data": {"execution_id": "e1"}},
+        )
+        pre = resume_preflight(task)
+        self.assertTrue(pre["must_reconcile"])
+        cancel = request_cancel(task)
+        self.assertEqual(cancel["status"], "cancelling")
+        # 有 running/pending 才算在途；unknown 不阻塞 finalize
+        fin = finalize_cancel(task)
+        self.assertEqual(fin["status"], "cancelled")
         snap = task_snapshot(task)
         self.assertEqual(snap["task_id"], "tid123")
         self.assertIn("events", snap)
+
+    def test_agent_runtime_stage_advance_and_metrics(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import (
+            AgentRuntime,
+            quality_metrics,
+        )
+        from orchestrator_integration.task_commission import TaskCommission
+
+        User = get_user_model()
+        user = User.objects.create_user(username="rt2", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-rt-2", title="t")
+        c = TaskCommission(
+            task_id="tid-stage",
+            zone_id="execute",
+            playbook_id="",
+            primary_skills=frozenset({"loca-stude"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=False,
+            draft_writes=False,
+            channel="heavy",
+            max_tool_steps=12,
+        )
+        stages = [
+            {
+                "stage_id": "kb_research",
+                "goal": "查规则",
+                "tool_capabilities": ["knowledge_search"],
+                "depends_on": [],
+                "acceptance": "来源",
+                "auth_actions": [],
+            },
+            {
+                "stage_id": "persist",
+                "goal": "保存",
+                "tool_capabilities": ["loca-stude"],
+                "depends_on": ["kb_research"],
+                "acceptance": "id",
+                "auth_actions": ["write"],
+            },
+            {
+                "stage_id": "summarize",
+                "goal": "汇总",
+                "tool_capabilities": [],
+                "depends_on": ["persist"],
+                "acceptance": "汇总",
+                "auth_actions": [],
+            },
+        ]
+        rt = AgentRuntime(lease_owner="w-stage")
+        task = rt.start(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="根据知识库生成并保存后汇总",
+            commission=c,
+            stage_plan=stages,
+        )
+        self.assertEqual(task.current_stage, "kb_research")
+        adv = rt.maybe_advance(
+            tool_results=["## 知识库预检索结果\n来源: 登录规则文档"]
+        )
+        self.assertTrue(adv["advanced"])
+        self.assertEqual(adv["current_stage"], "persist")
+        self.assertEqual(task.plan_version, 2)
+        # 非末阶段 accept(ok) 应延迟 completed
+        deferred = rt.accept({"ok": True, "reasons": []})
+        self.assertTrue(deferred.get("deferred_completion"))
+        self.assertEqual(task.current_stage, "summarize")
+        metrics = quality_metrics(user_id=user.id, limit=50)
+        self.assertGreaterEqual(metrics["tasks_sampled"], 1)
+        self.assertIn("telemetry", metrics)
+        self.assertIn("stage_advance_events", metrics)
+
+    def test_approval_fingerprint_and_cross_user(self):
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import fingerprint_payload
+        from orchestrator_integration.models import ApprovalRequest
+        from orchestrator_integration.write_confirmation import consume_approval
+
+        User = get_user_model()
+        user = User.objects.create_user(username="apr2", password="x")
+        other = User.objects.create_user(username="apr3", password="x")
+        chat = ChatSession.objects.create(
+            user=user, session_id="sess-apr-2", title="t"
+        )
+        pending = {"skill_name": "loca-stude", "command": "add_testcase"}
+        fp = fingerprint_payload(pending)
+        ApprovalRequest.objects.create(
+            interrupt_id="write_confirm_fp1",
+            user=user,
+            session_id=chat.session_id,
+            action_name="execute_skill_script",
+            action_args={"pending": pending},
+            param_fingerprint=fp,
+            status="pending",
+        )
+        denied = consume_approval(
+            "write_confirm_fp1", user_id=other.id, decision="approve"
+        )
+        self.assertFalse(denied["ok"])
+        self.assertEqual(denied["error_code"], "permission_denied")
+        mismatch = consume_approval(
+            "write_confirm_fp1",
+            user_id=user.id,
+            decision="approve",
+            expected_fingerprint="deadbeef",
+        )
+        self.assertFalse(mismatch["ok"])
+        self.assertEqual(mismatch["error_code"], "param_fingerprint_mismatch")
+        ok = consume_approval(
+            "write_confirm_fp1",
+            user_id=user.id,
+            decision="approve",
+            expected_fingerprint=fp,
+            session_id=chat.session_id,
+        )
+        self.assertTrue(ok["ok"])
+        again = consume_approval(
+            "write_confirm_fp1", user_id=user.id, decision="approve"
+        )
+        self.assertFalse(again["ok"])
+        self.assertEqual(again["error_code"], "approval_consumed")
 
     def test_record_creates_db_row_when_vector_upsert_fails(self):
         User = get_user_model()

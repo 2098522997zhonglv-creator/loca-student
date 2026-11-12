@@ -653,12 +653,11 @@ def _finalize_skill_result(
                             )
                     except Exception as step_err:
                         logger.debug("record_step_result 失败: %s", step_err)
-                # FR06：失败时附加集中重试提示
+                # FR06：失败/unknown 附加集中重试与核对提示
                 if tr.status in {"failed", "unknown"}:
                     try:
-                        from orchestrator_integration.retry_policy import (
-                            decide_retry,
-                            format_retry_hint,
+                        from orchestrator_integration.reconcile import (
+                            build_reconcile_plan,
                         )
                         from orchestrator_integration.task_commission import (
                             CHANNEL_LIGHT,
@@ -667,24 +666,41 @@ def _finalize_skill_result(
                         channel = (
                             commission.channel if commission else CHANNEL_LIGHT
                         )
-                        light_n = (
-                            int(getattr(commission, "max_light_retries", 1) or 1)
-                            if commission
-                            else 1
-                        )
                         err_blob = tr.summary or (
                             compact if isinstance(compact, str) else str(compact)
                         )
-                        decision = decide_retry(
+                        plan = build_reconcile_plan(
                             skill_name=skill_name or "",
+                            text=err_blob,
+                            status=tr.status,
+                            structured=tr.to_dict(),
                             attempt=0,
                             channel=channel,
-                            tool_retryable=tr.retryable,
-                            error_text=err_blob,
-                            commission_light_retries=light_n,
                         )
-                        hint = format_retry_hint(decision)
-                        return tr.to_tool_text() + f"\n\n[重试策略] {hint}"
+                        # 不确定结果消耗一次重试预算标记（实际重放仍禁止）
+                        if plan.get("must_reconcile") and ctx.runtime_task_id:
+                            try:
+                                from orchestrator_integration.agent_runtime import (
+                                    consume_budget,
+                                )
+                                from orchestrator_integration.models import AgentTask
+
+                                t = AgentTask.objects.filter(
+                                    pk=ctx.runtime_task_id
+                                ).first()
+                                if t is not None:
+                                    consume_budget(t, retries=1)
+                            except Exception:
+                                pass
+                        return (
+                            tr.to_tool_text()
+                            + f"\n\n[核对/重试] {plan.get('hint')}"
+                            + (
+                                f"\n[reconcile_action]={plan.get('reconcile_action')}"
+                                if plan.get("reconcile_action")
+                                else ""
+                            )
+                        )
                     except Exception:
                         pass
             except Exception:
@@ -1092,6 +1108,28 @@ def get_skill_tools(
             )
             env["SKILL_OUTPUT_DIR"] = artifacts_dir
             env["ARTIFACT_DIR"] = artifacts_dir
+            # FR06.4：写/执行动作注入幂等键（本地关联；非外部恰好一次保证）
+            try:
+                from orchestrator_integration.idempotency import idempotency_env
+                from orchestrator_integration.telemetry_context import (
+                    get_telemetry_context,
+                )
+
+                _ctx = get_telemetry_context()
+                _task_id = ""
+                if _ctx.commission is not None:
+                    _task_id = getattr(_ctx.commission, "task_id", "") or ""
+                if _ctx.runtime_task_id:
+                    _task_id = _task_id or str(_ctx.runtime_task_id)
+                for _k, _v in idempotency_env(
+                    task_id=_task_id,
+                    skill_name=skill_name or "",
+                    command=command or "",
+                    step_id=_ctx.current_stage or "",
+                ).items():
+                    env[_k] = _v
+            except Exception:
+                pass
             artifacts_before = _snapshot_artifact_files(artifacts_dir)
 
             # Windows 兼容：将单引号包裹的参数转换为双引号（用于 cmd.exe）

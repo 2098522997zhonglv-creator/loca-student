@@ -1512,43 +1512,21 @@ class AgentLoopStreamAPIView(View):
                 intent_hint = (
                     f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
                 )
-            # FR04.5：继续/复用 session 时先探测，禁止未探测宣称复用成功
-            _probe_hint = ""
-            if any(
-                k in (user_message or "")
-                for k in ("继续", "复用", "session_id", "接着")
-            ):
-                try:
-                    import re as _re_probe
+            # FR04.5：探测经 finalize 模块统一构造
+            try:
+                from orchestrator_integration.agent_loop_finalize import (
+                    probe_hint_for_message,
+                )
 
-                    from orchestrator_integration.agent_runtime import (
-                        format_probe_hint,
-                        probe_browser_resources,
+                _probe_hint = probe_hint_for_message(user_message)
+                if _probe_hint:
+                    intent_hint = (
+                        f"{intent_hint}\n\n{_probe_hint}"
+                        if intent_hint
+                        else _probe_hint
                     )
-
-                    sid_m = _re_probe.search(
-                        r"session[_-]?id[=:\s]+([A-Za-z0-9_-]+)",
-                        user_message or "",
-                        _re_probe.I,
-                    )
-                    path_m = _re_probe.search(
-                        r"(/[^\s]+\.(?:png|jpe?g|webp|gif|pdf))",
-                        user_message or "",
-                        _re_probe.I,
-                    )
-                    probe = probe_browser_resources(
-                        session_id=sid_m.group(1) if sid_m else "",
-                        file_path=path_m.group(1) if path_m else "",
-                    )
-                    _probe_hint = format_probe_hint(probe)
-                    if _probe_hint:
-                        intent_hint = (
-                            f"{intent_hint}\n\n{_probe_hint}"
-                            if intent_hint
-                            else _probe_hint
-                        )
-                except Exception as probe_err:
-                    logger.debug("resource probe skipped: %s", probe_err)
+            except Exception as probe_err:
+                logger.debug("resource probe skipped: %s", probe_err)
             if specialist_hint_text:
                 intent_hint = (
                     f"{intent_hint}\n\n{specialist_hint_text}"
@@ -1635,12 +1613,13 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: Created new ChatSession: {session_id}"
                 )
 
-            # 7.1 FR04/FR08：持久化任务 + 阶段计划 + 授权范围
+            # 7.1 FR04/FR08：经 AgentRuntime + RuntimeSession 创建/继续任务
             runtime_task = None
+            agent_runtime = None
+            runtime_session = None
             try:
-                from orchestrator_integration.agent_runtime import (
-                    create_or_resume_task_async,
-                )
+                from orchestrator_integration.agent_loop_finalize import RuntimeSession
+                from orchestrator_integration.agent_runtime import AgentRuntime
                 from orchestrator_integration.stage_plan import infer_auth_scope
                 from orchestrator_integration.telemetry_context import (
                     get_telemetry_context,
@@ -1649,7 +1628,8 @@ class AgentLoopStreamAPIView(View):
 
                 stages = [s.to_dict() for s in _stage_specs]
                 auth_scope = infer_auth_scope(user_message)
-                runtime_task = await create_or_resume_task_async(
+                agent_runtime = AgentRuntime()
+                runtime_task = await sync_to_async(agent_runtime.start)(
                     session=chat_session,
                     user=request.user,
                     project_id=int(project_id) if project_id else None,
@@ -1657,6 +1637,12 @@ class AgentLoopStreamAPIView(View):
                     commission=task_commission,
                     auth_scope=auth_scope,
                     stage_plan=stages,
+                )
+                runtime_session = RuntimeSession(
+                    runtime=agent_runtime,
+                    commission=task_commission,
+                    stage_specs=_stage_specs,
+                    auth_scope=auth_scope,
                 )
                 # create_or_resume_task 已写入 task_started；此处只向客户端推送，避免重复落库
                 yield create_sse_data(
@@ -2385,7 +2371,7 @@ class AgentLoopStreamAPIView(View):
                             "AgentLoopStreamAPI: 写入 QA 缓存失败: %s", cache_err
                         )
 
-                # FR03.2：运行时强制验收（不依赖模型是否调用 assert_task_postcondition）
+                # FR03.2：强制验收经 finalize 模块（阶段推进 + AgentRuntime.accept）
                 acceptance = None
                 if (
                     not user_stopped
@@ -2394,51 +2380,28 @@ class AgentLoopStreamAPIView(View):
                     and task_commission is not None
                 ):
                     try:
-                        from orchestrator_integration.execution_policy import (
-                            evaluate_post_condition,
-                        )
-                        from orchestrator_integration.agent_runtime import (
-                            apply_acceptance_async,
+                        from orchestrator_integration.agent_loop_finalize import (
+                            RuntimeSession,
+                            finalize_task_acceptance,
                         )
 
-                        acceptance = evaluate_post_condition(
-                            post_condition=task_commission.post_condition,
-                            tool_results=list(task_commission.last_tool_results),
-                            had_unconfirmed_write=False,
-                            playbook_id=task_commission.playbook_id or "",
-                        )
-                        evt_payload = {
-                            "type": (
-                                "task_completed"
-                                if acceptance.get("ok")
-                                else "task_blocked"
-                            ),
-                            "task_id": (
-                                getattr(runtime_task, "public_task_id", None)
-                                if "runtime_task" in locals() and runtime_task
-                                else task_commission.task_id
-                            ),
-                            "status": (
-                                "completed" if acceptance.get("ok") else "blocked"
-                            ),
-                            "acceptance": acceptance,
-                        }
-                        if "runtime_task" in locals() and runtime_task is not None:
-                            try:
-                                persisted = await apply_acceptance_async(
-                                    runtime_task, acceptance
-                                )
-                                evt_payload.update(
-                                    {
-                                        "event_id": persisted.get("event_id"),
-                                        "sequence": persisted.get("sequence"),
-                                    }
-                                )
-                            except Exception as persist_acc_err:
-                                logger.debug(
-                                    "persist acceptance failed: %s", persist_acc_err
-                                )
-                        yield create_sse_data(evt_payload)
+                        sess = runtime_session
+                        if sess is None and "agent_runtime" in locals() and agent_runtime:
+                            sess = RuntimeSession(
+                                runtime=agent_runtime,
+                                commission=task_commission,
+                                stage_specs=_stage_specs
+                                if "_stage_specs" in locals()
+                                else [],
+                                auth_scope={},
+                            )
+                        if sess is not None:
+                            sess.commission = task_commission
+                            acceptance, fin_events = await sync_to_async(
+                                finalize_task_acceptance
+                            )(sess)
+                            for fe in fin_events:
+                                yield create_sse_data(fe)
                     except Exception as acc_err:
                         logger.warning(
                             "AgentLoopStreamAPI: runtime acceptance failed: %s",
@@ -2953,6 +2916,37 @@ class AgentTaskSnapshotAPIView(View):
 
 
 @method_decorator(csrf_exempt, name="dispatch")
+class AgentQualityMetricsAPIView(View):
+    """质量指标看板数据（FR10.4）。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def get(self, request, *args, **kwargs):
+        try:
+            user = await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+        try:
+            from orchestrator_integration.agent_runtime import quality_metrics
+
+            scope = (request.GET.get("scope") or "user").strip()
+            limit = int(request.GET.get("limit") or 200)
+            uid = None if scope == "all" and getattr(user, "is_staff", False) else user.id
+            data = await sync_to_async(quality_metrics)(user_id=uid, limit=limit)
+            return api_success_response("ok", data)
+        except Exception as e:
+            logger.error("AgentQualityMetricsAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
 class AgentLoopResumeAPIView(View):
     """
     Agent Loop Resume API (SSE 流式版)
@@ -3009,6 +3003,77 @@ class AgentLoopResumeAPIView(View):
         decision_info = resume_data[interrupt_id].get("decisions", [{}])[0]
         decision_type = decision_info.get("type", "reject")
 
+        # FR04：经 AgentRuntime 认领租约；已被他人持有则返回现有状态（AC08）
+        runtime_task = None
+        agent_runtime = None
+        try:
+            from orchestrator_integration.agent_runtime import AgentRuntime
+            from orchestrator_integration.models import AgentTask
+            from langgraph_integration.models import ChatSession
+
+            chat = await sync_to_async(
+                ChatSession.objects.filter(session_id=session_id).first
+            )()
+            if chat:
+                runtime_task = await sync_to_async(
+                    lambda: AgentTask.objects.filter(session=chat)
+                    .exclude(status__in=("completed", "failed", "cancelled"))
+                    .order_by("-updated_at")
+                    .first()
+                )()
+            if runtime_task is not None:
+                agent_runtime = AgentRuntime(
+                    lease_owner=f"resume-{uuid.uuid4().hex[:8]}"
+                )
+                agent_runtime.task = runtime_task
+                access = await sync_to_async(agent_runtime.access_ok)(
+                    user_id=user.id,
+                    project_id=int(project_id) if project_id else None,
+                    session_id=session_id,
+                )
+                if not access.get("ok"):
+                    yield create_sse_data(
+                        {
+                            "type": "error",
+                            "error_code": access.get("error_code"),
+                            "message": f"无权恢复任务: {access.get('error_code')}",
+                        }
+                    )
+                    return
+                claim = await sync_to_async(agent_runtime.claim)(runtime_task)
+                if not claim.get("acquired"):
+                    yield create_sse_data(
+                        {
+                            "type": "task_status",
+                            "error_code": claim.get("error_code"),
+                            "task_id": claim.get("task_id"),
+                            "status": claim.get("status"),
+                            "message": "任务正由其他执行者处理，已返回现有状态",
+                            "payload": claim,
+                        }
+                    )
+                    yield create_sse_data({"type": "complete", "status": "lease_held"})
+                    return
+                preflight = await sync_to_async(agent_runtime.preflight)()
+                if preflight.get("must_reconcile"):
+                    yield create_sse_data(
+                        {
+                            "type": "task_blocked",
+                            "task_id": runtime_task.public_task_id
+                            or str(runtime_task.id),
+                            "status": "blocked",
+                            "payload": {
+                                "blocker_code": "uncertain_side_effect",
+                                "uncertain_steps": preflight.get("uncertain_steps"),
+                                "hint": preflight.get("hint"),
+                            },
+                            "message": preflight.get("hint")
+                            or "存在未核对副作用，禁止盲目重放",
+                        }
+                    )
+        except Exception as lease_err:
+            logger.warning("AgentLoopResumeAPI: lease/preflight failed: %s", lease_err)
+
         # 写库确认按钮：非 LangGraph HITL checkpoint，走新一轮带批准消息的 astream
         write_confirm_resume = is_write_confirm_interrupt(interrupt_id)
         write_confirm_pending = None
@@ -3022,6 +3087,8 @@ class AgentLoopResumeAPIView(View):
                     interrupt_id,
                     user_id=user.id,
                     decision=decision_type,
+                    project_id=int(project_id) if project_id else None,
+                    session_id=session_id or "",
                 )
                 if (
                     not consumed.get("ok")

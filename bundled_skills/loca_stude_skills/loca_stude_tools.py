@@ -41,11 +41,26 @@ def _api_key() -> str:
     return (os.environ.get("LOCA_STUDE_API_KEY") or _DEFAULT_API_KEY).strip()
 
 
+def _idempotency_key() -> str:
+    return (
+        os.environ.get("LOCA_IDEMPOTENCY_KEY")
+        or os.environ.get("IDEMPOTENCY_KEY")
+        or os.environ.get("X_IDEMPOTENCY_KEY")
+        or ""
+    ).strip()
+
+
 def _headers() -> dict:
-    return {
+    headers = {
         "accept": "application/json, text/plain,*/*",
         "X-API-Key": _api_key(),
     }
+    # 父进程注入的幂等键：写操作传给后端，供去重/核对关联
+    key = _idempotency_key()
+    if key:
+        headers["Idempotency-Key"] = key
+        headers["X-Idempotency-Key"] = key
+    return headers
 
 
 # 兼容旧代码/测试中对模块级常量的引用

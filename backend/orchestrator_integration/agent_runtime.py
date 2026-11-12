@@ -24,6 +24,8 @@ DEFAULT_BUDGET = {
     "used_retries": 0,
     "max_tokens": 0,
     "used_tokens": 0,
+    "max_duration_ms": 0,
+    "used_duration_ms": 0,
 }
 
 
@@ -123,6 +125,14 @@ def create_or_resume_task(
 
 def acquire_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
     """条件更新获取执行权（FR04.3）。"""
+    result = try_claim_execution(task, owner, ttl_minutes=ttl_minutes)
+    return bool(result.get("acquired"))
+
+
+def try_claim_execution(
+    task, owner: str, ttl_minutes: int = 15
+) -> Dict[str, Any]:
+    """认领执行权（AC08）：成功或返回现有执行者状态，不抛异常。"""
     from orchestrator_integration.models import AgentTask
 
     now = timezone.now()
@@ -130,25 +140,77 @@ def acquire_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
     with transaction.atomic():
         row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
         if row is None:
-            return False
+            return {"acquired": False, "error_code": "task_missing"}
+        if row.status == "cancelling":
+            return {
+                "acquired": False,
+                "error_code": "task_cancelling",
+                "status": row.status,
+                "task_id": row.public_task_id or str(row.id),
+            }
+        if row.status in ("completed", "failed", "cancelled"):
+            return {
+                "acquired": False,
+                "error_code": "task_terminal",
+                "status": row.status,
+                "task_id": row.public_task_id or str(row.id),
+            }
         lease_ok = (
             not row.lease_owner
             or row.lease_owner == owner
             or (row.lease_expires_at and row.lease_expires_at <= now)
         )
-        if not lease_ok and row.status == "running":
-            return False
-        AgentTask.objects.filter(pk=row.pk, version=row.version).update(
+        if not lease_ok:
+            return {
+                "acquired": False,
+                "error_code": "lease_held",
+                "status": row.status,
+                "lease_owner": row.lease_owner,
+                "lease_expires_at": row.lease_expires_at.isoformat()
+                if row.lease_expires_at
+                else None,
+                "task_id": row.public_task_id or str(row.id),
+                "version": row.version,
+            }
+        new_status = (
+            "running"
+            if row.status in ("pending", "blocked", "paused", "awaiting_approval")
+            else row.status
+        )
+        updated = AgentTask.objects.filter(pk=row.pk, version=row.version).update(
             lease_owner=owner,
             lease_expires_at=expires,
             version=row.version + 1,
-            status="running" if row.status in ("pending", "blocked", "paused") else row.status,
+            status=new_status,
             updated_at=now,
         )
+        if not updated:
+            return {"acquired": False, "error_code": "version_conflict"}
         task.lease_owner = owner
         task.lease_expires_at = expires
         task.version = row.version + 1
-        return True
+        task.status = new_status
+        return {
+            "acquired": True,
+            "status": new_status,
+            "task_id": row.public_task_id or str(row.id),
+            "version": task.version,
+            "lease_owner": owner,
+        }
+
+
+def heartbeat_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
+    """续租心跳；非持有者失败。"""
+    from orchestrator_integration.models import AgentTask
+
+    now = timezone.now()
+    expires = now + timedelta(minutes=ttl_minutes)
+    n = AgentTask.objects.filter(pk=task.pk, lease_owner=owner).update(
+        lease_expires_at=expires, updated_at=now
+    )
+    if n:
+        task.lease_expires_at = expires
+    return bool(n)
 
 
 def release_lease(task, owner: str) -> None:
@@ -159,12 +221,64 @@ def release_lease(task, owner: str) -> None:
     )
 
 
+def assert_task_access(
+    task, *, user_id: int, project_id: Optional[int] = None, session_id: str = ""
+) -> Dict[str, Any]:
+    """归属校验（FR05.1）：客户端传入值只做一致性核对。"""
+    if task.user_id and int(task.user_id) != int(user_id):
+        return {"ok": False, "error_code": "permission_denied"}
+    if (
+        project_id is not None
+        and task.project_id is not None
+        and int(task.project_id) != int(project_id)
+    ):
+        return {"ok": False, "error_code": "project_mismatch"}
+    if session_id:
+        try:
+            sid = task.session.session_id
+        except Exception:
+            sid = ""
+        if sid and sid != session_id:
+            return {"ok": False, "error_code": "session_mismatch"}
+    return {"ok": True}
+
+
+def resume_preflight(task) -> Dict[str, Any]:
+    """恢复前核对：不确定步骤必须先 reconcile（FR04.4 / AC09）。"""
+    from orchestrator_integration.models import AgentStep
+    from orchestrator_integration.reconcile import collect_uncertain_steps
+
+    steps = list(
+        AgentStep.objects.filter(task=task)
+        .order_by("step_number")
+        .values(
+            "step_id",
+            "tool_name",
+            "status",
+            "tool_output_summary",
+            "structured_result",
+            "operation_id",
+        )[:100]
+    )
+    uncertain = collect_uncertain_steps(steps)
+    return {
+        "must_reconcile": bool(uncertain),
+        "uncertain_steps": uncertain,
+        "hint": (
+            "存在未核对的副作用步骤：先查询原动作状态，禁止盲目重放。"
+            if uncertain
+            else ""
+        ),
+    }
+
+
 def consume_budget(
     task,
     *,
     tool_steps: int = 0,
     retries: int = 0,
     tokens: int = 0,
+    duration_ms: int = 0,
 ) -> Tuple[bool, str]:
     """原子扣减预算（FR07）。"""
     from orchestrator_integration.models import AgentTask
@@ -173,19 +287,25 @@ def consume_budget(
         row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
         if row is None:
             return False, "task_missing"
-        budget = dict(row.budget or DEFAULT_BUDGET)
+        budget = dict(DEFAULT_BUDGET)
+        budget.update(row.budget or {})
         next_steps = int(budget.get("used_tool_steps", 0)) + tool_steps
         next_retries = int(budget.get("used_retries", 0)) + retries
         next_tokens = int(budget.get("used_tokens", 0)) + tokens
+        next_duration = int(budget.get("used_duration_ms", 0)) + max(0, duration_ms)
         max_steps = int(budget.get("max_tool_steps", 28) or 28)
         max_retries = int(budget.get("max_retries", 3) or 3)
+        max_duration = int(budget.get("max_duration_ms", 0) or 0)
         if tool_steps and next_steps > max_steps:
             return False, f"budget_tool_steps_exceeded:{next_steps}/{max_steps}"
         if retries and next_retries > max_retries:
             return False, f"budget_retries_exceeded:{next_retries}/{max_retries}"
+        if max_duration and duration_ms and next_duration > max_duration:
+            return False, f"budget_duration_exceeded:{next_duration}/{max_duration}"
         budget["used_tool_steps"] = next_steps
         budget["used_retries"] = next_retries
         budget["used_tokens"] = next_tokens
+        budget["used_duration_ms"] = next_duration
         AgentTask.objects.filter(pk=row.pk, version=row.version).update(
             budget=budget,
             current_step=next_steps,
@@ -199,31 +319,64 @@ def consume_budget(
 
 
 def request_cancel(task) -> Dict[str, Any]:
-    """将任务置为 cancelling（FR07.3）。"""
-    from orchestrator_integration.models import AgentTask
+    """将任务置为 cancelling（FR07.3）。在途步骤保留查询能力。"""
+    from orchestrator_integration.models import AgentStep, AgentTask
     from orchestrator_integration.stop_signal import set_stop_signal
 
     AgentTask.objects.filter(pk=task.pk).exclude(
         status__in=("completed", "failed", "cancelled")
     ).update(status="cancelling", updated_at=timezone.now())
-    if task.session_id:
-        try:
-            set_stop_signal(task.session.session_id)
-        except Exception:
-            pass
-    append_event(task, "task_cancelling", status="cancelling", payload={})
-    return {"status": "cancelling", "task_id": task.public_task_id or str(task.id)}
+    in_flight = list(
+        AgentStep.objects.filter(task=task, status__in=("pending", "running")).values(
+            "step_id", "tool_name", "status", "operation_id"
+        )[:50]
+    )
+    try:
+        set_stop_signal(task.session.session_id)
+    except Exception:
+        pass
+    evt = append_event(
+        task,
+        "task_cancelling",
+        status="cancelling",
+        payload={"in_flight": in_flight},
+    )
+    return {
+        "status": "cancelling",
+        "task_id": task.public_task_id or str(task.id),
+        "in_flight": in_flight,
+        "event_id": evt.get("event_id"),
+        "note": "已阻止新步骤；在途外部动作需继续查询，不能视为已撤销",
+    }
 
 
-def finalize_cancel(task) -> None:
-    from orchestrator_integration.models import AgentTask
+def finalize_cancel(task, *, force: bool = False) -> Dict[str, Any]:
+    """确认在途结束后标记 cancelled（FR07.4）。"""
+    from orchestrator_integration.models import AgentStep, AgentTask
 
+    in_flight = AgentStep.objects.filter(
+        task=task, status__in=("pending", "running")
+    ).count()
+    if in_flight and not force:
+        return {
+            "status": "cancelling",
+            "task_id": task.public_task_id or str(task.id),
+            "in_flight_count": in_flight,
+            "note": "仍有在途步骤，保持 cancelling",
+        }
     AgentTask.objects.filter(pk=task.pk, status="cancelling").update(
         status="cancelled",
         completed_at=timezone.now(),
         updated_at=timezone.now(),
+        lease_owner="",
+        lease_expires_at=None,
     )
     append_event(task, "task_completed", status="cancelled", payload={})
+    return {
+        "status": "cancelled",
+        "task_id": task.public_task_id or str(task.id),
+        "in_flight_count": 0,
+    }
 
 
 def append_event(
@@ -390,12 +543,67 @@ def task_snapshot(task) -> Dict[str, Any]:
     }
 
 
+def _ping_domain(url_or_host: str, timeout: float = 2.5) -> Dict[str, Any]:
+    """对目标域名做轻量可达探测（不跟随复杂登录态）。"""
+    import socket
+    from urllib.parse import urlparse
+    from urllib.request import Request, urlopen
+
+    raw = (url_or_host or "").strip()
+    if not raw:
+        return {"ok": False, "error": "empty_host"}
+    if "://" not in raw:
+        raw = "https://" + raw
+    parsed = urlparse(raw)
+    host = parsed.hostname or ""
+    if not host:
+        return {"ok": False, "error": "bad_host"}
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    dns_ok = False
+    tcp_ok = False
+    http_status = None
+    err = ""
+    try:
+        socket.getaddrinfo(host, port)
+        dns_ok = True
+    except OSError as exc:
+        err = f"dns:{exc}"
+    if dns_ok:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                tcp_ok = True
+        except OSError as exc:
+            err = f"tcp:{exc}"
+    if tcp_ok:
+        try:
+            req = Request(
+                f"{parsed.scheme}://{host}/",
+                method="HEAD",
+                headers={"User-Agent": "loca-stude-probe/1.0"},
+            )
+            with urlopen(req, timeout=timeout) as resp:  # nosec B310 - user target
+                http_status = getattr(resp, "status", None) or 200
+        except Exception as exc:
+            # HEAD 失败不否定 TCP 可达
+            err = f"http:{type(exc).__name__}"
+            http_status = None
+    return {
+        "ok": bool(tcp_ok),
+        "host": host,
+        "dns_ok": dns_ok,
+        "tcp_ok": tcp_ok,
+        "http_status": http_status,
+        "error": err,
+    }
+
+
 def probe_browser_resources(
     *,
     session_id: str = "",
     file_path: str = "",
+    target_url: str = "",
 ) -> Dict[str, Any]:
-    """会话/文件资源探测（FR04.5）——轻量本地检查。"""
+    """会话/文件/域名资源探测（FR04.5）——本地 + 轻量网络检查。"""
     import os
     from datetime import datetime
 
@@ -403,23 +611,41 @@ def probe_browser_resources(
     result = {
         "session_ref": session_id or "",
         "file_ref": file_path or "",
+        "target_url": target_url or "",
         "observed_at": observed_at,
         "probe_result": {},
         "ok_to_reuse": False,
     }
+    if target_url:
+        result["probe_result"]["domain"] = _ping_domain(target_url)
     if file_path:
         exists = os.path.isfile(file_path)
         size = os.path.getsize(file_path) if exists else 0
+        content_version = ""
+        if exists:
+            try:
+                h = hashlib.sha256()
+                with open(file_path, "rb") as fh:
+                    for chunk in iter(lambda: fh.read(65536), b""):
+                        h.update(chunk)
+                content_version = h.hexdigest()[:16]
+            except OSError:
+                content_version = ""
         result["probe_result"]["file"] = {
             "accessible": exists,
             "size": size,
             "format": os.path.splitext(file_path)[1].lower(),
+            "content_version": content_version,
         }
         if not exists:
             result["probe_result"]["file"]["note"] = "file_missing_do_not_claim_upload"
     if session_id:
         alive = None
         note = "unchecked_until_playwright_ping"
+        login_state = "unknown"
+        page_url = ""
+        cookie_count = 0
+        login_hint = ""
         try:
             from orchestrator_integration.builtin_tools.skill_tools import (
                 _get_playwright_session_manager,
@@ -428,31 +654,57 @@ def probe_browser_resources(
             mgr = _get_playwright_session_manager()
             with mgr._lock:
                 entry = mgr._entries.get(session_id)
-                if entry is None:
-                    alive = False
-                    note = "session_not_in_process_memory"
-                else:
+            if entry is None:
+                alive = False
+                note = "session_not_in_process_memory"
+                login_state = "unavailable"
+            else:
+                meta = mgr.probe_session(session_id) or {}
+                alive = meta.get("alive")
+                if alive is None:
+                    # 回退进程存活判断
                     proc = getattr(entry, "proc", None)
-                    running = bool(
+                    alive = bool(
                         proc
                         and getattr(proc, "_proc", None) is not None
                         and getattr(proc._proc, "poll", lambda: 0)() is None
                     )
-                    alive = running
-                    note = "alive_in_manager" if running else "process_exited"
+                note = str(meta.get("login_hint") or (
+                    "alive_in_manager" if alive else "process_exited"
+                ))
+                page_url = str(meta.get("last_url") or "")
+                cookie_count = int(meta.get("cookie_count") or 0)
+                login_hint = str(meta.get("login_hint") or "")
+                if meta.get("logged_in") is True:
+                    login_state = "logged_in"
+                elif meta.get("logged_in") is False:
+                    login_state = "logged_out"
+                elif alive:
+                    login_state = "process_alive_login_unchecked"
+                else:
+                    login_state = "offline"
         except Exception as exc:
             alive = None
             note = f"probe_error:{type(exc).__name__}"
+            login_state = "probe_error"
         result["probe_result"]["session"] = {
             "claimed_id": session_id,
             "alive": alive,
             "note": note,
+            "login_state": login_state,
+            "login_hint": login_hint,
+            "page_url": page_url,
+            "cookie_count": cookie_count,
         }
-        result["ok_to_reuse"] = alive is True
+        domain = (result["probe_result"].get("domain") or {})
+        # 可复用：进程活着 + 域名可达；登录态仅作提示，不单独否决加购页匿名态
+        result["ok_to_reuse"] = bool(alive is True and domain.get("ok", True))
     elif file_path:
-        result["ok_to_reuse"] = bool(
-            (result["probe_result"].get("file") or {}).get("accessible")
-        )
+        file_ok = bool((result["probe_result"].get("file") or {}).get("accessible"))
+        domain = result["probe_result"].get("domain") or {}
+        result["ok_to_reuse"] = file_ok and domain.get("ok", True)
+    elif target_url:
+        result["ok_to_reuse"] = bool((result["probe_result"].get("domain") or {}).get("ok"))
     return result
 
 
@@ -463,11 +715,32 @@ def format_probe_hint(probe: Dict[str, Any]) -> str:
     lines = ["# 资源探测（FR04.5）"]
     sess = (probe.get("probe_result") or {}).get("session") or {}
     file_info = (probe.get("probe_result") or {}).get("file") or {}
+    domain = (probe.get("probe_result") or {}).get("domain") or {}
+    if domain:
+        if domain.get("ok"):
+            lines.append(
+                f"- 域名 {domain.get('host')} 可达"
+                + (
+                    f"（HTTP {domain.get('http_status')}）"
+                    if domain.get("http_status")
+                    else "（TCP ok）"
+                )
+            )
+        else:
+            lines.append(
+                f"- 域名 {domain.get('host') or '(未知)'} 不可达"
+                f"（{domain.get('error') or 'ping_failed'}）："
+                "禁止宣称页面已打开。"
+            )
     if sess:
         alive = sess.get("alive")
+        login = sess.get("login_state") or "unknown"
         if alive is True:
             lines.append(
-                f"- session_id={sess.get('claimed_id')} 进程内存活，可继续复用。"
+                f"- session_id={sess.get('claimed_id')} 进程内存活；"
+                f"login_state={login}"
+                + (f"；page={sess.get('page_url')}" if sess.get("page_url") else "")
+                + "。登录态未核验前勿假设已登录。"
             )
         elif alive is False:
             lines.append(
@@ -482,7 +755,9 @@ def format_probe_hint(probe: Dict[str, Any]) -> str:
     if file_info:
         if file_info.get("accessible"):
             lines.append(
-                f"- 文件可访问 size={file_info.get('size')} format={file_info.get('format')}"
+                f"- 文件可访问 size={file_info.get('size')} "
+                f"format={file_info.get('format')} "
+                f"content_version={file_info.get('content_version') or '-'}"
             )
         else:
             lines.append(
@@ -490,7 +765,120 @@ def format_probe_hint(probe: Dict[str, Any]) -> str:
                 "禁止宣称上传成功。"
             )
     lines.append(f"- observed_at={probe.get('observed_at')}")
+    lines.append(f"- ok_to_reuse={probe.get('ok_to_reuse')}")
     return "\n".join(lines)
+
+
+def stage_acceptance_heuristic(
+    stage_id: str, tool_results: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """阶段级启发式验收（AC16）：用于自动推进，非整任务终态。"""
+    joined = "\n".join(str(x) for x in (tool_results or []) if x)
+    sid = stage_id or ""
+    ok = False
+    reason = ""
+    if sid in {"kb_research", "single"} and (
+        "预检索" in joined
+        or "knowledge_search" in joined
+        or "来源" in joined
+        or '"status": "succeeded"' in joined
+    ):
+        ok, reason = True, "kb_or_generic_evidence"
+    elif sid == "generate_draft" and any(
+        k in joined for k in ("草稿", "testcase", "steps", "用例")
+    ):
+        ok, reason = True, "draft_markers"
+    elif sid == "persist" and any(
+        k in joined for k in ("testcase_id", "case_id", "id=", "创建成功", "add_testcase")
+    ):
+        ok, reason = True, "persist_id"
+    elif sid in {"execute", "execute_testcase"} and any(
+        k in joined
+        for k in ("execution_id", "终态", "passed", "failed", "get_execution_records")
+    ):
+        ok, reason = True, "execution_evidence"
+    elif sid == "browser_interact" and any(
+        k in joined for k in ("cart_id", "cart_item", "Add To Cart", "预览")
+    ):
+        ok, reason = True, "browser_partial"
+    elif sid == "summarize":
+        ok, reason = True, "summarize_ready"
+    return {"ok": ok, "reason": reason, "stage_id": sid}
+
+
+def advance_task_stage(
+    task,
+    *,
+    tool_results: Optional[List[str]] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """阶段验收通过则推进并递增 plan_version（FR08.3 / AC16）。"""
+    from orchestrator_integration.models import AgentTask
+    from orchestrator_integration.stage_plan import StageSpec, advance_stage
+
+    stages_raw = list(task.stage_plan or [])
+    if len(stages_raw) <= 1:
+        return {
+            "advanced": False,
+            "current_stage": task.current_stage or "",
+            "reason": "single_or_empty_plan",
+        }
+    stages = [
+        StageSpec(
+            stage_id=str(s.get("stage_id") or ""),
+            goal=str(s.get("goal") or ""),
+            tool_capabilities=list(s.get("tool_capabilities") or []),
+            depends_on=list(s.get("depends_on") or []),
+            acceptance=str(s.get("acceptance") or ""),
+            auth_actions=list(s.get("auth_actions") or []),
+        )
+        for s in stages_raw
+        if isinstance(s, dict)
+    ]
+    cur = task.current_stage or (stages[0].stage_id if stages else "")
+    verdict = stage_acceptance_heuristic(cur, tool_results)
+    if not force and not verdict.get("ok"):
+        return {
+            "advanced": False,
+            "current_stage": cur,
+            "reason": "stage_not_accepted",
+            "verdict": verdict,
+        }
+    nxt = advance_stage(stages, cur, accepted=True)
+    if nxt == cur:
+        return {
+            "advanced": False,
+            "current_stage": cur,
+            "reason": "already_last_stage",
+            "verdict": verdict,
+        }
+    new_version = int(task.plan_version or 1) + 1
+    AgentTask.objects.filter(pk=task.pk).update(
+        current_stage=nxt,
+        plan_version=new_version,
+        updated_at=timezone.now(),
+    )
+    task.current_stage = nxt
+    task.plan_version = new_version
+    evt = append_event(
+        task,
+        "stage_changed",
+        status="running",
+        payload={
+            "from_stage": cur,
+            "to_stage": nxt,
+            "plan_version": new_version,
+            "verdict": verdict,
+        },
+    )
+    return {
+        "advanced": True,
+        "from_stage": cur,
+        "current_stage": nxt,
+        "plan_version": new_version,
+        "event": evt,
+        "verdict": verdict,
+    }
 
 
 def _extract_url(text: str) -> str:
@@ -513,6 +901,177 @@ def _redact(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+class AgentRuntime:
+    """统一运行时门面（FR04.1）。
+
+    HTTP/SSE 仍由 agent_loop_view 负责；任务状态、租约、预算、探测、
+    阶段推进、验收与指标经由此类，保证首次执行与 resume 共用规则。
+    """
+
+    def __init__(self, *, lease_owner: str = ""):
+        self.lease_owner = lease_owner or f"worker-{uuid.uuid4().hex[:8]}"
+        self.task = None
+
+    def start(
+        self,
+        *,
+        session,
+        user,
+        project_id: Optional[int],
+        goal: str,
+        commission,
+        auth_scope: Optional[Dict[str, Any]] = None,
+        stage_plan: Optional[List[Dict[str, Any]]] = None,
+    ):
+        self.task = create_or_resume_task(
+            session=session,
+            user=user,
+            project_id=project_id,
+            goal=goal,
+            commission=commission,
+            auth_scope=auth_scope,
+            stage_plan=stage_plan,
+            lease_owner=self.lease_owner,
+        )
+        return self.task
+
+    def claim(self, task) -> Dict[str, Any]:
+        self.task = task
+        return try_claim_execution(task, self.lease_owner)
+
+    def heartbeat(self) -> bool:
+        if self.task is None:
+            return False
+        return heartbeat_lease(self.task, self.lease_owner)
+
+    def access_ok(
+        self, *, user_id: int, project_id: Optional[int] = None, session_id: str = ""
+    ) -> Dict[str, Any]:
+        if self.task is None:
+            return {"ok": False, "error_code": "task_missing"}
+        return assert_task_access(
+            self.task, user_id=user_id, project_id=project_id, session_id=session_id
+        )
+
+    def preflight(self) -> Dict[str, Any]:
+        if self.task is None:
+            return {"must_reconcile": False}
+        return resume_preflight(self.task)
+
+    def probe(
+        self,
+        *,
+        session_id: str = "",
+        file_path: str = "",
+        target_url: str = "",
+    ) -> Dict[str, Any]:
+        url = target_url
+        if not url and self.task is not None:
+            url = str((self.task.task_scope or {}).get("target_url") or "")
+        return probe_browser_resources(
+            session_id=session_id, file_path=file_path, target_url=url
+        )
+
+    def spend(
+        self, *, tool_steps: int = 0, retries: int = 0, tokens: int = 0, duration_ms: int = 0
+    ) -> Tuple[bool, str]:
+        if self.task is None:
+            return False, "task_missing"
+        return consume_budget(
+            self.task,
+            tool_steps=tool_steps,
+            retries=retries,
+            tokens=tokens,
+            duration_ms=duration_ms,
+        )
+
+    def record_step(self, **kwargs):
+        if self.task is None:
+            return None
+        return record_step_result(self.task, **kwargs)
+
+    def maybe_advance(self, tool_results: Optional[List[str]] = None) -> Dict[str, Any]:
+        if self.task is None:
+            return {"advanced": False}
+        return advance_task_stage(self.task, tool_results=tool_results)
+
+    def accept(self, acceptance: Dict[str, Any]) -> Dict[str, Any]:
+        if self.task is None:
+            return {}
+        # 多阶段：非末阶段验收通过只推进，不标 completed
+        stages = self.task.stage_plan or []
+        if len(stages) > 1 and acceptance.get("ok"):
+            ids = [str(s.get("stage_id") or "") for s in stages if isinstance(s, dict)]
+            cur = self.task.current_stage or ""
+            if cur and ids and cur != ids[-1]:
+                adv = advance_task_stage(self.task, force=True)
+                return {
+                    "type": "stage_changed",
+                    "status": "running",
+                    "payload": adv,
+                    "deferred_completion": True,
+                }
+        return apply_acceptance(self.task, acceptance)
+
+    def cancel(self) -> Dict[str, Any]:
+        if self.task is None:
+            return {"status": "missing"}
+        return request_cancel(self.task)
+
+    def snapshot(self) -> Dict[str, Any]:
+        if self.task is None:
+            return {}
+        return task_snapshot(self.task)
+
+    def release(self) -> None:
+        if self.task is not None:
+            release_lease(self.task, self.lease_owner)
+
+
+def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[str, Any]:
+    """质量指标（FR10.4）：任务验收 + 工具遥测聚合。"""
+    from orchestrator_integration.models import AgentTask, TaskEvent
+    from orchestrator_integration.tool_telemetry import aggregate_telemetry
+
+    qs = AgentTask.objects.all()
+    if user_id:
+        qs = qs.filter(user_id=user_id)
+    recent = list(qs.order_by("-updated_at")[:limit])
+    total = len(recent) or 1
+    by_status = {}
+    false_complete = 0
+    blocked = 0
+    completed = 0
+    for t in recent:
+        st = t.status or "unknown"
+        by_status[st] = by_status.get(st, 0) + 1
+        if st == "completed":
+            completed += 1
+            acc = t.acceptance or {}
+            if acc and not acc.get("ok", True):
+                false_complete += 1
+        if st == "blocked":
+            blocked += 1
+    stage_events = TaskEvent.objects.filter(
+        event_type="stage_changed", task_id__in=[t.id for t in recent]
+    ).count()
+    telem = aggregate_telemetry(limit=2000)
+    return {
+        "tasks_sampled": len(recent),
+        "status_counts": by_status,
+        "completion_rate": round(completed / total, 4),
+        "block_rate": round(blocked / total, 4),
+        "false_complete_count": false_complete,
+        "stage_advance_events": stage_events,
+        "telemetry": {
+            "governance_kpis": telem.get("governance_kpis"),
+            "error_kinds": telem.get("error_kinds"),
+            "playbook_hits": telem.get("playbook_hits"),
+            "total_tool_events": telem.get("total"),
+        },
+    }
+
+
 # async wrappers for agent_loop_view
 create_or_resume_task_async = sync_to_async(create_or_resume_task)
 append_event_async = sync_to_async(append_event)
@@ -520,3 +1079,10 @@ apply_acceptance_async = sync_to_async(apply_acceptance)
 consume_budget_async = sync_to_async(consume_budget)
 task_snapshot_async = sync_to_async(task_snapshot)
 record_step_result_async = sync_to_async(record_step_result)
+try_claim_execution_async = sync_to_async(try_claim_execution)
+heartbeat_lease_async = sync_to_async(heartbeat_lease)
+resume_preflight_async = sync_to_async(resume_preflight)
+assert_task_access_async = sync_to_async(assert_task_access)
+finalize_cancel_async = sync_to_async(finalize_cancel)
+advance_task_stage_async = sync_to_async(advance_task_stage)
+quality_metrics_async = sync_to_async(quality_metrics)
