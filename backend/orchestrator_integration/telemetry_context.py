@@ -22,6 +22,8 @@ class TelemetryContext:
     granted_skills: Set[str] = field(default_factory=set)
     short_circuit: bool = False
     draft_writes: bool = False
+    runtime_task_id: Optional[int] = None
+    current_stage: str = ""
 
 
 _CTX: ContextVar[Optional[TelemetryContext]] = ContextVar(

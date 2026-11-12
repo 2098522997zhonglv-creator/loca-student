@@ -149,31 +149,102 @@ def build_stage_plan(
     return stages
 
 
+_BUILTIN_CAPS = frozenset(
+    {
+        "knowledge_search",
+        "read_skill_content",
+        "execute_skill_script",
+        "generate",
+        "request_tool_expansion",
+        "assert_task_postcondition",
+        "report_task_blocked",
+    }
+)
+_META_ALWAYS = frozenset(
+    {
+        "request_tool_expansion",
+        "assert_task_postcondition",
+        "report_task_blocked",
+        "read_skill_content",
+        "execute_skill_script",
+    }
+)
+
+
 def stage_tool_allowlist(stages: Sequence[StageSpec], current_stage_id: str) -> Optional[set]:
-    """当前阶段可挂载能力；None 表示不额外限制。"""
+    """当前阶段可挂载 Skill 名；None 表示不额外限制。"""
+    policy = stage_mount_policy(stages, current_stage_id)
+    if not policy.get("restrict"):
+        return None
+    skills = set(policy.get("skill_names") or [])
+    return skills or set()
+
+
+def stage_mount_policy(
+    stages: Sequence[StageSpec], current_stage_id: str
+) -> Dict[str, Any]:
+    """阶段挂载策略：Skill 白名单 + 内置工具名。
+
+    restrict=False 表示单阶段/空能力，不额外裁剪。
+    """
     by_id = {s.stage_id: s for s in stages}
     cur = by_id.get(current_stage_id)
     if not cur:
-        return None
+        return {"restrict": False, "skill_names": set(), "builtin_tools": set()}
     caps = set(cur.tool_capabilities or [])
-    # 允许已完成依赖阶段的只读能力回看
     for dep in cur.depends_on or []:
         prev = by_id.get(dep)
         if prev:
             caps.update(prev.tool_capabilities or [])
-    # 过滤掉非 skill 名的工具标记
-    skills = {
-        c
-        for c in caps
-        if c
-        not in {
-            "knowledge_search",
-            "read_skill_content",
-            "execute_skill_script",
-            "generate",
-        }
+    if not caps and cur.stage_id in {"single", "summarize"}:
+        return {"restrict": False, "skill_names": set(), "builtin_tools": set()}
+    skills = {c for c in caps if c not in _BUILTIN_CAPS}
+    builtins = {c for c in caps if c in _BUILTIN_CAPS} | set(_META_ALWAYS)
+    # 有 Skill 能力时默认挂载读写脚本工具
+    if skills:
+        builtins |= {"read_skill_content", "execute_skill_script"}
+    return {
+        "restrict": True,
+        "skill_names": skills,
+        "builtin_tools": builtins,
+        "stage_id": cur.stage_id,
+        "acceptance": cur.acceptance,
     }
-    return skills or None
+
+
+def format_stage_plan_hint(
+    stages: Sequence[StageSpec], current_stage_id: str = ""
+) -> str:
+    if not stages:
+        return ""
+    cur = current_stage_id or (stages[0].stage_id if stages else "")
+    lines = ["# 阶段计划（服务端）"]
+    for i, s in enumerate(stages, 1):
+        mark = "→" if s.stage_id == cur else "·"
+        deps = f" depends_on={','.join(s.depends_on)}" if s.depends_on else ""
+        lines.append(
+            f"{mark} [{i}/{len(stages)}] {s.stage_id}: {s.goal}"
+            f"{deps} | 验收: {s.acceptance or '完成目标'}"
+        )
+    lines.append(
+        "- 当前阶段未完成前不要跳到后续写入/执行；依赖失败则跳过依赖方并说明。"
+    )
+    return "\n".join(lines)
+
+
+def advance_stage(
+    stages: Sequence[StageSpec], current_stage_id: str, *, accepted: bool
+) -> str:
+    """验收通过后推进到下一阶段；失败则停在当前。"""
+    if not stages or not accepted:
+        return current_stage_id or ""
+    ids = [s.stage_id for s in stages]
+    if current_stage_id not in ids:
+        return ids[0]
+    idx = ids.index(current_stage_id)
+    if idx + 1 < len(ids):
+        return ids[idx + 1]
+    return current_stage_id
 
 
 def infer_auth_scope(message: str) -> Dict[str, Any]:

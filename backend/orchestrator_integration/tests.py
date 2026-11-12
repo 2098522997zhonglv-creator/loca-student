@@ -1918,6 +1918,7 @@ class AgentSmartnessTests(SimpleTestCase):
 
     def test_knowledge_claim_and_product_consistency(self):
         from orchestrator_integration.knowledge_claims import (
+            annotate_prefetch_chunk,
             assert_target_product_consistency,
             classify_kb_claim,
         )
@@ -1934,6 +1935,97 @@ class AgentSmartnessTests(SimpleTestCase):
             other_product_note="另一商品属性区为空",
         )
         self.assertFalse(bad["ok"])
+
+        annotated = annotate_prefetch_chunk(
+            content="示例订单号 12345678901234567 仅供参考",
+            source="操作手册",
+            score=0.88,
+            index=1,
+        )
+        self.assertIn("claim_type=", annotated)
+        self.assertIn("不得当作本次执行结果", annotated)
+
+    def test_retry_policy_and_dependent_skips(self):
+        from orchestrator_integration.execution_policy import resolve_dependent_skips
+        from orchestrator_integration.retry_policy import decide_retry
+        from orchestrator_integration.skill_catalog import reload_skill_catalog
+
+        reload_skill_catalog()
+        heal = decide_retry(
+            skill_name="playwright-skill",
+            attempt=0,
+            channel="light",
+            error_text="waiting for event 'filechooser' timeout",
+        )
+        self.assertTrue(heal.allow)
+        self.assertEqual(heal.next_action, "heal")
+
+        once = decide_retry(
+            skill_name="ui-automation",
+            attempt=0,
+            channel="light",
+            tool_retryable=True,
+            error_text="HTTP 503",
+        )
+        self.assertTrue(once.allow)
+        exhausted = decide_retry(
+            skill_name="ui-automation",
+            attempt=1,
+            channel="light",
+            tool_retryable=True,
+            error_text="HTTP 503",
+        )
+        self.assertFalse(exhausted.allow)
+        self.assertEqual(exhausted.next_action, "reconcile")
+
+        biz = decide_retry(
+            skill_name="loca-stude",
+            attempt=0,
+            error_text="余额不足无法下单",
+        )
+        self.assertFalse(biz.allow)
+
+        planned = resolve_dependent_skips(
+            [
+                {"step_id": "a", "status": "failed", "depends_on": [], "on_failure": "stop_dependents"},
+                {"step_id": "b", "status": "pending", "depends_on": ["a"], "on_failure": "stop_dependents"},
+                {"step_id": "c", "status": "pending", "depends_on": [], "on_failure": "continue"},
+            ]
+        )
+        by_id = {s["step_id"]: s for s in planned}
+        self.assertEqual(by_id["b"]["status"], "skipped")
+        self.assertEqual(by_id["c"]["status"], "pending")
+
+    def test_stage_mount_and_probe_hint(self):
+        from orchestrator_integration.agent_runtime import (
+            format_probe_hint,
+            probe_browser_resources,
+        )
+        from orchestrator_integration.intent_router import classify_user_intent
+        from orchestrator_integration.stage_plan import (
+            build_stage_plan,
+            format_stage_plan_hint,
+            stage_mount_policy,
+        )
+
+        text = "根据知识库登录规则生成用例并保存后执行，再汇总"
+        d = classify_user_intent(text)
+        stages = build_stage_plan(text, d)
+        policy = stage_mount_policy(stages, stages[0].stage_id)
+        self.assertTrue(policy["restrict"])
+        self.assertIn("knowledge_search", policy["builtin_tools"])
+        hint = format_stage_plan_hint(stages, stages[0].stage_id)
+        self.assertIn("阶段计划", hint)
+        self.assertIn(stages[0].stage_id, hint)
+
+        missing = probe_browser_resources(file_path="/tmp/no_such_upload_xyz.png")
+        self.assertFalse(missing["probe_result"]["file"]["accessible"])
+        ph = format_probe_hint(missing)
+        self.assertIn("禁止宣称上传成功", ph)
+
+        sess = probe_browser_resources(session_id="sess-not-exist-xyz")
+        self.assertIs(sess["probe_result"]["session"]["alive"], False)
+        self.assertFalse(sess["ok_to_reuse"])
 
 
 class BehaviorMemoryDBTests(TestCase):

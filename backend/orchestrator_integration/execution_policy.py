@@ -162,6 +162,41 @@ def light_channel_retry_allowed(attempt: int, channel: str) -> bool:
     return attempt < 1
 
 
+def resolve_dependent_skips(
+    steps: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """依赖失败时跳过后续步骤（FR02.2 / FR02.4）。
+
+    每个 step 形如:
+      {step_id, depends_on: [...], on_failure: stop_dependents|continue, status}
+    返回带 status=skipped 标注的副本。
+    """
+    by_id = {str(s.get("step_id") or ""): dict(s) for s in steps if s}
+    failed: set = set()
+    for sid, step in by_id.items():
+        st = str(step.get("status") or "")
+        if st in {"failed", "cancelled", "blocked"}:
+            failed.add(sid)
+
+    out: List[Dict[str, Any]] = []
+    for raw in steps:
+        step = dict(raw)
+        sid = str(step.get("step_id") or "")
+        deps = [str(d) for d in (step.get("depends_on") or []) if d]
+        on_fail = str(step.get("on_failure") or "stop_dependents")
+        cur = str(step.get("status") or "pending")
+        if cur in {"succeeded", "failed", "cancelled", "blocked", "skipped"}:
+            out.append(step)
+            continue
+        blocked_by = [d for d in deps if d in failed]
+        if blocked_by and on_fail == "stop_dependents":
+            step["status"] = "skipped"
+            step["skip_reason"] = f"dependency_failed:{','.join(blocked_by)}"
+            failed.add(sid)
+        out.append(step)
+    return out
+
+
 def evaluate_browser_checkpoints(joined: str) -> Dict[str, Any]:
     """浏览器上传/加购逐项验收（FR03.5 / FR03.6）。"""
     text = joined or ""

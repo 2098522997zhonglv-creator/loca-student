@@ -63,6 +63,14 @@
         <img :src="floatingToolImageSrc" :alt="pageText.toolScreenshot" class="floating-panel-img" />
       </div>
 
+      <!-- FR10：任务阶段进度 -->
+      <TaskStageBar
+        :task-status="activeTaskStatus"
+        :current-stage="activeCurrentStage"
+        :stage-plan="activeStagePlan"
+        :acceptance="activeAcceptance"
+      />
+
       <!-- ⭐ HITL 工具审批卡片（输入框上方） -->
       <ToolApprovalCard
         :visible="toolApprovalDialogVisible"
@@ -191,6 +199,7 @@ import ChatInput from '../components/ChatInput.vue';
 import SystemPromptModal from '../components/SystemPromptModal.vue';
 import ToolApprovalCard from '../components/ToolApprovalCard.vue';
 import ToolApprovalSettingsModal from '../components/ToolApprovalSettingsModal.vue';
+import TaskStageBar from '../components/TaskStageBar.vue';
 import type { InterruptEvent } from '../components/ToolApprovalCard.vue';
 
 const { isEnglish } = useAppI18n();
@@ -1972,6 +1981,14 @@ const handleSendMessage = async (data: {
     await handleNormalMessage(requestData, message);
   }
 };
+
+const activeStream = computed(() =>
+  sessionId.value ? activeStreams.value[sessionId.value] : null
+);
+const activeTaskStatus = computed(() => activeStream.value?.taskStatus || '');
+const activeCurrentStage = computed(() => activeStream.value?.currentStage || '');
+const activeStagePlan = computed(() => activeStream.value?.stagePlan || []);
+const activeAcceptance = computed(() => activeStream.value?.acceptance || null);
 
 // 计算用于显示的最终消息列表
 const displayedMessages = computed(() => {

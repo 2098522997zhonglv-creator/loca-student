@@ -615,15 +615,78 @@ def _finalize_skill_result(
                 tr.data["artifacts"] = artifacts
                 tr.evidence = dict(tr.evidence or {})
                 tr.evidence["artifact_count"] = len(artifacts)
-            # 记录到任务立项，供运行时验收
+            # 记录到任务立项，供运行时验收；并落库 AgentStep
             try:
                 from orchestrator_integration.telemetry_context import (
                     get_telemetry_context,
                 )
 
-                commission = get_telemetry_context().commission
+                ctx = get_telemetry_context()
+                commission = ctx.commission
                 if commission is not None:
                     commission.last_tool_results.append(tr.to_tool_text())
+                    if len(commission.last_tool_results) > 20:
+                        commission.last_tool_results = commission.last_tool_results[
+                            -20:
+                        ]
+                if ctx.runtime_task_id:
+                    try:
+                        from orchestrator_integration.agent_runtime import (
+                            record_step_result,
+                        )
+                        from orchestrator_integration.models import AgentTask
+
+                        task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+                        if task is not None:
+                            step_summary = tr.summary or (
+                                compact[:500]
+                                if isinstance(compact, str)
+                                else str(compact)[:500]
+                            )
+                            record_step_result(
+                                task,
+                                tool_name=skill_name or "execute_skill_script",
+                                tool_input={"command": (command or "")[:500]},
+                                structured=tr.to_dict(),
+                                summary=step_summary,
+                                stage_id=ctx.current_stage or "",
+                            )
+                    except Exception as step_err:
+                        logger.debug("record_step_result 失败: %s", step_err)
+                # FR06：失败时附加集中重试提示
+                if tr.status in {"failed", "unknown"}:
+                    try:
+                        from orchestrator_integration.retry_policy import (
+                            decide_retry,
+                            format_retry_hint,
+                        )
+                        from orchestrator_integration.task_commission import (
+                            CHANNEL_LIGHT,
+                        )
+
+                        channel = (
+                            commission.channel if commission else CHANNEL_LIGHT
+                        )
+                        light_n = (
+                            int(getattr(commission, "max_light_retries", 1) or 1)
+                            if commission
+                            else 1
+                        )
+                        err_blob = tr.summary or (
+                            compact if isinstance(compact, str) else str(compact)
+                        )
+                        decision = decide_retry(
+                            skill_name=skill_name or "",
+                            attempt=0,
+                            channel=channel,
+                            tool_retryable=tr.retryable,
+                            error_text=err_blob,
+                            commission_light_retries=light_n,
+                        )
+                        hint = format_retry_hint(decision)
+                        return tr.to_tool_text() + f"\n\n[重试策略] {hint}"
+                    except Exception:
+                        pass
             except Exception:
                 pass
             return tr.to_tool_text()

@@ -97,6 +97,11 @@
       "side_effect": "write",
       "depends_on": [],
       "timeout_sec": 300,
+      "idempotent": false,
+      "retry_policy": "once",
+      "reconcile_action": "",
+      "validator": "browser_checkpoints",
+      "resource_keys": ["session_id", "cart_id", "order_sn"],
       "actions": {}
     },
     {
@@ -105,6 +110,9 @@
       "side_effect": "write",
       "depends_on": [],
       "timeout_sec": 300,
+      "idempotent": false,
+      "retry_policy": "once",
+      "resource_keys": ["session_id"],
       "actions": {}
     },
     {
@@ -113,6 +121,9 @@
       "side_effect": "write",
       "depends_on": [],
       "timeout_sec": 300,
+      "idempotent": false,
+      "retry_policy": "once",
+      "resource_keys": ["session_id"],
       "actions": {}
     },
     {

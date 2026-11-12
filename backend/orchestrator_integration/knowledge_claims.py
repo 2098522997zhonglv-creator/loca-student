@@ -78,3 +78,42 @@ def format_claim_for_prompt(claim: Dict[str, Any]) -> str:
         f"source={claim.get('source_doc') or '(未知)'} "
         f"warnings={';'.join(claim.get('warnings') or []) or '无'}"
     )
+
+
+def annotate_prefetch_chunk(
+    *,
+    content: str,
+    source: str = "",
+    score: float = 0.0,
+    index: int = 1,
+) -> str:
+    """给预检索片段附加适用性标签，避免把示例订单号当成本次结果。"""
+    claim = classify_kb_claim(text=content or "", source_doc=source or "")
+    header = (
+        f"[预检索{index}] (相似度 {score * 100:.1f}%, 来源: {source or '未知来源'}, "
+        f"claim_type={claim['claim_type']})"
+    )
+    notes = []
+    if claim.get("warnings"):
+        notes.append("⚠ " + "；".join(claim["warnings"]))
+    if claim.get("sample_order_sns"):
+        notes.append(
+            "⚠ 片段含示例订单号 "
+            + ",".join(claim["sample_order_sns"])
+            + " —— 不得当作本次执行结果"
+        )
+    if claim["claim_type"] == "inference":
+        notes.append("⚠ 此为推断/适用性待核验，交付时须标明非文档原文断言")
+    body = content or ""
+    if notes:
+        return header + "\n" + "\n".join(notes) + "\n" + body
+    return header + "\n" + body
+
+
+def kb_applicability_footer() -> str:
+    return (
+        "\n\n## 知识适用性约束\n"
+        "- 文档陈述 ≠ 当前环境事实；含「仅/只有/不支持」的环境断言须核对目标商品。\n"
+        "- 知识库订单号/截图示例不得当作本次执行产物。\n"
+        "- 其他商品观察不能替代目标 URL/SKU 验证。\n"
+    )

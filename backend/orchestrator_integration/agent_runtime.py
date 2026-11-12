@@ -269,16 +269,29 @@ def record_step_result(
     summary: str = "",
     stage_id: str = "",
 ) -> Any:
-    from orchestrator_integration.models import AgentStep
+    from orchestrator_integration.models import AgentStep, AgentTask
 
     step_number = (task.current_step or 0) + 1
     status = structured.get("status") or "succeeded"
+    status_map = {
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "skipped": "skipped",
+        "cancelled": "cancelled",
+        "running": "running",
+        "pending": "pending",
+        "unknown": "unknown",
+        "needs_confirmation": "awaiting_approval",
+    }
+    step_status = status_map.get(str(status), "unknown")
+    if step_status not in dict(AgentStep.STATUS_CHOICES):
+        step_status = "unknown"
     step = AgentStep.objects.create(
         task=task,
         step_number=step_number,
         step_id=structured.get("operation_id") or f"step-{step_number}",
         stage_id=stage_id or task.current_stage or "",
-        status=status if status in dict(AgentStep.STATUS_CHOICES) else "succeeded",
+        status=step_status,
         tool_name=tool_name or "",
         tool_input=tool_input if isinstance(tool_input, dict) else {"raw": tool_input},
         tool_output_summary=(summary or structured.get("summary") or "")[:2000],
@@ -289,6 +302,11 @@ def record_step_result(
         duration_ms=int(structured.get("duration_ms") or 0),
         param_fingerprint=fingerprint_payload(tool_input),
     )
+    AgentTask.objects.filter(pk=task.pk).update(
+        current_step=step_number,
+        updated_at=timezone.now(),
+    )
+    task.current_step = step_number
     append_event(
         task,
         "step_result",
@@ -297,6 +315,7 @@ def record_step_result(
         payload={
             "tool_name": tool_name,
             "status": step.status,
+            "stage": stage_id or task.current_stage or "",
             "resource_type": structured.get("resource_type"),
             "resource_id": structured.get("resource_id"),
             "execution_method": structured.get("execution_method"),
@@ -386,6 +405,7 @@ def probe_browser_resources(
         "file_ref": file_path or "",
         "observed_at": observed_at,
         "probe_result": {},
+        "ok_to_reuse": False,
     }
     if file_path:
         exists = os.path.isfile(file_path)
@@ -395,14 +415,82 @@ def probe_browser_resources(
             "size": size,
             "format": os.path.splitext(file_path)[1].lower(),
         }
+        if not exists:
+            result["probe_result"]["file"]["note"] = "file_missing_do_not_claim_upload"
     if session_id:
-        # 进程内无法证明远端浏览器存活时标记 unchecked
+        alive = None
+        note = "unchecked_until_playwright_ping"
+        try:
+            from orchestrator_integration.builtin_tools.skill_tools import (
+                _get_playwright_session_manager,
+            )
+
+            mgr = _get_playwright_session_manager()
+            with mgr._lock:
+                entry = mgr._entries.get(session_id)
+                if entry is None:
+                    alive = False
+                    note = "session_not_in_process_memory"
+                else:
+                    proc = getattr(entry, "proc", None)
+                    running = bool(
+                        proc
+                        and getattr(proc, "_proc", None) is not None
+                        and getattr(proc._proc, "poll", lambda: 0)() is None
+                    )
+                    alive = running
+                    note = "alive_in_manager" if running else "process_exited"
+        except Exception as exc:
+            alive = None
+            note = f"probe_error:{type(exc).__name__}"
         result["probe_result"]["session"] = {
             "claimed_id": session_id,
-            "alive": None,
-            "note": "unchecked_until_playwright_ping",
+            "alive": alive,
+            "note": note,
         }
+        result["ok_to_reuse"] = alive is True
+    elif file_path:
+        result["ok_to_reuse"] = bool(
+            (result["probe_result"].get("file") or {}).get("accessible")
+        )
     return result
+
+
+def format_probe_hint(probe: Dict[str, Any]) -> str:
+    """把探测结果写成提示，禁止在探测失败时宣称复用成功。"""
+    if not probe:
+        return ""
+    lines = ["# 资源探测（FR04.5）"]
+    sess = (probe.get("probe_result") or {}).get("session") or {}
+    file_info = (probe.get("probe_result") or {}).get("file") or {}
+    if sess:
+        alive = sess.get("alive")
+        if alive is True:
+            lines.append(
+                f"- session_id={sess.get('claimed_id')} 进程内存活，可继续复用。"
+            )
+        elif alive is False:
+            lines.append(
+                f"- session_id={sess.get('claimed_id')} 不可用（{sess.get('note')}）："
+                "禁止宣称复用成功，须重新开会话。"
+            )
+        else:
+            lines.append(
+                f"- session_id={sess.get('claimed_id')} 未确认存活（{sess.get('note')}）："
+                "先探测/重建，勿直接当作已打开页面。"
+            )
+    if file_info:
+        if file_info.get("accessible"):
+            lines.append(
+                f"- 文件可访问 size={file_info.get('size')} format={file_info.get('format')}"
+            )
+        else:
+            lines.append(
+                f"- 文件不可访问（{file_info.get('note') or 'missing'}）："
+                "禁止宣称上传成功。"
+            )
+    lines.append(f"- observed_at={probe.get('observed_at')}")
+    return "\n".join(lines)
 
 
 def _extract_url(text: str) -> str:

@@ -267,6 +267,14 @@ def _prefetch_knowledge_context(
         if results:
             parts = []
             scored_chunks = []
+            try:
+                from orchestrator_integration.knowledge_claims import (
+                    annotate_prefetch_chunk,
+                    kb_applicability_footer,
+                )
+            except Exception:
+                annotate_prefetch_chunk = None  # type: ignore
+                kb_applicability_footer = lambda: ""  # noqa: E731
             for i, item in enumerate(results[:top_k], 1):
                 content = (item.get("content") or "").strip()
                 if not content:
@@ -274,9 +282,16 @@ def _prefetch_knowledge_context(
                 score = float(item.get("similarity_score") or 0.0)
                 meta = item.get("metadata") or {}
                 source = meta.get("source") or meta.get("title") or "未知来源"
-                parts.append(
-                    f"[预检索{i}] (相似度 {score * 100:.1f}%, 来源: {source})\n{content}"
-                )
+                if annotate_prefetch_chunk:
+                    parts.append(
+                        annotate_prefetch_chunk(
+                            content=content, source=source, score=score, index=i
+                        )
+                    )
+                else:
+                    parts.append(
+                        f"[预检索{i}] (相似度 {score * 100:.1f}%, 来源: {source})\n{content}"
+                    )
                 scored_chunks.append((i, item))
             if parts:
                 conflict = _build_prefetch_conflict_note(scored_chunks)
@@ -286,6 +301,7 @@ def _prefetch_knowledge_context(
                     + "\n\n"
                     + conflict
                     + _CITATION_HINT
+                    + kb_applicability_footer()
                     + "\n\n（如需更多资料，请继续调用 knowledge_search）"
                 )
 
@@ -1380,6 +1396,22 @@ class AgentLoopStreamAPIView(View):
                 decision=_early_decision,
                 kb_policy=_early_kb_policy,
             )
+            # FR08：尽早生成阶段计划，用于按阶段挂载工具
+            from orchestrator_integration.stage_plan import (
+                build_stage_plan,
+                format_stage_plan_hint,
+                stage_mount_policy,
+            )
+
+            _stage_specs = build_stage_plan(
+                user_message,
+                _early_decision,
+                playbook_id=active_playbook.playbook_id if active_playbook else "",
+            )
+            _current_stage_id = (
+                _stage_specs[0].stage_id if _stage_specs else ""
+            )
+            _stage_mount = stage_mount_policy(_stage_specs, _current_stage_id)
             specialist_spec, specialist_hint_text, specialist_allow = (
                 run_specialist_prep(skill_zone, user_message)
             )
@@ -1395,6 +1427,11 @@ class AgentLoopStreamAPIView(View):
                 skill_allowlist = skill_allowlist & specialist_allow
             elif specialist_allow is not None:
                 skill_allowlist = specialist_allow
+            # 复合任务：与当前阶段 Skill 能力求交（保留元工具路径）
+            if _stage_mount.get("restrict") and skill_allowlist is not None:
+                stage_skills = set(_stage_mount.get("skill_names") or [])
+                if stage_skills:
+                    skill_allowlist = skill_allowlist & stage_skills or skill_allowlist
 
             # 短路轮：去掉知识库工具，避免预检索干扰极速路径
             if task_commission.short_circuit and tools:
@@ -1421,6 +1458,15 @@ class AgentLoopStreamAPIView(View):
                 include_meta_tools=mount_execute,
             )
             tools.extend(builtin_tools)
+            # FR08：按阶段裁剪检索类工具（Skill/元工具由 allowlist 控制，此处只关 knowledge_search）
+            if _stage_mount.get("restrict"):
+                allowed_builtins = set(_stage_mount.get("builtin_tools") or [])
+                if "knowledge_search" not in allowed_builtins:
+                    tools = [
+                        t
+                        for t in tools
+                        if getattr(t, "name", "") != "knowledge_search"
+                    ]
             logger.info(
                 "AgentLoopStreamAPI: Added %s builtin tools zone=%s allow_execute=%s "
                 "allowlist=%s task=%s short_circuit=%s specialist=%s%s",
@@ -1461,6 +1507,48 @@ class AgentLoopStreamAPIView(View):
                 intent_hint = f"{intent_hint}\n\n{pb_hint}" if intent_hint else pb_hint
             ch = commission_hint(task_commission)
             intent_hint = f"{intent_hint}\n\n{ch}" if intent_hint else ch
+            stage_hint = format_stage_plan_hint(_stage_specs, _current_stage_id)
+            if stage_hint:
+                intent_hint = (
+                    f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
+                )
+            # FR04.5：继续/复用 session 时先探测，禁止未探测宣称复用成功
+            _probe_hint = ""
+            if any(
+                k in (user_message or "")
+                for k in ("继续", "复用", "session_id", "接着")
+            ):
+                try:
+                    import re as _re_probe
+
+                    from orchestrator_integration.agent_runtime import (
+                        format_probe_hint,
+                        probe_browser_resources,
+                    )
+
+                    sid_m = _re_probe.search(
+                        r"session[_-]?id[=:\s]+([A-Za-z0-9_-]+)",
+                        user_message or "",
+                        _re_probe.I,
+                    )
+                    path_m = _re_probe.search(
+                        r"(/[^\s]+\.(?:png|jpe?g|webp|gif|pdf))",
+                        user_message or "",
+                        _re_probe.I,
+                    )
+                    probe = probe_browser_resources(
+                        session_id=sid_m.group(1) if sid_m else "",
+                        file_path=path_m.group(1) if path_m else "",
+                    )
+                    _probe_hint = format_probe_hint(probe)
+                    if _probe_hint:
+                        intent_hint = (
+                            f"{intent_hint}\n\n{_probe_hint}"
+                            if intent_hint
+                            else _probe_hint
+                        )
+                except Exception as probe_err:
+                    logger.debug("resource probe skipped: %s", probe_err)
             if specialist_hint_text:
                 intent_hint = (
                     f"{intent_hint}\n\n{specialist_hint_text}"
@@ -1484,6 +1572,7 @@ class AgentLoopStreamAPIView(View):
                     granted_skills=set(skill_allowlist or []),
                     short_circuit=task_commission.short_circuit,
                     draft_writes=task_commission.draft_writes,
+                    current_stage=_current_stage_id,
                 )
             )
             try:
@@ -1550,24 +1639,15 @@ class AgentLoopStreamAPIView(View):
             runtime_task = None
             try:
                 from orchestrator_integration.agent_runtime import (
-                    append_event_async,
                     create_or_resume_task_async,
                 )
-                from orchestrator_integration.stage_plan import (
-                    build_stage_plan,
-                    infer_auth_scope,
+                from orchestrator_integration.stage_plan import infer_auth_scope
+                from orchestrator_integration.telemetry_context import (
+                    get_telemetry_context,
+                    set_telemetry_context,
                 )
 
-                stages = [
-                    s.to_dict()
-                    for s in build_stage_plan(
-                        user_message,
-                        intent_decision,
-                        playbook_id=active_playbook.playbook_id
-                        if active_playbook
-                        else "",
-                    )
-                ]
+                stages = [s.to_dict() for s in _stage_specs]
                 auth_scope = infer_auth_scope(user_message)
                 runtime_task = await create_or_resume_task_async(
                     session=chat_session,
@@ -1578,16 +1658,28 @@ class AgentLoopStreamAPIView(View):
                     auth_scope=auth_scope,
                     stage_plan=stages,
                 )
-                started_evt = await append_event_async(
-                    runtime_task,
-                    "task_started",
-                    status="running",
-                    payload={
-                        "stage": runtime_task.current_stage,
-                        "auth_scope": auth_scope,
-                    },
+                # create_or_resume_task 已写入 task_started；此处只向客户端推送，避免重复落库
+                yield create_sse_data(
+                    {
+                        "type": "task_started",
+                        "task_id": runtime_task.public_task_id
+                        or str(runtime_task.id),
+                        "status": "running",
+                        "payload": {
+                            "stage": runtime_task.current_stage,
+                            "stage_plan": stages,
+                            "auth_scope": auth_scope,
+                        },
+                    }
                 )
-                yield create_sse_data(started_evt)
+                # 回填 runtime_task_id，供工具结果落库 AgentStep
+                try:
+                    ctx = get_telemetry_context()
+                    ctx.runtime_task_id = int(runtime_task.pk)
+                    ctx.current_stage = runtime_task.current_stage or _current_stage_id
+                    set_telemetry_context(ctx)
+                except Exception:
+                    pass
             except Exception as rt_err:
                 logger.warning(
                     "AgentLoopStreamAPI: runtime task create failed: %s", rt_err

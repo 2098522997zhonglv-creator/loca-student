@@ -63,6 +63,7 @@ interface StreamState {
   /** FR10：任务阶段与验收状态 */
   taskStatus?: string;
   currentStage?: string;
+  stagePlan?: Array<{ stage_id: string; goal?: string; acceptance?: string }>;
   acceptance?: Record<string, unknown>;
   taskEvents?: Array<Record<string, unknown>>;
 }
@@ -768,24 +769,53 @@ export async function sendChatMessageStream(
             (parsed.type === 'task_started' ||
               parsed.type === 'task_completed' ||
               parsed.type === 'task_blocked' ||
-              parsed.type === 'task_cancelling') &&
+              parsed.type === 'task_cancelling' ||
+              parsed.type === 'step_result' ||
+              parsed.type === 'stage_changed') &&
             streamSessionId &&
             activeStreams.value[streamSessionId]
           ) {
             const stream = activeStreams.value[streamSessionId];
             stream.taskId = parsed.task_id || stream.taskId;
-            stream.taskStatus = parsed.status || parsed.type;
+            if (
+              parsed.type === 'task_started' ||
+              parsed.type === 'task_completed' ||
+              parsed.type === 'task_blocked' ||
+              parsed.type === 'task_cancelling'
+            ) {
+              stream.taskStatus = parsed.status || parsed.type;
+            }
             if (parsed.payload?.stage) {
               stream.currentStage = String(parsed.payload.stage);
             }
+            const plan = parsed.payload?.stage_plan;
+            if (Array.isArray(plan) && plan.length) {
+              stream.stagePlan = plan as Array<{
+                stage_id: string;
+                goal?: string;
+                acceptance?: string;
+              }>;
+            }
             if (parsed.acceptance) {
               stream.acceptance = parsed.acceptance as Record<string, unknown>;
+            } else if (parsed.payload?.acceptance) {
+              stream.acceptance = parsed.payload.acceptance as Record<
+                string,
+                unknown
+              >;
             }
             stream.taskEvents = [...(stream.taskEvents || []), parsed];
             if (parsed.type === 'task_blocked' || parsed.type === 'task_completed') {
               const reasons = Array.isArray(parsed.acceptance?.reasons)
                 ? (parsed.acceptance.reasons as string[]).join('；')
-                : '';
+                : Array.isArray(
+                      (parsed.payload?.acceptance as { reasons?: string[] } | undefined)
+                        ?.reasons
+                    )
+                  ? (
+                      parsed.payload.acceptance as { reasons: string[] }
+                    ).reasons.join('；')
+                  : '';
               const label =
                 parsed.type === 'task_completed'
                   ? '任务已验收完成'
