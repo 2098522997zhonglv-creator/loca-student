@@ -277,13 +277,23 @@ def consume_approval(
             row.status = "expired"
             row.save(update_fields=["status", "updated_at"])
             return {"ok": False, "error_code": "approval_expired"}
-        # 优先用调用方指纹；否则用内存 pending 指纹比对（AC11）
+        # R31：每次消费重新计算保存参数指纹，并与批准版本比较
+        from orchestrator_integration.agent_runtime import fingerprint_payload
+
+        if row.param_fingerprint and isinstance(row.action_args, dict):
+            candidates = {
+                fingerprint_payload(row.action_args),
+            }
+            if "pending" in row.action_args:
+                candidates.add(fingerprint_payload(row.action_args.get("pending")))
+            # 允许历史落库：指纹可能针对 pending 或整包 action_args
+            if candidates and row.param_fingerprint not in candidates:
+                return {"ok": False, "error_code": "param_fingerprint_mismatch"}
+
         fp = expected_fingerprint
         if not fp:
             mem = get_write_confirm_store().get(interrupt_id)
             if isinstance(mem, dict) and mem.get("pending") is not None:
-                from orchestrator_integration.agent_runtime import fingerprint_payload
-
                 fp = fingerprint_payload(mem.get("pending"))
         if fp and row.param_fingerprint and fp != row.param_fingerprint:
             return {"ok": False, "error_code": "param_fingerprint_mismatch"}

@@ -1467,7 +1467,19 @@ class AgentLoopStreamAPIView(View):
                     skill_allowlist = skill_allowlist & stage_skills or skill_allowlist
 
             # 短路轮：去掉知识库工具，避免预检索干扰极速路径
-            if task_commission.short_circuit and tools:
+            # R17：当前阶段需要 knowledge_search 时不得因 short_circuit 裁掉
+            stage_needs_kb = False
+            try:
+                stage_needs_kb = (
+                    "knowledge_search" in set(_stage_mount.get("builtin_tools") or [])
+                    or str(_current_stage_id or "") in {"kb_research", "research"}
+                    or "knowledge" in set(_stage_mount.get("skill_names") or [])
+                    or "knowledge_search"
+                    in set(_stage_mount.get("skill_names") or [])
+                )
+            except Exception:
+                stage_needs_kb = False
+            if task_commission.short_circuit and tools and not stage_needs_kb:
                 tools = [
                     t
                     for t in tools
@@ -1478,6 +1490,13 @@ class AgentLoopStreamAPIView(View):
                     "playbook=%s channel=%s",
                     task_commission.playbook_id,
                     task_commission.channel,
+                )
+            elif task_commission.short_circuit and stage_needs_kb:
+                logger.info(
+                    "AgentLoopStreamAPI: 阶段需要知识检索，保留 knowledge_search "
+                    "stage=%s playbook=%s",
+                    _current_stage_id,
+                    task_commission.playbook_id,
                 )
 
             builtin_tools = get_builtin_tools(
@@ -1671,6 +1690,28 @@ class AgentLoopStreamAPIView(View):
                     auth_scope=auth_scope,
                     stage_plan=stages,
                 )
+                # R15：未获租约不得构造执行器/派发动作
+                if (
+                    runtime_task is not None
+                    and getattr(runtime_task, "lease_owner", "")
+                    != agent_runtime.lease_owner
+                ):
+                    yield create_sse_data(
+                        {
+                            "type": "task_status",
+                            "error_code": "lease_held",
+                            "task_id": runtime_task.public_task_id
+                            or str(runtime_task.id),
+                            "status": runtime_task.status,
+                            "message": "任务正由其他执行者处理，已返回现有状态",
+                            "payload": {
+                                "lease_owner": runtime_task.lease_owner,
+                                "acquired": False,
+                            },
+                        }
+                    )
+                    yield create_sse_data({"type": "complete", "status": "lease_held"})
+                    return
                 runtime_session = RuntimeSession(
                     runtime=agent_runtime,
                     commission=task_commission,
@@ -2113,6 +2154,24 @@ class AgentLoopStreamAPIView(View):
                                             )
 
                                     interrupt_detected = True
+                                    # R14：先 park/释放租约，再对客户端发布可操作 interrupt
+                                    try:
+                                        from orchestrator_integration.agent_runtime import (
+                                            park_for_approval,
+                                        )
+
+                                        if agent_runtime and agent_runtime.task is not None:
+                                            await sync_to_async(park_for_approval)(
+                                                agent_runtime.task,
+                                                interrupt_id=str(
+                                                    interrupt_id or id(interrupt_info)
+                                                ),
+                                            )
+                                    except Exception as park_err:
+                                        logger.warning(
+                                            "native HITL park_for_approval failed: %s",
+                                            park_err,
+                                        )
                                     yield create_sse_data(
                                         {
                                             "type": "interrupt",
@@ -2184,34 +2243,77 @@ class AgentLoopStreamAPIView(View):
                                                         thread_id=thread_id,
                                                     )
                                                 )
-                                                for event in events:
-                                                    if event.get("type") == "interrupt":
-                                                        interrupt_detected = True
-                                                    yield create_sse_data(event)
                                                 if write_confirm:
                                                     logger.info(
                                                         "AgentLoopStreamAPI: Write confirm interrupt emitted"
                                                     )
-                                                    # FLOW01：审批等待时释放租约，供 resume 接管
+                                                    # R12/R14：异步边界落库成功并 park 后再发布 interrupt
                                                     try:
                                                         from orchestrator_integration.agent_runtime import (
                                                             park_for_approval,
                                                         )
+                                                        from orchestrator_integration.write_confirmation import (
+                                                            _persist_approval_request,
+                                                        )
 
+                                                        interrupt_evt = next(
+                                                            (
+                                                                e
+                                                                for e in events
+                                                                if e.get("type")
+                                                                == "interrupt"
+                                                            ),
+                                                            {},
+                                                        )
+                                                        pending = (
+                                                            (interrupt_evt.get("action_requests") or [{}])[0]
+                                                            .get("args", {})
+                                                            .get("pending")
+                                                            or {}
+                                                        )
+                                                        await sync_to_async(
+                                                            _persist_approval_request
+                                                        )(
+                                                            interrupt_id=str(
+                                                                interrupt_evt.get(
+                                                                    "interrupt_id"
+                                                                )
+                                                                or ""
+                                                            ),
+                                                            session_id=session_id,
+                                                            tool_name=tool_name
+                                                            or "execute_skill_script",
+                                                            pending=pending
+                                                            if isinstance(pending, dict)
+                                                            else {},
+                                                            summary=str(
+                                                                (
+                                                                    interrupt_evt.get(
+                                                                        "action_requests"
+                                                                    )
+                                                                    or [{}]
+                                                                )[0]
+                                                                .get("args", {})
+                                                                .get("summary")
+                                                                or ""
+                                                            ),
+                                                            mode=str(
+                                                                (
+                                                                    interrupt_evt.get(
+                                                                        "action_requests"
+                                                                    )
+                                                                    or [{}]
+                                                                )[0]
+                                                                .get("args", {})
+                                                                .get("mode")
+                                                                or "confirm"
+                                                            ),
+                                                        )
                                                         if (
                                                             agent_runtime
                                                             and agent_runtime.task
                                                             is not None
                                                         ):
-                                                            interrupt_evt = next(
-                                                                (
-                                                                    e
-                                                                    for e in events
-                                                                    if e.get("type")
-                                                                    == "interrupt"
-                                                                ),
-                                                                {},
-                                                            )
                                                             await sync_to_async(
                                                                 park_for_approval
                                                             )(
@@ -2225,9 +2327,27 @@ class AgentLoopStreamAPIView(View):
                                                             )
                                                     except Exception as park_err:
                                                         logger.warning(
-                                                            "park_for_approval failed: %s",
+                                                            "write confirm persist/park failed: %s",
                                                             park_err,
                                                         )
+                                                        # 落库失败则阻断发布审批卡
+                                                        events = [
+                                                            e
+                                                            for e in events
+                                                            if e.get("type")
+                                                            != "interrupt"
+                                                        ]
+                                                        events.append(
+                                                            {
+                                                                "type": "error",
+                                                                "error_code": "approval_persist_failed",
+                                                                "message": "审批落库失败，已阻断写入确认",
+                                                            }
+                                                        )
+                                                for event in events:
+                                                    if event.get("type") == "interrupt":
+                                                        interrupt_detected = True
+                                                    yield create_sse_data(event)
                                                 await sync_to_async(
                                                     _record_tool_behavior_safe
                                                 )(
@@ -2984,22 +3104,20 @@ class AgentTaskSnapshotAPIView(View):
                     )
                 if task is None:
                     return None
+                # 客户端 project_id 仅校验；权限按任务绑定项目成员资格
+                client_project = request.GET.get("project_id")
                 access = assert_task_access(
-                    task, user_id=user.id, session_id=session_id or ""
+                    task,
+                    user_id=user.id,
+                    project_id=int(client_project) if client_project else None,
+                    session_id=session_id or "",
                 )
                 if not access.get("ok"):
                     return "forbidden"
-                snap = task_snapshot(task)
-                if after_event_id:
-                    after = TaskEvent.objects.filter(
-                        event_id=after_event_id, task=task
-                    ).first()
-                    if after:
-                        snap["events"] = [
-                            e
-                            for e in snap.get("events") or []
-                            if (e.get("sequence") or 0) > after.sequence
-                        ]
+                # R19：在数据库按游标过滤后再分页
+                snap = task_snapshot(
+                    task, after_event_id=after_event_id or "", limit=200
+                )
                 return snap
 
             data = await sync_to_async(_load)()
@@ -3169,6 +3287,15 @@ class AgentLoopResumeAPIView(View):
                             or "存在未核对副作用，禁止盲目重放",
                         }
                     )
+                    # R10：核对完成前不得继续 resume_start / 消费业务动作
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": "blocked",
+                            "error_code": "must_reconcile",
+                        }
+                    )
+                    return
         except Exception as lease_err:
             logger.warning("AgentLoopResumeAPI: lease/preflight failed: %s", lease_err)
 
@@ -3341,12 +3468,21 @@ class AgentLoopResumeAPIView(View):
                         get_builtin_tools,
                     )
 
+                    # R13：一次批准不得变成整轮全局写入布尔授权；
+                    # 精确动作由 resume 注入消息 + user_confirmed 执行。
+                    resume_project_id = int(project_id) if project_id else 0
+                    if (
+                        not resume_project_id
+                        and runtime_task is not None
+                        and getattr(runtime_task, "project_id", None)
+                    ):
+                        resume_project_id = int(runtime_task.project_id)
                     builtin_tools = get_builtin_tools(
                         user_id=user.id,
-                        project_id=int(project_id) if project_id else 0,
+                        project_id=resume_project_id,
                         test_case_id=None,
                         chat_session_id=session_id,
-                        user_write_approved=decision_type == "approve",
+                        user_write_approved=False,
                     )
                     tools.extend(builtin_tools)
                     logger.info(
@@ -3389,9 +3525,28 @@ class AgentLoopResumeAPIView(View):
                     middleware=middleware,
                 )
 
+                # R18：从任务记录补齐 project，复用首次 checkpoint 线程
+                resume_pid = project_id
+                if (not resume_pid) and runtime_task is not None:
+                    resume_pid = getattr(runtime_task, "project_id", None) or ""
                 thread_id = (
-                    f"{user.id}_{project_id}_{session_id}" if project_id else session_id
+                    f"{user.id}_{resume_pid}_{session_id}"
+                    if resume_pid
+                    else session_id
                 )
+                if runtime_task is not None:
+                    try:
+                        scope = dict(runtime_task.task_scope or {})
+                        if scope.get("checkpoint_ref"):
+                            thread_id = str(scope.get("checkpoint_ref"))
+                        else:
+                            scope["checkpoint_ref"] = thread_id
+                            runtime_task.task_scope = scope
+                            await sync_to_async(runtime_task.save)(
+                                update_fields=["task_scope", "updated_at"]
+                            )
+                    except Exception:
+                        pass
                 config = {
                     "configurable": {"thread_id": thread_id},
                     "recursion_limit": 1000,
@@ -3766,13 +3921,78 @@ class AgentLoopResumeAPIView(View):
                         "AgentLoopResumeAPI: New interrupt detected after resume"
                     )
                 else:
-                    yield create_sse_data(
-                        {
-                            "type": "complete",
-                            "total_steps": step_count,
-                            "decision": decision_type,
-                        }
-                    )
+                    # R16：resume 与首次共用强制最终验收
+                    try:
+                        if agent_runtime and agent_runtime.task is not None:
+                            from orchestrator_integration.agent_loop_finalize import (
+                                RuntimeSession,
+                                finalize_task_acceptance,
+                            )
+
+                            resume_session = RuntimeSession(
+                                runtime=agent_runtime,
+                                commission=None,
+                                stage_specs=[],
+                                auth_scope=getattr(
+                                    agent_runtime.task, "auth_scope", None
+                                )
+                                or {},
+                            )
+                            # commission 缺失时用任务元数据构造最小收尾
+                            class _TmpCommission:
+                                pass
+
+                            tmp = _TmpCommission()
+                            tmp.post_condition = "resume_finalize"
+                            tmp.playbook_id = str(
+                                (agent_runtime.task.task_scope or {}).get(
+                                    "playbook_id"
+                                )
+                                or "browser_act"
+                            )
+                            tmp.last_tool_results = []
+                            tmp.task_id = (
+                                agent_runtime.task.public_task_id
+                                or str(agent_runtime.task.id)
+                            )
+                            resume_session.commission = tmp
+                            acceptance, fin_events = await sync_to_async(
+                                finalize_task_acceptance
+                            )(resume_session)
+                            for fe in fin_events:
+                                yield create_sse_data(fe)
+                            yield create_sse_data(
+                                {
+                                    "type": "complete",
+                                    "total_steps": step_count,
+                                    "decision": decision_type,
+                                    "status": (
+                                        "completed"
+                                        if acceptance.get("ok")
+                                        else "blocked"
+                                    ),
+                                    "acceptance": acceptance,
+                                }
+                            )
+                        else:
+                            yield create_sse_data(
+                                {
+                                    "type": "complete",
+                                    "total_steps": step_count,
+                                    "decision": decision_type,
+                                }
+                            )
+                    except Exception as fin_err:
+                        logger.warning(
+                            "AgentLoopResumeAPI: finalize failed: %s", fin_err
+                        )
+                        yield create_sse_data(
+                            {
+                                "type": "complete",
+                                "total_steps": step_count,
+                                "decision": decision_type,
+                            }
+                        )
 
                 yield "data: [DONE]\n\n"
 

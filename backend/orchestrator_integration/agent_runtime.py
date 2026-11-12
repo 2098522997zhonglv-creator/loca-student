@@ -283,7 +283,7 @@ def park_for_approval(task, *, interrupt_id: str = "") -> None:
 def assert_task_access(
     task, *, user_id: int, project_id: Optional[int] = None, session_id: str = ""
 ) -> Dict[str, Any]:
-    """归属校验（FR05.1）：客户端传入值只做一致性核对。"""
+    """归属校验（FR05.1）：用户/项目成员/任务归属统一入口（R25）。"""
     if task.user_id and int(task.user_id) != int(user_id):
         return {"ok": False, "error_code": "permission_denied"}
     if (
@@ -292,6 +292,23 @@ def assert_task_access(
         and int(task.project_id) != int(project_id)
     ):
         return {"ok": False, "error_code": "project_mismatch"}
+    # 任务绑定项目时，当前用户必须是项目成员（即便任务归属本人）
+    effective_project_id = task.project_id
+    if effective_project_id is not None:
+        try:
+            from projects.models import Project, ProjectMember
+
+            project = Project.objects.filter(pk=effective_project_id).first()
+            if project is not None:
+                is_creator = int(getattr(project, "creator_id", 0) or 0) == int(user_id)
+                is_member = ProjectMember.objects.filter(
+                    project_id=effective_project_id, user_id=user_id
+                ).exists()
+                if not is_creator and not is_member:
+                    return {"ok": False, "error_code": "project_membership_denied"}
+        except Exception:
+            # 项目模块不可用时不放宽：有 project_id 却无法核验则拒绝
+            return {"ok": False, "error_code": "project_membership_denied"}
     if session_id:
         try:
             sid = task.session.session_id
@@ -356,27 +373,35 @@ def consume_budget(
         max_retries = int(budget.get("max_retries", 3) or 3)
         max_duration = int(budget.get("max_duration_ms", 0) or 0)
         max_tokens = int(budget.get("max_tokens", 0) or 0)
+        # R21：实际已消耗量必须入账；超额时标记但仍写入 used_*，不能抹去花费
+        exceeded = ""
         if tool_steps and next_steps > max_steps:
-            return False, f"budget_tool_steps_exceeded:{next_steps}/{max_steps}"
-        if retries and next_retries > max_retries:
-            return False, f"budget_retries_exceeded:{next_retries}/{max_retries}"
-        if max_duration and duration_ms and next_duration > max_duration:
-            return False, f"budget_duration_exceeded:{next_duration}/{max_duration}"
-        if tokens and max_tokens and next_tokens > max_tokens:
-            return False, f"budget_tokens_exceeded:{next_tokens}/{max_tokens}"
+            exceeded = f"budget_tool_steps_exceeded:{next_steps}/{max_steps}"
+        elif retries and next_retries > max_retries:
+            exceeded = f"budget_retries_exceeded:{next_retries}/{max_retries}"
+        elif max_duration and duration_ms and next_duration > max_duration:
+            exceeded = f"budget_duration_exceeded:{next_duration}/{max_duration}"
+        elif tokens and max_tokens and next_tokens > max_tokens:
+            exceeded = f"budget_tokens_exceeded:{next_tokens}/{max_tokens}"
         budget["used_tool_steps"] = next_steps
         budget["used_retries"] = next_retries
         budget["used_tokens"] = next_tokens
         budget["used_duration_ms"] = next_duration
+        if exceeded:
+            budget["over_budget"] = True
+            budget["over_budget_reason"] = exceeded
         AgentTask.objects.filter(pk=row.pk, version=row.version).update(
             budget=budget,
-            current_step=next_steps,
+            current_step=next_steps if tool_steps else row.current_step,
             version=row.version + 1,
             updated_at=timezone.now(),
         )
         task.budget = budget
-        task.current_step = next_steps
+        if tool_steps:
+            task.current_step = next_steps
         task.version = row.version + 1
+        if exceeded:
+            return False, exceeded
         return True, "ok"
 
 
@@ -581,27 +606,65 @@ def record_step_result(
 
 
 def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
-    from orchestrator_integration.models import AgentTask
+    """终态条件更新：不可逆；完成事件唯一（R20）。"""
+    from orchestrator_integration.models import AgentTask, TaskEvent
 
     ok = bool(acceptance.get("ok"))
     status = "completed" if ok else "blocked"
-    AgentTask.objects.filter(pk=task.pk).update(
-        acceptance=acceptance or {},
-        status=status,
-        completed_at=timezone.now() if ok else None,
-        error_message="" if ok else "; ".join(acceptance.get("reasons") or [])[:2000],
-        updated_at=timezone.now(),
-    )
+    terminal = ("completed", "failed", "cancelled")
+    with transaction.atomic():
+        row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
+        if row is None:
+            return {"type": "error", "error_code": "task_missing"}
+        if row.status in terminal:
+            # 禁止迟到验收覆盖取消/失败/已完成
+            return {
+                "type": "task_status",
+                "status": row.status,
+                "task_id": row.public_task_id or str(row.id),
+                "ignored": True,
+                "error_code": "already_terminal",
+            }
+        if ok:
+            already = TaskEvent.objects.filter(
+                task=row, event_type="task_completed"
+            ).exists()
+            if already:
+                return {
+                    "type": "task_completed",
+                    "status": "completed",
+                    "task_id": row.public_task_id or str(row.id),
+                    "ignored": True,
+                    "error_code": "duplicate_completion",
+                }
+        AgentTask.objects.filter(pk=row.pk).exclude(status__in=terminal).update(
+            acceptance=acceptance or {},
+            status=status,
+            completed_at=timezone.now() if ok else None,
+            error_message=""
+            if ok
+            else "; ".join(acceptance.get("reasons") or [])[:2000],
+            updated_at=timezone.now(),
+            lease_owner="",
+            lease_expires_at=None,
+        )
+        task.status = status
+        task.acceptance = acceptance or {}
     evt = append_event(
         task,
         "task_completed" if ok else "task_blocked",
         status=status,
         payload={"acceptance": acceptance},
     )
+    # 统一时间字段
+    if "time" not in evt:
+        evt["time"] = timezone.now().isoformat()
     return evt
 
 
-def task_snapshot(task) -> Dict[str, Any]:
+def task_snapshot(
+    task, *, after_event_id: str = "", limit: int = 200
+) -> Dict[str, Any]:
     from orchestrator_integration.models import AgentStep, TaskEvent
 
     steps = list(
@@ -617,11 +680,31 @@ def task_snapshot(task) -> Dict[str, Any]:
             "evidence",
         )[:100]
     )
+    event_qs = TaskEvent.objects.filter(task=task).order_by("sequence")
+    after_seq = 0
+    if after_event_id:
+        after = (
+            TaskEvent.objects.filter(event_id=after_event_id, task=task)
+            .values_list("sequence", flat=True)
+            .first()
+        )
+        if after is not None:
+            after_seq = int(after)
+            event_qs = event_qs.filter(sequence__gt=after_seq)
+    total_after = event_qs.count()
     events = list(
-        TaskEvent.objects.filter(task=task).order_by("sequence").values(
-            "event_id", "sequence", "event_type", "status", "step_id", "payload", "created_at"
-        )[:200]
+        event_qs.values(
+            "event_id",
+            "sequence",
+            "event_type",
+            "status",
+            "step_id",
+            "payload",
+            "created_at",
+        )[: max(1, int(limit))]
     )
+    has_more = total_after > len(events)
+    next_cursor = events[-1]["event_id"] if events else after_event_id or ""
     return {
         "task_id": task.public_task_id or str(task.id),
         "status": task.status,
@@ -636,10 +719,13 @@ def task_snapshot(task) -> Dict[str, Any]:
         "facts": task.facts,
         "version": task.version,
         "steps": steps,
+        "has_more": has_more,
+        "next_cursor": next_cursor,
         "events": [
             {
                 **e,
                 "created_at": e["created_at"].isoformat() if e.get("created_at") else None,
+                "time": e["created_at"].isoformat() if e.get("created_at") else None,
             }
             for e in events
         ],
@@ -1045,17 +1131,22 @@ def _extract_url(text: str) -> str:
     return m.group(0) if m else ""
 
 
-def _redact(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _redact(payload: Any) -> Any:
+    """递归脱敏 dict/list/tuple（R27）。"""
     sensitive = ("api_key", "password", "token", "secret", "authorization")
-    out: Dict[str, Any] = {}
-    for k, v in (payload or {}).items():
-        if any(s in str(k).lower() for s in sensitive):
-            out[k] = "***"
-        elif isinstance(v, dict):
-            out[k] = _redact(v)
-        else:
-            out[k] = v
-    return out
+    if isinstance(payload, dict):
+        out: Dict[str, Any] = {}
+        for k, v in payload.items():
+            if any(s in str(k).lower() for s in sensitive):
+                out[k] = "***"
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(payload, list):
+        return [_redact(x) for x in payload]
+    if isinstance(payload, tuple):
+        return tuple(_redact(x) for x in payload)
+    return payload
 
 
 class AgentRuntime:
@@ -1156,6 +1247,7 @@ class AgentRuntime:
         if self.task is None:
             return {}
         # 多阶段：未到末阶段不得标 completed；推进只由 maybe_advance 负责（FLOW02）
+        # R11：刚进入末阶段但末阶段自身验收未通过时，也不得整任务 completed
         stages = self.task.stage_plan or []
         if len(stages) > 1 and acceptance.get("ok"):
             ids = [str(s.get("stage_id") or "") for s in stages if isinstance(s, dict)]
@@ -1172,6 +1264,36 @@ class AgentRuntime:
                     },
                     "deferred_completion": True,
                 }
+            if cur and ids and cur == ids[-1]:
+                last_verdict = stage_acceptance_heuristic(
+                    cur, list((acceptance.get("tool_results") or []))
+                )
+                # finalize 会把 tool_results 放进 acceptance 可选字段；否则再读任务步骤
+                if not acceptance.get("tool_results"):
+                    try:
+                        from orchestrator_integration.models import AgentStep
+
+                        recent = list(
+                            AgentStep.objects.filter(task=self.task, stage_id=cur)
+                            .order_by("-step_number")
+                            .values_list("tool_output_summary", flat=True)[:20]
+                        )
+                        last_verdict = stage_acceptance_heuristic(cur, recent)
+                    except Exception:
+                        last_verdict = {"ok": False, "reason": "last_stage_unproven"}
+                if not last_verdict.get("ok"):
+                    return {
+                        "type": "stage_changed",
+                        "status": "running",
+                        "payload": {
+                            "current_stage": cur,
+                            "advanced": False,
+                            "reason": "last_stage_pending_evidence",
+                            "verdict": last_verdict,
+                            "plan_version": self.task.plan_version,
+                        },
+                        "deferred_completion": True,
+                    }
         return apply_acceptance(self.task, acceptance)
 
     def cancel(self) -> Dict[str, Any]:
@@ -1216,7 +1338,8 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
     stage_events = TaskEvent.objects.filter(
         event_type="stage_changed", task_id__in=[t.id for t in recent]
     ).count()
-    telem = aggregate_telemetry(limit=2000)
+    # R26：遥测按用户过滤，与任务列表范围一致
+    telem = aggregate_telemetry(limit=2000, user_id=user_id)
     return {
         "tasks_sampled": len(recent),
         "status_counts": by_status,

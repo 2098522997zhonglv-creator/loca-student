@@ -122,6 +122,9 @@ def finalize_task_acceptance(
         auth_scope=auth_scope,
         target_url=target_url,
     )
+    # 供 Runtime.accept 绑定末阶段证据（R11）
+    acceptance = dict(acceptance)
+    acceptance["tool_results"] = tool_results
 
     evt_payload: Dict[str, Any] = {
         "type": "task_completed" if acceptance.get("ok") else "task_blocked",

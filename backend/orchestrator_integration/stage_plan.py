@@ -289,16 +289,25 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
         deny.append("submit_order")
     if deny_pay:
         deny.append("pay")
+    # R06：按动作局部语义；「不要支付」不得吞掉明确「提交订单」授权
+    def _action_locally_denied(action_terms: tuple[str, ...]) -> bool:
+        for term in action_terms:
+            for neg in ("不要", "禁止", "勿", "别", "不需要", "无需"):
+                if f"{neg}{term}" in text or f"{neg} {term}" in text:
+                    return True
+        return False
+
     if (
         not deny_order
-        and any(k in text for k in ("提交订单", "下单", "结算"))
-        and not any(k in text for k in ("不要", "禁止", "勿", "别"))
+        and any(k in text for k in ("提交订单", "下单", "结算", "拿 order_sn", "order_sn"))
+        and not _action_locally_denied(("提交订单", "下单", "结算"))
     ):
         allow.append("submit_order")
     if (
         not deny_pay
         and any(k in text for k in ("支付", "付款"))
-        and not any(k in text for k in ("不要", "禁止", "勿", "别", "不需要"))
+        and not _action_locally_denied(("支付", "付款"))
+        and not deny_pay
     ):
         allow.append("pay")
     # 只说加购/不要支付 → 默认不授权 submit_order

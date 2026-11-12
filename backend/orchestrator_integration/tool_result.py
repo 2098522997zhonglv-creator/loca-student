@@ -75,19 +75,131 @@ _ID_FIELD_RE = re.compile(
     r"(?!unknown\b|null\b|none\b|n/?a\b|undefined\b)([A-Za-z0-9][A-Za-z0-9_-]{2,})",
     re.I,
 )
+_ID_KEYS = (
+    "cart_id",
+    "cart_item_id",
+    "checkout_id",
+    "order_id",
+    "order_sn",
+    "case_id",
+    "testcase_id",
+    "execution_id",
+)
 _BUSINESS_REJECT_RE = re.compile(
-    r"余额不足|库存不足|权限不足|无权限|已存在|不存在|状态不允许|业务校验|"
-    r"business[_ ]?error|rejected by policy|permission denied",
+    r"余额不足|库存不足|权限不足|无权限|不存在|状态不允许|业务校验|"
+    r"business[_ ]?error|rejected by policy|permission denied|"
+    r"validation failed|invalid payload",
+    re.I,
+)
+# 「已存在」仅在缺少明确成功字段时作为拒绝兜底（R02）
+_EXISTS_REJECT_RE = re.compile(r"已存在|already exists", re.I)
+_SOURCE_URL_RE = re.compile(
+    r"(?:source_url|product_url|url)\s*[:=]\s*['\"]?(https?://\S+|/[^\s'\"]+)",
     re.I,
 )
 
 
-def extract_typed_identifiers(text: str) -> Dict[str, str]:
-    """从工具输出提取类型化业务标识（忽略 unknown/null）。"""
+def _try_parse_json_blob(text: str) -> Optional[Dict[str, Any]]:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(raw[start : end + 1])
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _walk_collect_ids(obj: Any, found: Dict[str, str], depth: int = 0) -> None:
+    if depth > 6 or obj is None:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = str(k).lower()
+            if key in _ID_KEYS and v not in (None, "", "unknown", "null", "none"):
+                found[key] = str(v)
+            elif key == "data" and isinstance(v, dict):
+                _walk_collect_ids(v, found, depth + 1)
+            else:
+                _walk_collect_ids(v, found, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj[:50]:
+            _walk_collect_ids(item, found, depth + 1)
+
+
+def _structured_business_status(payload: Dict[str, Any]) -> Optional[str]:
+    """尊重明确业务字段；返回 failed/succeeded/cancelled/skipped/unknown 或 None。"""
+    if not isinstance(payload, dict):
+        return None
+    # ToolResult 嵌套
+    nested = payload.get("data") if isinstance(payload.get("data"), dict) else None
+    for node in (payload, nested):
+        if not isinstance(node, dict):
+            continue
+        if "success" in node:
+            return "succeeded" if bool(node.get("success")) else "failed"
+        if "ok" in node and isinstance(node.get("ok"), bool):
+            return "succeeded" if node.get("ok") else "failed"
+        status = str(node.get("status") or "").strip().lower()
+        if status in {
+            "failed",
+            "error",
+            "rejected",
+            "business_rejected",
+        }:
+            return "failed"
+        if status in {"succeeded", "success", "ok", "completed"}:
+            return "succeeded"
+        if status in {"cancelled", "canceled"}:
+            return "cancelled"
+        if status in {"skipped"}:
+            return "skipped"
+        if status in {"unknown"}:
+            return "unknown"
+        if status == "needs_confirmation":
+            return "needs_confirmation"
+        code = node.get("code")
+        if code is not None and str(code).isdigit() and int(code) >= 400:
+            return "failed"
+        err = node.get("error")
+        if err not in (None, "", False, {}):
+            # 有明确 error 且无 success:true → 失败
+            if node.get("success") is not True and node.get("ok") is not True:
+                return "failed"
+    return None
+
+
+def extract_typed_identifiers(text: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """从工具输出提取类型化业务标识（忽略 unknown/null）；优先 JSON。"""
     found: Dict[str, str] = {}
+    if payload is not None:
+        _walk_collect_ids(payload, found)
     for m in _ID_FIELD_RE.finditer(text or ""):
-        found[m.group(1).lower()] = m.group(2)
+        found.setdefault(m.group(1).lower(), m.group(2))
     return found
+
+
+def extract_source_url(text: str, payload: Optional[Dict[str, Any]] = None) -> str:
+    if isinstance(payload, dict):
+        for key in ("source_url", "product_url", "url"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            data = payload.get("data")
+            if isinstance(data, dict):
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+    m = _SOURCE_URL_RE.search(text or "")
+    return m.group(1).rstrip(".,)") if m else ""
 
 
 def classify_skill_output(
@@ -102,28 +214,25 @@ def classify_skill_output(
     raw = (text or "").strip()
     op_id = new_operation_id()
     observed = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    parsed = _try_parse_json_blob(raw)
 
     # needs_confirmation JSON
-    if "needs_confirmation" in raw:
-        try:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start >= 0 and end > start:
-                data = json.loads(raw[start : end + 1])
-                if isinstance(data, dict) and data.get("status") == "needs_confirmation":
-                    return ToolResult(
-                        status="needs_confirmation",
-                        operation_id=op_id,
-                        data=data,
-                        error_code="needs_confirmation",
-                        retryable=False,
-                        evidence={"pending": data.get("pending")},
-                        duration_ms=duration_ms,
-                        summary=str(data.get("message") or "需要写入确认")[:500],
-                        observed_at=observed,
-                    )
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
+    if parsed and (
+        parsed.get("status") == "needs_confirmation"
+        or "needs_confirmation" in raw
+    ):
+        if parsed.get("status") == "needs_confirmation":
+            return ToolResult(
+                status="needs_confirmation",
+                operation_id=op_id,
+                data=parsed,
+                error_code="needs_confirmation",
+                retryable=False,
+                evidence={"pending": parsed.get("pending")},
+                duration_ms=duration_ms,
+                summary=str(parsed.get("message") or "需要写入确认")[:500],
+                observed_at=observed,
+            )
 
     code = exit_code
     if code is None:
@@ -135,8 +244,9 @@ def classify_skill_output(
                 code = None
 
     method = infer_execution_method(raw)
-    ids = extract_typed_identifiers(raw)
-    primary_type = next(iter(ids), "")
+    ids = extract_typed_identifiers(raw, parsed)
+    source_url = extract_source_url(raw, parsed)
+    primary_type = next((k for k in _ID_KEYS if k in ids), next(iter(ids), ""))
     primary_id = ids.get(primary_type, "") if primary_type else ""
     evidence: Dict[str, Any] = {
         "skill_name": skill_name or "",
@@ -146,19 +256,36 @@ def classify_skill_output(
         evidence["execution_method"] = method
     if ids:
         evidence["identifiers"] = ids
+    if source_url:
+        evidence["source_url"] = source_url
 
-    def _with_ids(tr: ToolResult) -> ToolResult:
+    structured_data: Dict[str, Any] = {"raw_text": raw}
+    if parsed:
+        structured_data.update(parsed)
+        # 展平 data.* 便于 ${created.case_id} 引用（R24）
+        nested = parsed.get("data")
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                structured_data.setdefault(k, v)
+    if ids:
+        structured_data["identifiers"] = ids
+
+    def _with_meta(tr: ToolResult) -> ToolResult:
         if primary_type:
             tr.resource_type = primary_type
             tr.resource_id = primary_id
+        if source_url:
+            tr.source_url = source_url
+        if method:
+            tr.execution_method = method
         return tr
 
     if code is not None and code != 0:
-        return _with_ids(
+        return _with_meta(
             ToolResult(
                 status="failed",
                 operation_id=op_id,
-                data={"raw_text": raw},
+                data=structured_data,
                 error_code="nonzero_exit",
                 retryable=False,
                 evidence=evidence,
@@ -170,15 +297,57 @@ def classify_skill_output(
             )
         )
 
+    # R01：先尊重结构化业务字段，再走文本启发式
+    structured_status = _structured_business_status(parsed) if parsed else None
+    if structured_status == "failed":
+        err_msg = ""
+        if parsed:
+            nested = parsed.get("data") if isinstance(parsed.get("data"), dict) else {}
+            err_msg = str(
+                parsed.get("message")
+                or parsed.get("error")
+                or nested.get("message")
+                or nested.get("error")
+                or ""
+            )
+        return _with_meta(
+            ToolResult(
+                status="failed",
+                operation_id=op_id,
+                data=structured_data,
+                error_code="business_rejected",
+                retryable=False,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary=(err_msg or "业务失败，不得记为成功")[:500],
+                observed_at=observed,
+            )
+        )
+    if structured_status in {"cancelled", "skipped", "unknown", "needs_confirmation"}:
+        return _with_meta(
+            ToolResult(
+                status=structured_status,
+                operation_id=op_id,
+                data=structured_data,
+                evidence=evidence,
+                duration_ms=duration_ms,
+                exit_code=code,
+                execution_method=method,
+                summary=structured_status,
+                observed_at=observed,
+            )
+        )
+
     if _TIMEOUT_RE.search(raw) and (
         "错误" in raw or "Timeout" in raw or "timeout" in raw.lower()
     ):
-        # 超时可能已提交副作用 → unknown（FR01.2）
-        return _with_ids(
+        return _with_meta(
             ToolResult(
                 status="unknown",
                 operation_id=op_id,
-                data={"raw_text": raw},
+                data=structured_data,
                 error_code="timeout_unknown",
                 retryable=True,
                 evidence=evidence,
@@ -191,11 +360,11 @@ def classify_skill_output(
         )
 
     if raw.startswith("错误:") or raw.startswith("错误："):
-        return _with_ids(
+        return _with_meta(
             ToolResult(
                 status="failed",
                 operation_id=op_id,
-                data={"raw_text": raw},
+                data=structured_data,
                 error_code="execute_error",
                 retryable=False,
                 evidence=evidence,
@@ -207,28 +376,30 @@ def classify_skill_output(
             )
         )
 
-    if _BUSINESS_REJECT_RE.search(raw):
-        return _with_ids(
-            ToolResult(
-                status="failed",
-                operation_id=op_id,
-                data={"raw_text": raw},
-                error_code="business_rejected",
-                retryable=False,
-                evidence=evidence,
-                duration_ms=duration_ms,
-                exit_code=code,
-                execution_method=method,
-                summary="业务拒绝，不得记为成功",
-                observed_at=observed,
+    # R02：明确 success 时不把「已存在」当失败；文本拒绝仅作兜底
+    if structured_status != "succeeded":
+        if _BUSINESS_REJECT_RE.search(raw) or _EXISTS_REJECT_RE.search(raw):
+            return _with_meta(
+                ToolResult(
+                    status="failed",
+                    operation_id=op_id,
+                    data=structured_data,
+                    error_code="business_rejected",
+                    retryable=False,
+                    evidence=evidence,
+                    duration_ms=duration_ms,
+                    exit_code=code,
+                    execution_method=method,
+                    summary="业务拒绝，不得记为成功",
+                    observed_at=observed,
+                )
             )
-        )
 
-    return _with_ids(
+    return _with_meta(
         ToolResult(
             status="succeeded",
             operation_id=op_id,
-            data={"raw_text": raw, "identifiers": ids} if ids else {"raw_text": raw},
+            data=structured_data,
             evidence=evidence,
             duration_ms=duration_ms,
             exit_code=0 if code is None else code,

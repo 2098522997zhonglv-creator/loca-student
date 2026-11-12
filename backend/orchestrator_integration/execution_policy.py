@@ -238,9 +238,16 @@ def evaluate_browser_checkpoints(
     if (_BROWSER_TIMEOUT_RE.search(text) or re.search(r"\bfailed\b|失败", text, re.I)) and not typed:
         has_success = False
 
+    upload_failed = bool(
+        re.search(
+            r"upload\s*failed|上传失败|传图失败|file\s*upload\s*failed",
+            text,
+            re.I,
+        )
+    )
     checks = {
         "has_timeout_or_tool_error": bool(_BROWSER_TIMEOUT_RE.search(text)),
-        "has_success_marker": has_success,
+        "has_success_marker": has_success and not upload_failed,
         "count_only_1_1": bool(_UPLOAD_COUNT_ONLY_RE.search(text)),
         "has_preview_evidence": bool(
             re.search(
@@ -257,6 +264,7 @@ def evaluate_browser_checkpoints(
         "has_product_link_evidence": bool(
             re.search(r"目标商品|同一商品|素材关联|custom.*(image|photo)|sku", text, re.I)
         ),
+        "upload_failed": upload_failed,
         "execution_method": "",
     }
     from orchestrator_integration.tool_result import infer_execution_method
@@ -265,6 +273,12 @@ def evaluate_browser_checkpoints(
 
     reasons: List[str] = []
     ok = True
+
+    # R04：上传失败不得被有效 cart_id 掩盖
+    if upload_failed:
+        ok = False
+        reasons.append("上传失败：购物车标识不能证明上传检查点已通过")
+        checks["has_success_marker"] = False
 
     # AC06：仅超时文本不能验收通过
     if checks["has_timeout_or_tool_error"] and not checks["has_success_marker"]:
@@ -290,12 +304,19 @@ def evaluate_browser_checkpoints(
         ok = False
         reasons.append("加购有动作证据但未捕获类型化标识（cart_id/cart_item_id 等）")
 
-    # 原生对话框要求不得被 set_input 满足
+    # R05：原生要求必须有允许方式的明确证据，未知方式保持未完成
     scope = auth_scope or {}
     req = str(scope.get("upload_method_requirement") or "")
-    if req == "native_or_filechooser" and checks["execution_method"] == "set_input":
-        ok = False
-        reasons.append("要求原生文件选择器/filechooser，setInputFiles/set_input 不满足")
+    if req == "native_or_filechooser":
+        method = checks["execution_method"]
+        if method == "set_input":
+            ok = False
+            reasons.append("要求原生文件选择器/filechooser，setInputFiles/set_input 不满足")
+        elif method not in {"native_dialog", "filechooser"}:
+            ok = False
+            reasons.append(
+                "要求原生文件选择器/filechooser，但缺少允许上传方式的明确证据"
+            )
 
     return {"ok": ok, "reasons": reasons, "checks": checks}
 
@@ -330,14 +351,50 @@ def evaluate_delivery_evidence(
             reasons.append("环境支持范围须核对目标商品实际配置，不能仅凭域名命名断言")
             blockers.append({"blocker_code": "env_inference_unverified", "step": "kb"})
 
-    # AC30：其他商品观察不能替代目标
+    # AC30 / R30：其他商品观察或证据 URL 与目标不一致均不得过关
     if re.search(r"(另一|其他).{0,6}商品|所见所得", joined) and target_url:
         if target_url.rstrip("/") not in joined.replace(target_url, "", 1):
-            # 提到了其他商品但未证明与目标一致
             if "同一商品" not in joined and "等价样本" not in joined:
                 ok = False
                 reasons.append("其他商品观察不能替代当前目标商品验证，禁止静默换商品")
                 blockers.append({"blocker_code": "wrong_product_evidence", "step": "verify"})
+
+    if target_url:
+        from orchestrator_integration.tool_result import extract_source_url
+
+        evidence_url = extract_source_url(joined)
+        target_norm = target_url.rstrip("/")
+        if evidence_url:
+            evid_norm = evidence_url.rstrip("/")
+            if target_norm not in evid_norm and evid_norm not in target_norm:
+                # 证据指向其它商品/页面
+                if target_norm not in joined:
+                    ok = False
+                    reasons.append("购物车/预览证据 URL 与目标商品不一致")
+                    blockers.append(
+                        {"blocker_code": "evidence_url_mismatch", "step": "verify"}
+                    )
+        elif re.search(r"cart_id|preview|加购|上传", joined, re.I):
+            # 有交付叙述但无关联目标 URL/SKU
+            product_markers = re.findall(
+                r"(?:product[-_/]|sku[=:]\s*|goods[-_/])([A-Za-z0-9_-]+)",
+                joined,
+                re.I,
+            )
+            target_markers = re.findall(
+                r"(?:product[-_/]|sku[=:]\s*|goods[-_/])([A-Za-z0-9_-]+)",
+                target_url,
+                re.I,
+            )
+            if product_markers and target_markers:
+                if not set(m.lower() for m in product_markers) & set(
+                    m.lower() for m in target_markers
+                ):
+                    ok = False
+                    reasons.append("交付证据商品标识与目标商品不一致")
+                    blockers.append(
+                        {"blocker_code": "evidence_product_mismatch", "step": "verify"}
+                    )
 
     # 授权边界：只授权加购时若出现提交订单证据 → 越权
     allow = set(scope.get("allow_actions") or [])

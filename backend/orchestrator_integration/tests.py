@@ -2126,6 +2126,7 @@ class BehaviorMemoryDBTests(TestCase):
     def test_approval_consume_once(self):
         from django.contrib.auth import get_user_model
         from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import fingerprint_payload
         from orchestrator_integration.models import ApprovalRequest
         from orchestrator_integration.write_confirmation import consume_approval
 
@@ -2136,13 +2137,14 @@ class BehaviorMemoryDBTests(TestCase):
             session_id="sess-apr-1",
             title="t",
         )
+        args = {"pending": {"command": "x"}}
         ApprovalRequest.objects.create(
             interrupt_id="write_confirm_test1",
             user=user,
             session_id=chat.session_id,
             action_name="execute_skill_script",
-            action_args={"pending": {"command": "x"}},
-            param_fingerprint="abc",
+            action_args=args,
+            param_fingerprint=fingerprint_payload(args.get("pending")),
             status="pending",
         )
         ok1 = consume_approval(
@@ -2423,12 +2425,13 @@ class RemainingRequirementGapTests(TestCase):
         )
         task.refresh_from_db()
         self.assertEqual(task.budget.get("used_tokens"), 40)
-        # 超限不抛异常，且不累加 used_tokens
+        # R21：超额仍入账实际消耗，并标记 over_budget；不抛异常
         AgentLoopStreamAPIView()._update_session_token_usage(
             chat.session_id, 20, 0, user_id=user.id
         )
         task.refresh_from_db()
-        self.assertEqual(task.budget.get("used_tokens"), 40)
+        self.assertEqual(task.budget.get("used_tokens"), 60)
+        self.assertTrue(task.budget.get("over_budget"))
 
     def test_step_deps_ref_and_cycle(self):
         from orchestrator_integration.step_deps import (

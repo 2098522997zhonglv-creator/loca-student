@@ -1178,7 +1178,8 @@ export function applyTaskSnapshotToStream(
   }
   const stream = activeStreams.value[sessionId];
   stream.taskId = String(snap.task_id || stream.taskId || '');
-  stream.taskStatus = String(snap.status || stream.taskStatus || '');
+  const status = String(snap.status || stream.taskStatus || '');
+  stream.taskStatus = status;
   stream.currentStage = String(snap.current_stage || stream.currentStage || '');
   if (Array.isArray(snap.stage_plan)) {
     stream.stagePlan = snap.stage_plan as Array<{
@@ -1190,12 +1191,57 @@ export function applyTaskSnapshotToStream(
   if (snap.acceptance && typeof snap.acceptance === 'object') {
     stream.acceptance = snap.acceptance as Record<string, unknown>;
   }
+  // R28：按 event_id 去重合并；由快照原子恢复完成/审批/取消态
   const events = Array.isArray(snap.events) ? snap.events : [];
   if (events.length) {
-    stream.taskEvents = [
-      ...(stream.taskEvents || []),
-      ...(events as Array<Record<string, unknown>>),
-    ];
+    const prev = stream.taskEvents || [];
+    const seen = new Set(
+      prev
+        .map((e) => String(e.event_id || e.sequence || ''))
+        .filter(Boolean)
+    );
+    const merged = [...prev];
+    for (const ev of events as Array<Record<string, unknown>>) {
+      const key = String(ev.event_id || ev.sequence || '');
+      if (key && seen.has(key)) continue;
+      if (key) seen.add(key);
+      merged.push(ev);
+    }
+    merged.sort((a, b) => Number(a.sequence || 0) - Number(b.sequence || 0));
+    stream.taskEvents = merged;
+  }
+
+  const terminal = new Set(['completed', 'failed', 'cancelled']);
+  if (terminal.has(status)) {
+    stream.isComplete = true;
+    stream.isWaitingForApproval = false;
+  } else if (status === 'awaiting_approval') {
+    stream.isComplete = false;
+    stream.isWaitingForApproval = true;
+    const approvalEvt = [...(stream.taskEvents || [])]
+      .reverse()
+      .find((e) => String(e.event_type || e.type || '') === 'approval_required');
+    const payload = (approvalEvt?.payload || {}) as Record<string, unknown>;
+    if (payload.interrupt_id || approvalEvt) {
+      stream.interrupt = {
+        id: String(payload.interrupt_id || ''),
+        interrupt_id: String(payload.interrupt_id || ''),
+        kind: String(payload.kind || 'write_confirmation'),
+        action_requests: Array.isArray(payload.action_requests)
+          ? (payload.action_requests as Array<{
+              name: string;
+              args: Record<string, unknown>;
+              description?: string;
+            }>)
+          : [],
+      };
+    }
+  } else if (status === 'cancelling') {
+    stream.isComplete = false;
+    stream.isWaitingForApproval = false;
+  } else {
+    // running / blocked / paused：不假装已完成
+    stream.isComplete = false;
   }
 }
 

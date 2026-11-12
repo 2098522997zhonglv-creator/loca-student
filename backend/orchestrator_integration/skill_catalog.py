@@ -20,8 +20,9 @@ _CATALOG_PATH = Path(__file__).resolve().parent / "skill_catalog.json"
 _ACTION_RE = re.compile(r"(?i)--action[\s=]+['\"]?(?P<action>[\w-]+)")
 _READONLY_ACTION_PREFIX_RE = re.compile(
     r"(?i)^(?:get|list|search|query|find|read|view|show|count|describe|detail|check|fetch"
-    r"|download|export|preview|validate|help|stat|stats|execute|run|collect|extract)(?:[_-]|$)"
+    r"|download|export|preview|validate|help|stat|stats|collect|extract)(?:[_-]|$)"
 )
+# execute/run 有执行副作用，不算纯只读（R23）；写入确认路径另有 is_mutating 判定
 
 SideEffect = str  # read | write | irreversible
 
@@ -147,6 +148,10 @@ def resolve_action_side_effect(
             return "irreversible"
         if "write" in levels:
             return "write"
+        if "execute" in levels:
+            return "execute"
+        if "unknown" in levels:
+            return "unknown"
         return "read"
     if entry and not actions:
         return entry.side_effect

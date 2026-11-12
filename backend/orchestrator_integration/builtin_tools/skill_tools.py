@@ -62,8 +62,9 @@ def _run_shell_cancellable(
     text_mode: bool = True,
     session_id: str = "",
 ):
-    """可取消的 shell 执行：轮询停止信号并终止进程组（FR07.3）。"""
+    """可取消的 shell 执行：并发读管道 + 轮询停止信号（FR07.3 / R22）。"""
     import signal
+    import threading
 
     sid = session_id or _current_stop_session_id()
     if _should_stop_execution(sid):
@@ -83,47 +84,77 @@ def _run_shell_cancellable(
 
     proc = subprocess.Popen(**popen_kwargs)
     deadline = time.time() + max(1, int(timeout))
+    chunks_out: list = []
+    chunks_err: list = []
+
+    def _drain(stream, bucket):
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    break
+                bucket.append(chunk)
+        except Exception:
+            pass
+
+    readers = []
+    if proc.stdout is not None:
+        t = threading.Thread(target=_drain, args=(proc.stdout, chunks_out), daemon=True)
+        t.start()
+        readers.append(t)
+    if proc.stderr is not None:
+        t = threading.Thread(target=_drain, args=(proc.stderr, chunks_err), daemon=True)
+        t.start()
+        readers.append(t)
+
+    def _join_output():
+        for t in readers:
+            t.join(timeout=1)
+        if text_mode:
+            return "".join(chunks_out), "".join(chunks_err)
+        return b"".join(chunks_out), b"".join(chunks_err)
+
+    def _kill_group(sig=signal.SIGTERM):
+        try:
+            os.killpg(proc.pid, sig)
+        except Exception:
+            if sig == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+
     try:
         while True:
             if _should_stop_execution(sid):
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except Exception:
-                    proc.terminate()
+                _kill_group(signal.SIGTERM)
                 try:
                     proc.wait(timeout=3)
                 except Exception:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except Exception:
-                        proc.kill()
+                    _kill_group(signal.SIGKILL)
+                _join_output()
                 raise SkillExecutionCancelled("任务已停止，子进程已终止")
             rc = proc.poll()
             if rc is not None:
-                stdout, stderr = proc.communicate()
+                stdout, stderr = _join_output()
                 return subprocess.CompletedProcess(
                     args=exec_command, returncode=rc, stdout=stdout, stderr=stderr
                 )
             if time.time() >= deadline:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except Exception:
-                    proc.terminate()
+                _kill_group(signal.SIGTERM)
                 try:
                     proc.wait(timeout=3)
                 except Exception:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except Exception:
-                        proc.kill()
+                    _kill_group(signal.SIGKILL)
+                _join_output()
                 raise subprocess.TimeoutExpired(exec_command, timeout)
-            time.sleep(0.4)
+            time.sleep(0.2)
     finally:
         if proc.poll() is None:
             try:
                 proc.kill()
             except Exception:
                 pass
+            _join_output()
 _ARTIFACT_EXTENSIONS = {
     ".drawio",
     ".png",
@@ -1550,9 +1581,11 @@ def get_skill_tools(
                 ensure_ascii=False,
             )
 
-        budget_err = _consume_budget(1)
-        if budget_err:
-            return budget_err
+        # 单个动作在下方扣费；批次按实际启动的动作逐条扣（R07）
+        if not commands:
+            budget_err = _consume_budget(1)
+            if budget_err:
+                return budget_err
 
         # 批量执行模式
         if commands:
@@ -1722,6 +1755,18 @@ def get_skill_tools(
                         "result": redirect,
                     }
 
+                budget_err = _consume_budget(1)
+                if budget_err:
+                    return {
+                        "index": idx,
+                        "step_id": step_id or None,
+                        "skill_name": cmd_skill_name,
+                        "command": cmd_command,
+                        "status": "skipped",
+                        "skip_reason": "budget_exhausted",
+                        "error": budget_err,
+                    }
+
                 try:
                     result = _execute_single_skill_script(
                         cmd_skill_name, cmd_command, cmd_session_id
@@ -1824,24 +1869,125 @@ def get_skill_tools(
                 )
                 return classified.status in {"failed", "unknown"}
 
+            # R08/R09：按 depends_on / on_failure 调度；有依赖时并行改为拓扑就绪队列
+            def _step_meta(cmd, idx: int) -> dict:
+                if not isinstance(cmd, dict):
+                    return {
+                        "idx": idx,
+                        "step_id": f"__idx_{idx}",
+                        "depends_on": [],
+                        "on_failure": "stop_dependents",
+                    }
+                sid = str(cmd.get("step_id") or "").strip() or f"__idx_{idx}"
+                return {
+                    "idx": idx,
+                    "step_id": sid,
+                    "depends_on": [str(d) for d in (cmd.get("depends_on") or []) if d],
+                    "on_failure": str(cmd.get("on_failure") or "stop_dependents"),
+                }
+
+            metas = [_step_meta(cmd, idx) for idx, cmd in enumerate(commands)]
+            id_to_meta = {m["step_id"]: m for m in metas}
+            has_explicit_deps = any(m["depends_on"] for m in metas)
+            if run_parallel and has_explicit_deps:
+                run_parallel = False
+                logger.info(
+                    "[execute_skill_script] 存在 depends_on，已强制串行拓扑调度"
+                )
+
+            failed_ids: set[str] = set()
+            succeeded_ids: set[str] = set()
+            skipped_ids: set[str] = set()
+
+            def _deps_ready(meta: dict) -> bool:
+                for dep in meta["depends_on"]:
+                    if dep in failed_ids or dep in skipped_ids:
+                        return False
+                    if dep not in succeeded_ids:
+                        return False
+                return True
+
+            def _should_skip(meta: dict) -> Optional[str]:
+                blocked = [
+                    d
+                    for d in meta["depends_on"]
+                    if d in failed_ids or d in skipped_ids
+                ]
+                if not blocked:
+                    return None
+                # 依赖失败：默认跳过依赖方；来源步骤 on_failure=continue 不传播到无依赖方
+                return f"dependency_failed:{','.join(blocked)}"
+
             if run_parallel:
+                # 无显式依赖时可并行；仍按失败集合避免误启
+                pending = set(range(len(commands)))
                 with ThreadPoolExecutor(
                     max_workers=min(max_workers, len(commands))
                 ) as executor:
-                    future_to_idx = {
-                        executor.submit(execute_single, idx, cmd): idx
-                        for idx, cmd in enumerate(commands)
-                    }
-                    for future in as_completed(future_to_idx):
-                        idx = future_to_idx[future]
-                        results[idx] = future.result()
+                    while pending:
+                        ready = [
+                            i
+                            for i in list(pending)
+                            if _deps_ready(metas[i]) and not _should_skip(metas[i])
+                        ]
+                        skip_now = [
+                            i for i in list(pending) if _should_skip(metas[i])
+                        ]
+                        for i in skip_now:
+                            reason = _should_skip(metas[i]) or "dependency_failed"
+                            results[i] = {
+                                "index": i,
+                                "step_id": metas[i]["step_id"],
+                                "skill_name": commands[i].get("skill_name")
+                                if isinstance(commands[i], dict)
+                                else None,
+                                "command": commands[i].get("command")
+                                if isinstance(commands[i], dict)
+                                else None,
+                                "status": "skipped",
+                                "skip_reason": reason,
+                                "error": "前置步骤失败，已跳过",
+                            }
+                            skipped_ids.add(metas[i]["step_id"])
+                            pending.discard(i)
+                        if not ready:
+                            # 死锁保护：剩余全部跳过
+                            for i in list(pending):
+                                results[i] = {
+                                    "index": i,
+                                    "step_id": metas[i]["step_id"],
+                                    "status": "skipped",
+                                    "skip_reason": "dependency_unresolved",
+                                    "error": "依赖未就绪，已跳过",
+                                }
+                                skipped_ids.add(metas[i]["step_id"])
+                                pending.discard(i)
+                            break
+                        future_to_idx = {
+                            executor.submit(execute_single, i, commands[i]): i
+                            for i in ready
+                        }
+                        for i in ready:
+                            pending.discard(i)
+                        for future in as_completed(future_to_idx):
+                            idx = future_to_idx[future]
+                            results[idx] = future.result()
+                            sid = metas[idx]["step_id"]
+                            if _result_failed(results[idx]):
+                                failed_ids.add(sid)
+                            else:
+                                succeeded_ids.add(sid)
             else:
-                # FR02.2：串行遇失败前置条件后跳过后续
+                # R08：按依赖图传播；on_failure=continue 不阻断无 depends_on 的独立步骤
                 stop_rest = False
                 for idx, cmd in enumerate(commands):
+                    meta = metas[idx]
+                    sid = meta["step_id"]
+                    skip_reason = _should_skip(meta)
                     if stop_rest:
                         results[idx] = {
                             "index": idx,
+                            "step_id": sid,
                             "skill_name": cmd.get("skill_name")
                             if isinstance(cmd, dict)
                             else None,
@@ -1849,13 +1995,39 @@ def get_skill_tools(
                             if isinstance(cmd, dict)
                             else None,
                             "status": "skipped",
-                            "skip_reason": "dependency_failed",
+                            "skip_reason": "stop_rest",
+                            "error": "前置步骤失败，已跳过剩余动作",
+                        }
+                        skipped_ids.add(sid)
+                        continue
+                    if skip_reason:
+                        results[idx] = {
+                            "index": idx,
+                            "step_id": sid,
+                            "skill_name": cmd.get("skill_name")
+                            if isinstance(cmd, dict)
+                            else None,
+                            "command": cmd.get("command")
+                            if isinstance(cmd, dict)
+                            else None,
+                            "status": "skipped",
+                            "skip_reason": skip_reason,
                             "error": "前置步骤失败，已跳过",
                         }
+                        skipped_ids.add(sid)
                         continue
+
                     results[idx] = execute_single(idx, cmd)
                     if _result_failed(results[idx]):
-                        stop_rest = True
+                        failed_ids.add(sid)
+                        if meta["on_failure"] == "stop_rest":
+                            stop_rest = True
+                    else:
+                        status = str((results[idx] or {}).get("status") or "")
+                        if status == "skipped":
+                            skipped_ids.add(sid)
+                        else:
+                            succeeded_ids.add(sid)
 
             tool_results: list[ToolResult] = []
             for r in results:

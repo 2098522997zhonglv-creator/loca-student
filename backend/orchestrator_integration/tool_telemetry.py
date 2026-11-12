@@ -110,12 +110,21 @@ def recent_telemetry(limit: int = 200) -> List[ToolCallTelemetry]:
     return items[-limit:]
 
 
-def aggregate_telemetry(limit: int = 2000) -> Dict[str, Any]:
+def aggregate_telemetry(
+    limit: int = 2000, *, user_id: Optional[int] = None
+) -> Dict[str, Any]:
     """聚合近期调用：Top 误调、慢路径、分区命中。"""
     events = recent_telemetry(limit=limit)
     if not events:
         # 尝试从 jsonl 补读
         events = _load_jsonl(limit)
+    if user_id is not None:
+        events = [
+            e
+            for e in events
+            if getattr(e, "user_id", None) is not None
+            and int(e.user_id) == int(user_id)
+        ]
 
     zone_hits = Counter(e.zone or "unknown" for e in events)
     allowlist_rejects = Counter(
