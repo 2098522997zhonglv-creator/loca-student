@@ -1141,6 +1141,8 @@ class AgentSmartnessTests(SimpleTestCase):
         approve_msg = build_resume_user_message("approve", pending)
         self.assertTrue(detect_user_write_approval(approve_msg))
         self.assertIn("pending_json", approve_msg)
+        self.assertIn("重挂", approve_msg)
+        self.assertIn("放行工具", approve_msg)
         reject_msg = build_resume_user_message("reject", pending)
         self.assertFalse(detect_user_write_approval(reject_msg))
 

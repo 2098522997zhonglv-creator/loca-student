@@ -979,8 +979,23 @@ def format_probe_hint(probe: Dict[str, Any]) -> str:
                 f"- 文件不可访问（{file_info.get('note') or 'missing'}）："
                 "禁止宣称上传成功。"
             )
+    if sess:
+        cookie_count = sess.get("cookie_count")
+        if cookie_count is not None:
+            lines.append(
+                f"- cookie_count={cookie_count} 仅为探测快照，不等于当前登录有效；"
+                "禁止据此写「cookie 仍在」或「会话仍存活」。"
+            )
     lines.append(f"- observed_at={probe.get('observed_at')}")
     lines.append(f"- ok_to_reuse={probe.get('ok_to_reuse')}")
+    lines.append(
+        "- 历史文件/会话存在 ≠ 本轮可读或登录有效；ok_to_reuse=False 时禁止宣称"
+        "「完整执行输入已具备」。"
+    )
+    lines.append(
+        "- 上一轮 HTTP 502/5xx 只能标「历史异常，尚未复核」；禁止当作本轮仍失败，"
+        "也禁止据此要求用户先恢复环境（除非本轮探测再次失败）。"
+    )
     return "\n".join(lines)
 
 

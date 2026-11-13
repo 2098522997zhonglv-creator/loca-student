@@ -407,6 +407,43 @@ def evaluate_delivery_evidence(
             reasons.append("仅授权加购时不得提交订单（即使用户禁止支付）")
             blockers.append({"blocker_code": "order_beyond_auth", "step": "checkout"})
 
+    # 证据完整性：历史 502、未探测资源、能力推断、替换入口、占位交付
+    try:
+        from orchestrator_integration.evidence_integrity import (
+            count_browser_actions,
+            evaluate_evidence_integrity_text,
+        )
+
+        integrity = evaluate_evidence_integrity_text(
+            joined,
+            probe_ok_to_reuse=None,
+            browser_actions_this_turn=count_browser_actions(tool_results),
+        )
+        if not integrity.get("ok"):
+            ok = False
+            for r in integrity.get("reasons") or []:
+                if r not in reasons:
+                    reasons.append(r)
+            blockers.append(
+                {
+                    "blocker_code": "evidence_integrity",
+                    "step": "deliver",
+                    "http_freshness": integrity.get("http_freshness"),
+                }
+            )
+    except Exception:
+        pass
+
+    # 未捕获却承诺全量购物车字段 → 过满交付
+    if re.search(
+        r"(返回|交付|给出).{0,24}(所有|全部).{0,16}(cart_id|数量|金额|购物车)",
+        joined,
+        re.I,
+    ) and not re.search(r"cart_id\s*[:=]\s*[A-Za-z0-9_-]{4,}", joined, re.I):
+        ok = False
+        reasons.append("尚未实际捕获时不得承诺交付全部购物车标识/数量/金额")
+        blockers.append({"blocker_code": "delivery_overpromise", "step": "deliver"})
+
     return {
         "ok": ok,
         "reasons": reasons,

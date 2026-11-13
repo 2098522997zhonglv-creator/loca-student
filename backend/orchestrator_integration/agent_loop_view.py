@@ -144,7 +144,8 @@ _TASK_LANGUAGE_HINT = """
 # 会话语言与输出形态（强制）
 - 进度说明与最终答复必须与用户消息同语种；用户使用中文时，禁止用英文旁白（如 I'll / Let me / Now I will call）。
 - 调用工具前不要向用户输出英文过程独白；需要提示时用一句中文进度（例：「正在检索知识库…」），不要把过程独白当成最终答复。
-- 最终答复只在本轮工具结束后给出一次，使用中文结构化说明：已完成事项、证据、剩余步骤或具体阻塞。
+- 最终答复只在本轮工具结束后给出一次，使用中文结构化说明：进度、证据、剩余步骤或具体阻塞。
+- 进度标题：本轮有真实浏览器/工具业务动作时可用「已完成事项」；若本轮无业务动作，必须用「已整理的输入」，并写明「本轮业务步骤完成数为 0」，禁止制造进度错觉。
 - 审批恢复后同样遵守：进度中文、最终答复中文；禁止把工具前英文说明固化成普通回复。
 """.strip()
 
@@ -1869,12 +1870,18 @@ class AgentLoopStreamAPIView(View):
             )
 
             # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
+            from orchestrator_integration.evidence_integrity import (
+                EVIDENCE_INTEGRITY_HINT,
+            )
+
             effective_prompt = (
                 (effective_prompt or "").rstrip()
                 + "\n\n"
                 + _KB_PRIORITY_HINT
                 + "\n\n"
                 + _TASK_LANGUAGE_HINT
+                + "\n\n"
+                + EVIDENCE_INTEGRITY_HINT
                 + "\n\n"
                 + intent_hint
             ).strip()
@@ -3579,11 +3586,18 @@ class AgentLoopResumeAPIView(View):
                         )
 
                 # 加载内置工具（与知识库并存，便于确认后落库）
+                # P0：按未完成任务原授权闭环重挂，禁止把「放行工具」甩给用户
                 kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
+                resume_probe_hint = ""
                 try:
                     from orchestrator_integration.builtin_tools import (
                         get_builtin_tools,
                     )
+                    from orchestrator_integration.skill_zones import (
+                        ZONE_BROWSER,
+                        zone_skills,
+                    )
+                    from orchestrator_integration.turn_context import BROWSER_ACTIONS
 
                     # R13：一次批准不得变成整轮全局写入布尔授权；
                     # 精确动作由 resume 注入消息 + user_confirmed 执行。
@@ -3594,17 +3608,95 @@ class AgentLoopResumeAPIView(View):
                         and getattr(runtime_task, "project_id", None)
                     ):
                         resume_project_id = int(runtime_task.project_id)
+
+                    resume_allowlist = None
+                    resume_auth = {}
+                    resume_stage = ""
+                    resume_scope = {}
+                    if runtime_task is not None:
+                        resume_auth = dict(
+                            getattr(runtime_task, "auth_scope", None) or {}
+                        )
+                        resume_stage = str(
+                            getattr(runtime_task, "current_stage", "") or ""
+                        )
+                        resume_scope = dict(
+                            getattr(runtime_task, "task_scope", None) or {}
+                        )
+                        allow_actions = set(resume_auth.get("allow_actions") or [])
+                        is_browser = resume_stage == "browser_interact" or bool(
+                            allow_actions & BROWSER_ACTIONS
+                        )
+                        if is_browser or resume_stage in {
+                            "browser_interact",
+                            "upload",
+                            "cart",
+                            "execute",
+                            "execute_testcase",
+                        }:
+                            resume_allowlist = set(zone_skills(ZONE_BROWSER))
+                        try:
+                            from orchestrator_integration.agent_runtime import (
+                                format_probe_hint,
+                                probe_browser_resources,
+                            )
+
+                            _probe = probe_browser_resources(
+                                session_id=str(
+                                    resume_scope.get("session_id")
+                                    or resume_scope.get("browser_session_id")
+                                    or ""
+                                ),
+                                file_path=str(
+                                    resume_scope.get("file_path")
+                                    or resume_scope.get("upload_path")
+                                    or ""
+                                ),
+                                target_url=str(resume_scope.get("target_url") or ""),
+                            )
+                            if _probe and (
+                                _probe.get("session_ref")
+                                or _probe.get("file_ref")
+                                or _probe.get("target_url")
+                            ):
+                                resume_probe_hint = format_probe_hint(_probe)
+                        except Exception as probe_err:
+                            logger.warning(
+                                "AgentLoopResumeAPI: resume probe failed: %s",
+                                probe_err,
+                            )
+
                     builtin_tools = get_builtin_tools(
                         user_id=user.id,
                         project_id=resume_project_id,
                         test_case_id=None,
                         chat_session_id=session_id,
                         user_write_approved=False,
+                        allowed_skill_names=resume_allowlist,
+                        allow_execute=True,
+                        include_meta_tools=True,
                     )
                     tools.extend(builtin_tools)
+                    # 确保执行通道存在（即使后续裁剪也不丢）
+                    have_names = {getattr(t, "name", "") for t in tools}
+                    for mt in list(builtin_tools):
+                        name = getattr(mt, "name", "")
+                        if name in {
+                            "execute_skill_script",
+                            "request_tool_expansion",
+                            "assert_task_postcondition",
+                            "report_task_blocked",
+                            "read_skill_content",
+                        } and name not in have_names:
+                            tools.append(mt)
+                            have_names.add(name)
                     logger.info(
-                        f"AgentLoopResumeAPI: Added {len(builtin_tools)} builtin tools"
-                        + (" (与知识库并存)" if kb_qa_mode else "")
+                        "AgentLoopResumeAPI: Added %s builtin tools allowlist=%s "
+                        "stage=%s%s",
+                        len(builtin_tools),
+                        sorted(resume_allowlist) if resume_allowlist else None,
+                        resume_stage or None,
+                        " (与知识库并存)" if kb_qa_mode else "",
                     )
                 except Exception as e:
                     logger.warning(
@@ -3622,12 +3714,22 @@ class AgentLoopResumeAPIView(View):
                         resume_system_prompt = chat_session.prompt.content
                 except Exception:
                     pass
+                from orchestrator_integration.evidence_integrity import (
+                    EVIDENCE_INTEGRITY_HINT,
+                    RESUME_EXEC_HINT,
+                )
+
                 resume_system_prompt = (
                     (resume_system_prompt or "").rstrip()
                     + "\n\n"
                     + _KB_PRIORITY_HINT
                     + "\n\n"
                     + _TASK_LANGUAGE_HINT
+                    + "\n\n"
+                    + EVIDENCE_INTEGRITY_HINT
+                    + "\n\n"
+                    + RESUME_EXEC_HINT
+                    + (("\n\n" + resume_probe_hint) if resume_probe_hint else "")
                 ).strip()
 
                 tool_names = [t.name for t in tools] if tools else []

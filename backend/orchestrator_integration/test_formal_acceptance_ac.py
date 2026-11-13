@@ -624,3 +624,90 @@ class FormalAcceptanceAC16to30Tests(TestCase):
             target_url="https://a.callie.cc/p1",
         )
         self.assertFalse(delivery["ok"])
+
+    def test_ac31_historical_502_not_current_fault(self):
+        from orchestrator_integration.evidence_integrity import (
+            classify_http_failure_freshness,
+            evaluate_evidence_integrity_text,
+        )
+        from orchestrator_integration.execution_policy import evaluate_delivery_evidence
+
+        self.assertEqual(
+            classify_http_failure_freshness("上一轮请求返回 HTTP 502"),
+            "historical_unverified",
+        )
+        bad = evaluate_evidence_integrity_text(
+            "上一轮 502，请恢复环境后再试",
+            browser_actions_this_turn=0,
+        )
+        self.assertFalse(bad["ok"])
+        delivery = evaluate_delivery_evidence(
+            tool_results=["上一轮 502，请恢复网关服务后再执行加购"],
+        )
+        self.assertFalse(delivery["ok"])
+
+    def test_ac32_probe_required_before_claiming_resources(self):
+        from orchestrator_integration.agent_runtime import format_probe_hint
+        from orchestrator_integration.evidence_integrity import (
+            evaluate_evidence_integrity_text,
+        )
+
+        claim = evaluate_evidence_integrity_text(
+            "cookie 仍在，完整执行输入已具备，可直接加购",
+            probe_ok_to_reuse=None,
+        )
+        self.assertFalse(claim["ok"])
+        hint = format_probe_hint(
+            {
+                "observed_at": "2026-01-01T00:00:00",
+                "ok_to_reuse": False,
+                "probe_result": {
+                    "session": {
+                        "claimed_id": "s1",
+                        "alive": False,
+                        "note": "session_not_in_process_memory",
+                        "login_state": "unavailable",
+                        "cookie_count": 3,
+                    }
+                },
+            }
+        )
+        self.assertIn("历史异常，尚未复核", hint)
+        self.assertIn("cookie_count", hint)
+        self.assertIn("不等于当前登录有效", hint)
+
+    def test_ac33_progress_label_without_actions(self):
+        from orchestrator_integration.evidence_integrity import (
+            evaluate_progress_labeling,
+        )
+
+        bad = evaluate_progress_labeling(
+            "已完成事项：整理了 URL 与 cookie",
+            browser_actions_this_turn=0,
+        )
+        self.assertFalse(bad["ok"])
+        good = evaluate_progress_labeling(
+            "已整理的输入：URL/cookie 路径；本轮业务步骤完成数为 0",
+            browser_actions_this_turn=0,
+        )
+        self.assertTrue(good["ok"])
+
+    def test_ac34_delivery_no_placeholder_or_overpromise(self):
+        from orchestrator_integration.execution_policy import evaluate_delivery_evidence
+
+        placeholder = evaluate_delivery_evidence(
+            tool_results=["交付 cart_id=待补充 quantity=N/A 金额=占位"],
+        )
+        self.assertFalse(placeholder["ok"])
+        over = evaluate_delivery_evidence(
+            tool_results=["将返回所有购物车标识、数量与金额"],
+        )
+        self.assertFalse(over["ok"])
+
+    def test_ac35_equiv_entry_needs_original_target(self):
+        from orchestrator_integration.execution_policy import evaluate_delivery_evidence
+
+        delivery = evaluate_delivery_evidence(
+            tool_results=["工具不可用，请给一个可用的等价入口"],
+        )
+        self.assertFalse(delivery["ok"])

@@ -326,8 +326,9 @@ def build_resume_user_message(
     summary = _summarize_pending(pending if isinstance(pending, dict) else None)
     if decision == "approve":
         body = (
-            "确认写入。界面按钮已同意本次写入，请立即用 execute_skill_script "
-            "以 user_confirmed=true 执行下列待写入命令，不要再询问确认：\n"
+            "确认写入。界面按钮已同意本次写入；服务端已按原授权重挂 execute_skill_script。"
+            "请立即以 user_confirmed=true 执行下列待写入命令，不要再询问确认；"
+            "禁止要求用户「放行工具 / 重新授权路由 / 再说继续」：\n"
             f"{summary}"
         )
         if isinstance(pending, dict):
