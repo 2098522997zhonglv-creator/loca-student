@@ -195,6 +195,11 @@ import { marked } from 'marked';
 import { IconFullscreen, IconFullscreenExit } from '@arco-design/web-vue/es/icon';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
+import {
+  looksLikeEnglishToolNarration,
+  buildProgressText,
+  mergeHistoryToolMessages,
+} from '@/features/langgraph/utils/streamUiHelpers';
 import type { FileAsset } from '@/features/file-management/types';
 
 // 导入子组件
@@ -359,6 +364,16 @@ interface ChatMessage {
   imageDataUrls?: string[];
   isThinkingProcess?: boolean;
   isThinkingExpanded?: boolean;
+  isProgress?: boolean;
+  isExecutionLog?: boolean;
+  toolEntries?: Array<{
+    key: string;
+    toolName: string;
+    summary: string;
+    detail: string;
+    time: string;
+    step?: number;
+  }>;
   // Agent Step 专用字段
   stepNumber?: number;
   maxSteps?: number;
@@ -1142,7 +1157,7 @@ const loadChatHistory = async () => {
       const tempMessages = enrichMessagesWithSeparators(data.history, formatHistoryTime);
       
       // 🎨 合并连续的思考过程消息
-      messages.value = mergeThinkingProcessMessages(tempMessages);
+      messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
       
       console.log('🔍 [Debug] messages.value最终数量:', messages.value.length);
       console.log('🔍 [Debug] 最终step_separator数量:', messages.value.filter(m => m.messageType === 'step_separator').length);
@@ -1186,7 +1201,10 @@ const solidifyStreamContent = () => {
 
   // 固化普通LLM聊天的流式内容
   const stream = activeStreams.value[sessionId.value];
-  if (stream && stream.isComplete && stream.content && stream.content.trim()) {
+  const hasStreamPayload =
+    Boolean(stream?.content?.trim()) ||
+    Boolean(stream?.messages && stream.messages.length > 0);
+  if (stream && stream.isComplete && hasStreamPayload) {
     // ⭐ HITL：如果正在等待审批，不要清理流状态
     if (stream.isWaitingForApproval) {
       console.log('⏸️ 流正在等待 HITL 审批，跳过固化和清理');
@@ -1195,7 +1213,11 @@ const solidifyStreamContent = () => {
 
     // 检查是否已经固化过（避免重复）
     const lastMsg = messages.value[messages.value.length - 1];
-    const alreadySolidified = lastMsg && !lastMsg.isUser && lastMsg.content === stream.content;
+    const alreadySolidified =
+      lastMsg &&
+      !lastMsg.isUser &&
+      stream.content?.trim() &&
+      lastMsg.content === stream.content;
 
     if (!alreadySolidified) {
       // 先添加工具消息和中间消息
@@ -1211,7 +1233,10 @@ const solidifyStreamContent = () => {
             imageDataUrl: msg.imageDataUrl,
             fileAttachments: msg.fileAttachments,
             isThinkingProcess: msg.isThinkingProcess,
-            isThinkingExpanded: msg.isThinkingExpanded
+            isThinkingExpanded: msg.isThinkingExpanded,
+            isProgress: msg.isProgress,
+            isExecutionLog: msg.isExecutionLog,
+            toolEntries: msg.toolEntries,
           };
           // 保留 Agent Step 相关字段
           if (typeof msg.stepNumber === 'number') {
@@ -1226,13 +1251,15 @@ const solidifyStreamContent = () => {
           messages.value.push(chatMsg);
         });
       }
-      // 添加AI回复内容
-      messages.value.push({
-        content: stream.content,
-        isUser: false,
-        time: getCurrentTime(),
-        messageType: 'ai'
-      });
+      // 仅固化最终答复（中间英文旁白已在 tool_result 时清空）
+      if (stream.content && stream.content.trim()) {
+        messages.value.push({
+          content: stream.content,
+          isUser: false,
+          time: getCurrentTime(),
+          messageType: 'ai'
+        });
+      }
       console.log('✅ 已固化LLM流式内容到messages.value');
     }
     clearStreamState(sessionId.value);
@@ -1458,7 +1485,7 @@ const handleStopGeneration = async () => {
           const response = await getChatHistory(sessionId.value, projectStore.currentProjectId);
           if (response.status === 'success' && response.data?.history) {
             const tempMessages = enrichMessagesWithSeparators(response.data.history, formatHistoryTime);
-            messages.value = mergeThinkingProcessMessages(tempMessages);
+            messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
             console.log('[LangGraphChatView] History reloaded after stop:', messages.value.length, 'messages');
           }
         } catch (error) {
@@ -1689,7 +1716,7 @@ const switchSession = async (id: string) => {
       const tempMessages = enrichMessagesWithSeparators(response.data.history, formatHistoryTime);
       
       // 🎨 合并连续的思考过程消息
-      messages.value = mergeThinkingProcessMessages(tempMessages);
+      messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
 
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);
@@ -2039,7 +2066,10 @@ const displayedMessages = computed(() => {
             imageDataUrl: msg.imageDataUrl,
             fileAttachments: msg.fileAttachments,
             isThinkingProcess: msg.isThinkingProcess,
-            isThinkingExpanded: msg.isThinkingExpanded
+            isThinkingExpanded: msg.isThinkingExpanded,
+            isProgress: msg.isProgress,
+            isExecutionLog: msg.isExecutionLog,
+            toolEntries: msg.toolEntries,
           };
 
           // Agent Step 专用字段
@@ -2081,18 +2111,30 @@ const displayedMessages = computed(() => {
         }
       }
       else {
-        // 有实际内容时，显示流式内容
-        combined.push({
-          content: stream.content,
-          isUser: false,
-          time: getCurrentTime(),
-          messageType: 'ai',
-          isStreaming: !stream.isComplete,
-        });
+        const interim = stream.content;
+        if (!stream.isComplete && looksLikeEnglishToolNarration(interim)) {
+          combined.push({
+            content: buildProgressText({ interim }),
+            isUser: false,
+            time: getCurrentTime(),
+            messageType: 'system',
+            isProgress: true,
+            isThinkingProcess: true,
+            isStreaming: true,
+          });
+        } else {
+          combined.push({
+            content: stream.content,
+            isUser: false,
+            time: getCurrentTime(),
+            messageType: 'ai',
+            isStreaming: !stream.isComplete,
+          });
+        }
       }
     }
   }
-  return combined;
+  return mergeHistoryToolMessages(combined);
 });
 
 // 处理流式消息

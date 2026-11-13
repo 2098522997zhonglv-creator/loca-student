@@ -64,6 +64,16 @@ interface ChatMessage {
   imageDataUrls?: string[];
   isThinkingProcess?: boolean;
   isThinkingExpanded?: boolean;
+  isProgress?: boolean;
+  isExecutionLog?: boolean;
+  toolEntries?: Array<{
+    key: string;
+    toolName: string;
+    summary: string;
+    detail: string;
+    time: string;
+    step?: number;
+  }>;
   // Agent Step 专用字段
   stepNumber?: number;
   maxSteps?: number;

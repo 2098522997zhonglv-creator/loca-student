@@ -11,6 +11,12 @@ import type {
 } from '@/features/langgraph/types/chat';
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
+import {
+  absorbToolResultEvent,
+  buildProgressText,
+  upsertProgressMessage,
+  type ToolLogEntry,
+} from '@/features/langgraph/utils/streamUiHelpers';
 
 // --- 全局流式状态管理 ---
 interface StreamMessage {
@@ -23,6 +29,12 @@ interface StreamMessage {
   isExpanded?: boolean;
   isThinkingProcess?: boolean;
   isThinkingExpanded?: boolean;
+  /** 本轮唯一中文进度行（持续更新） */
+  isProgress?: boolean;
+  /** 本轮汇总的折叠执行记录 */
+  isExecutionLog?: boolean;
+  toolEntries?: ToolLogEntry[];
+  eventKey?: string;
   // Agent Step 专用字段
   stepNumber?: number;
   maxSteps?: number;
@@ -34,6 +46,7 @@ interface StreamState {
   error?: string;
   isComplete: boolean;
   messages: StreamMessage[]; // 存储所有消息,包括工具消息
+  seenToolEventKeys?: Set<string>;
   contextTokenCount?: number; // 当前上下文Token数
   contextLimit?: number; // 上下文Token限制
   currentStep?: number;  // Agent Loop 当前步骤
@@ -66,6 +79,33 @@ interface StreamState {
   stagePlan?: Array<{ stage_id: string; goal?: string; acceptance?: string }>;
   acceptance?: Record<string, unknown>;
   taskEvents?: Array<Record<string, unknown>>;
+}
+
+function applyToolResultToStream(
+  stream: StreamState,
+  parsed: Record<string, unknown>
+): void {
+  const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
+  const toolPayload = parseToolResultDisplayPayload(toolOutput);
+  if (!toolPayload.content && !toolPayload.imageDataUrl) return;
+  const time = formatStreamTime();
+  absorbToolResultEvent(stream, parsed, {
+    time,
+    content: toolPayload.content || '[工具返回了图片]',
+    imageDataUrl: toolPayload.imageDataUrl,
+    summary: typeof parsed.summary === 'string' ? parsed.summary : undefined,
+  });
+  // 图片/附件挂到执行记录消息上（若有）
+  const log = stream.messages.find((m) => m.isExecutionLog);
+  if (log) {
+    if (toolPayload.imageDataUrl) log.imageDataUrl = toolPayload.imageDataUrl;
+    if (toolPayload.fileAttachments?.length) {
+      log.fileAttachments = [
+        ...(log.fileAttachments || []),
+        ...toolPayload.fileAttachments,
+      ];
+    }
+  }
 }
 
 // Agent Loop SSE 事件类型定义（供文档和类型参考）
@@ -629,27 +669,22 @@ export async function sendChatMessageStream(
             }
           }
 
-          // 处理 Agent Loop 步骤开始事件
+          // 处理 Agent Loop 步骤开始事件 → 中文进度（不刷分隔符）
           if (parsed.type === 'step_start' && streamSessionId && activeStreams.value[streamSessionId]) {
             const stepNumber = normalizeNumericField(parsed.step);
             const maxSteps = normalizeNumericField(parsed.max_steps);
-            console.log('[step_start] raw:', parsed.step, parsed.max_steps, '| normalized:', stepNumber, maxSteps);
-            if (maxSteps !== undefined) {
-              activeStreams.value[streamSessionId].maxSteps = maxSteps;
-            }
-            if (stepNumber !== undefined) {
-              activeStreams.value[streamSessionId].currentStep = stepNumber;
-            }
-            activeStreams.value[streamSessionId].messages.push({
-              content: '',
-              type: 'agent_step',
-              time: formatStreamTime(),
-              stepNumber: stepNumber,
-              maxSteps: maxSteps,
-              stepStatus: 'start',
-              isThinkingProcess: true
-            });
-            console.log('[step_start] pushed message with stepNumber:', stepNumber, 'maxSteps:', maxSteps);
+            const stream = activeStreams.value[streamSessionId];
+            if (maxSteps !== undefined) stream.maxSteps = maxSteps;
+            if (stepNumber !== undefined) stream.currentStep = stepNumber;
+            upsertProgressMessage(
+              stream,
+              buildProgressText({
+                step: stepNumber,
+                maxSteps: stream.maxSteps,
+                interim: stream.content,
+              }),
+              formatStreamTime()
+            );
           }
 
           // 处理 Agent Loop 步骤完成事件
@@ -658,76 +693,34 @@ export async function sendChatMessageStream(
             if (stepNumber !== undefined) {
               activeStreams.value[streamSessionId].currentStep = stepNumber;
             }
-            // ✅ 移除step_complete的重复分隔符显示
-            // step_start已经插入了分隔符,step_complete不需要再显示
           }
 
-          // 处理 Agent Loop 工具结果事件
+          // 工具结果：汇总到一张折叠执行记录，并去重；中间旁白不固化为 AI
           if (parsed.type === 'tool_result' && streamSessionId && activeStreams.value[streamSessionId]) {
-            // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
-            const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
-            const toolPayload = parseToolResultDisplayPayload(toolOutput);
-            if (toolPayload.content || toolPayload.imageDataUrl) {
-              const time = formatStreamTime();
-              // 如果当前有AI流式内容,先将其固化为独立消息
-              if (activeStreams.value[streamSessionId].content && activeStreams.value[streamSessionId].content.trim()) {
-                activeStreams.value[streamSessionId].messages.push({
-                  content: activeStreams.value[streamSessionId].content,
-                  type: 'ai',
-                  time: time,
-                  isExpanded: false
-                });
-                activeStreams.value[streamSessionId].content = '';
-              }
-              activeStreams.value[streamSessionId].messages.push({
-                content: toolPayload.content || '[工具返回了图片]',
-                type: 'tool',
-                time: time,
-                toolName: typeof parsed.tool_name === 'string' ? parsed.tool_name : undefined,
-                imageDataUrl: toolPayload.imageDataUrl,
-                fileAttachments: toolPayload.fileAttachments,
-                isExpanded: false
-              });
-            }
+            applyToolResultToStream(
+              activeStreams.value[streamSessionId],
+              parsed as Record<string, unknown>
+            );
           }
 
           // 处理工具消息(update事件) - 兼容旧 LangGraph 格式
           if (parsed.type === 'update' && streamSessionId && activeStreams.value[streamSessionId]) {
             const updateData = parsed.data;
-            if (typeof updateData === 'string') {
-              // 解析工具消息
-              // 格式类似: "{'agent': {'messages': [ToolMessage(content='...', name='tool_name', ...)]}}"
-              if (updateData.includes('ToolMessage')) {
-                try {
-                  // 提取工具消息内容
-                  const contentMatch = updateData.match(/content='([^']*(?:\\'[^']*)*)'/);
-                  
-                  if (contentMatch) {
-                    const toolContent = contentMatch[1].replace(/\\'/g, "'").replace(/\\n/g, '\n');
-                    const time = formatStreamTime();
-                    
-                    // 如果当前有AI流式内容,先将其固化为独立消息
-                    if (activeStreams.value[streamSessionId].content && activeStreams.value[streamSessionId].content.trim()) {
-                      activeStreams.value[streamSessionId].messages.push({
-                        content: activeStreams.value[streamSessionId].content,
-                        type: 'ai',
-                        time: time,
-                        isExpanded: false
-                      });
-                      activeStreams.value[streamSessionId].content = '';
-                    }
-                    
-                    // 添加工具消息作为新的独立消息
-                    activeStreams.value[streamSessionId].messages.push({
-                      content: toolContent,
-                      type: 'tool',
-                      time: time,
-                      isExpanded: false
-                    });
-                  }
-                } catch (e) {
-                  console.warn('Failed to parse tool message:', updateData);
+            if (typeof updateData === 'string' && updateData.includes('ToolMessage')) {
+              try {
+                const contentMatch = updateData.match(/content='([^']*(?:\\'[^']*)*)'/);
+                if (contentMatch) {
+                  const toolContent = contentMatch[1].replace(/\\'/g, "'").replace(/\\n/g, '\n');
+                  applyToolResultToStream(activeStreams.value[streamSessionId], {
+                    type: 'tool_result',
+                    tool_name: 'tool',
+                    summary: toolContent.slice(0, 160),
+                    tool_output: toolContent,
+                    event_id: `legacy-${toolContent.slice(0, 40)}`,
+                  });
                 }
+              } catch (e) {
+                console.warn('Failed to parse tool message:', updateData);
               }
             }
           }
@@ -1331,15 +1324,14 @@ export async function resumeAgentLoop(
     };
     console.log('[ChatService] Resume: Initialized activeStreams for session', sessionId);
   } else {
-    // 在开始新的 resume 之前，将当前累积的 content 固化到 messages
-    // 这样拒绝后的新回复会显示为独立的消息框
-    if (activeStreams.value[sessionId].content?.trim()) {
-      activeStreams.value[sessionId].messages.push({
-        content: activeStreams.value[sessionId].content,
-        type: 'ai',
-        time: formatStreamTime(),
-        isExpanded: false
-      });
+    // resume 前：中间过程说明降级为进度，不得固化成普通 AI 回复
+    const pending = activeStreams.value[sessionId].content?.trim() || '';
+    if (pending) {
+      upsertProgressMessage(
+        activeStreams.value[sessionId],
+        buildProgressText({ interim: pending }),
+        formatStreamTime()
+      );
       activeStreams.value[sessionId].content = '';
     }
     // 清除中断状态，准备接收新的流
@@ -1504,25 +1496,22 @@ export async function resumeAgentLoop(
             activeStreams.value[sessionId].contextLimit = limit;
           }
 
-          // 处理步骤开始事件
+          // 处理步骤开始事件 → 中文进度
           if (parsed.type === 'step_start' && activeStreams.value[sessionId]) {
             const stepNumber = normalizeNumericField(parsed.step);
             const maxSteps = normalizeNumericField(parsed.max_steps);
-            if (maxSteps !== undefined) {
-              activeStreams.value[sessionId].maxSteps = maxSteps;
-            }
-            if (stepNumber !== undefined) {
-              activeStreams.value[sessionId].currentStep = stepNumber;
-            }
-            activeStreams.value[sessionId].messages.push({
-              content: '',
-              type: 'agent_step',
-              time: formatStreamTime(),
-              stepNumber: stepNumber,
-              maxSteps: maxSteps,
-              stepStatus: 'start',
-              isThinkingProcess: true
-            });
+            const stream = activeStreams.value[sessionId];
+            if (maxSteps !== undefined) stream.maxSteps = maxSteps;
+            if (stepNumber !== undefined) stream.currentStep = stepNumber;
+            upsertProgressMessage(
+              stream,
+              buildProgressText({
+                step: stepNumber,
+                maxSteps: stream.maxSteps,
+                interim: stream.content,
+              }),
+              formatStreamTime()
+            );
           }
 
           // 处理步骤完成事件
@@ -1533,33 +1522,12 @@ export async function resumeAgentLoop(
             }
           }
 
-          // 处理工具结果事件
+          // 处理工具结果事件（审批恢复路径同样汇总/去重）
           if (parsed.type === 'tool_result' && activeStreams.value[sessionId]) {
-            // 优先使用 tool_output（完整内容），fallback 到 summary（截断摘要）
-            const toolOutput = parsed.tool_output || parsed.content || parsed.summary;
-            const toolPayload = parseToolResultDisplayPayload(toolOutput);
-            if (toolPayload.content || toolPayload.imageDataUrl) {
-              const time = formatStreamTime();
-              // 先固化当前 AI 内容
-              if (activeStreams.value[sessionId].content?.trim()) {
-                activeStreams.value[sessionId].messages.push({
-                  content: activeStreams.value[sessionId].content,
-                  type: 'ai',
-                  time: time,
-                  isExpanded: false
-                });
-                activeStreams.value[sessionId].content = '';
-              }
-              activeStreams.value[sessionId].messages.push({
-                content: toolPayload.content || '[工具返回了图片]',
-                type: 'tool',
-                time: time,
-                toolName: typeof parsed.tool_name === 'string' ? parsed.tool_name : undefined,
-                imageDataUrl: toolPayload.imageDataUrl,
-                fileAttachments: toolPayload.fileAttachments,
-                isExpanded: false
-              });
-            }
+            applyToolResultToStream(
+              activeStreams.value[sessionId],
+              parsed as Record<string, unknown>
+            );
           }
 
           // 处理 LLM 流式输出

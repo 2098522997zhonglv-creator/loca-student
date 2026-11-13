@@ -140,6 +140,14 @@ _KB_PRIORITY_HINT = """
 - 对用户输出使用任务语言：已做事项、证据、剩余步骤与具体阻塞；禁止要求用户重发路由关键词。
 """.strip()
 
+_TASK_LANGUAGE_HINT = """
+# 会话语言与输出形态（强制）
+- 进度说明与最终答复必须与用户消息同语种；用户使用中文时，禁止用英文旁白（如 I'll / Let me / Now I will call）。
+- 调用工具前不要向用户输出英文过程独白；需要提示时用一句中文进度（例：「正在检索知识库…」），不要把过程独白当成最终答复。
+- 最终答复只在本轮工具结束后给出一次，使用中文结构化说明：已完成事项、证据、剩余步骤或具体阻塞。
+- 审批恢复后同样遵守：进度中文、最终答复中文；禁止把工具前英文说明固化成普通回复。
+""".strip()
+
 
 _CITATION_HINT = """
 ## 引用与冲突约定
@@ -807,9 +815,14 @@ def _tool_result_sse_events(
     返回 (events, write_confirm_emitted)。
     """
     content, summary = process_mcp_tool_output(content, tool_name=tool_name or "")
+    import hashlib
+
+    eid_src = f"{tool_name}|{step_count}|{summary}"
+    event_id = "tr-" + hashlib.sha1(eid_src.encode("utf-8")).hexdigest()[:16]
     events: List[Dict[str, Any]] = [
         {
             "type": "tool_result",
+            "event_id": event_id,
             "tool_name": tool_name,
             "tool_output": content,
             "summary": summary,
@@ -1860,6 +1873,8 @@ class AgentLoopStreamAPIView(View):
                 (effective_prompt or "").rstrip()
                 + "\n\n"
                 + _KB_PRIORITY_HINT
+                + "\n\n"
+                + _TASK_LANGUAGE_HINT
                 + "\n\n"
                 + intent_hint
             ).strip()
@@ -3607,6 +3622,13 @@ class AgentLoopResumeAPIView(View):
                         resume_system_prompt = chat_session.prompt.content
                 except Exception:
                     pass
+                resume_system_prompt = (
+                    (resume_system_prompt or "").rstrip()
+                    + "\n\n"
+                    + _KB_PRIORITY_HINT
+                    + "\n\n"
+                    + _TASK_LANGUAGE_HINT
+                ).strip()
 
                 tool_names = [t.name for t in tools] if tools else []
                 middleware = await sync_to_async(get_middleware_from_config)(

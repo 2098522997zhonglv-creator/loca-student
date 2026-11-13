@@ -78,9 +78,16 @@
           <span></span>
           <span></span>
         </div>
+        <div v-else-if="message.isProgress" class="progress-line message-render-skip" data-i18n-skip>
+          {{ message.content }}
+        </div>
+
         <div v-else-if="message.messageType === 'tool'" class="tool-message-content">
-          <div v-if="message.toolName" class="tool-header message-render-skip" data-i18n-skip>
-            🔧 {{ message.toolName }}
+          <div class="tool-header message-render-skip" data-i18n-skip>
+            🔧 {{ message.isExecutionLog ? (pageText.executionLog || '执行记录') : (message.toolName || 'tool') }}
+            <span v-if="message.isExecutionLog && message.toolEntries?.length" class="tool-count">
+              ({{ message.toolEntries.length }})
+            </span>
           </div>
           <div
             :class="['tool-content', 'message-render-skip', { 'collapsed': !message.isExpanded && shouldCollapse }]"
@@ -88,6 +95,20 @@
             data-i18n-skip
             v-html="formattedContent"
           ></div>
+          <div
+            v-if="message.isExpanded && message.isExecutionLog && message.toolEntries?.length"
+            class="execution-diagnostics message-render-skip"
+            data-i18n-skip
+          >
+            <details
+              v-for="(entry, i) in message.toolEntries"
+              :key="entry.key || i"
+              class="execution-diag-item"
+            >
+              <summary>{{ entry.toolName || 'tool' }}{{ entry.step != null ? ` #${entry.step}` : '' }}</summary>
+              <pre class="execution-diag-pre">{{ entry.detail }}</pre>
+            </details>
+          </div>
           <div v-if="toolFileAttachments.length > 0" class="tool-file-list">
             <div v-for="file in toolFileAttachments" :key="`${file.url}-${file.name}`" class="tool-file-item">
               <div class="tool-file-main">
@@ -131,10 +152,10 @@
         <!-- 🎨 思考过程消息（可折叠） -->
         <div v-else-if="message.isThinkingProcess" class="thinking-process-content">
           <div class="thinking-header" @click="$emit('toggle-expand', message)">
-            <span class="thinking-label">{{ pageText.thinkingProcess }}</span>
+            <span class="thinking-label">{{ message.isProgress ? message.content : pageText.thinkingProcess }}</span>
           </div>
           <div
-            v-show="message.isThinkingExpanded"
+            v-show="!message.isProgress && message.isThinkingExpanded"
             :key="message.content"
             class="thinking-body message-render-skip"
             data-i18n-skip
@@ -237,6 +258,16 @@ interface ChatMessage {
   imageDataUrls?: string[]; // 多张图片Data URL
   isThinkingProcess?: boolean; // 是否是思考过程
   isThinkingExpanded?: boolean; // 思考过程是否展开
+  isProgress?: boolean;
+  isExecutionLog?: boolean;
+  toolEntries?: Array<{
+    key: string;
+    toolName: string;
+    summary: string;
+    detail: string;
+    time: string;
+    step?: number;
+  }>;
   // Agent Step 专用字段
   stepNumber?: number;
   maxSteps?: number;
@@ -271,6 +302,7 @@ const pageText = computed(() => (
         previewDiagram: 'Preview diagram',
         openInNewTab: 'Open in new tab',
         thinkingProcess: 'Thinking process',
+        executionLog: 'Execution log',
         copy: 'Copy',
         quote: 'Quote',
         retry: 'Retry',
@@ -295,6 +327,7 @@ const pageText = computed(() => (
         previewDiagram: '预览图表',
         openInNewTab: '新标签打开',
         thinkingProcess: '思考过程',
+        executionLog: '执行记录',
         copy: '复制',
         quote: '引用',
         retry: '重试',
@@ -512,6 +545,8 @@ const diagramPayload = computed(() => {
 // 判断工具消息是否需要折叠
 const shouldCollapse = computed(() => {
   if (props.message.messageType !== 'tool') return false;
+  // 本轮汇总执行记录默认折叠
+  if (props.message.isExecutionLog) return true;
 
   // 图表工具结果（display/edit）默认折叠，避免大段JSON/XML占据聊天区
   if (diagramPayload.value?.action === 'display' || diagramPayload.value?.action === 'edit') {
@@ -1332,6 +1367,44 @@ const formatToolMessage = (content: string) => {
 /* 工具消息折叠展开样式 */
 .tool-message-content {
   position: relative;
+}
+
+.progress-line {
+  font-size: 0.88em;
+  color: var(--theme-text-secondary);
+  padding: 2px 0 6px;
+  line-height: 1.45;
+}
+
+.tool-count {
+  font-weight: 500;
+  opacity: 0.75;
+  margin-left: 4px;
+}
+
+.execution-diagnostics {
+  margin-top: 8px;
+  border-top: 1px dashed rgba(var(--theme-accent-rgb), 0.2);
+  padding-top: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.execution-diag-item {
+  margin-bottom: 6px;
+  font-size: 0.82em;
+}
+
+.execution-diag-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0 0;
+  padding: 8px;
+  background: color-mix(in srgb, var(--theme-surface) 88%, black 12%);
+  border-radius: 6px;
+  font-size: 0.78em;
+  max-height: 160px;
+  overflow: auto;
 }
 
 .tool-header {
