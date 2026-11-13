@@ -93,6 +93,10 @@ def correct_misrouted_zone(
     zone: SkillZone,
     decision: IntentDecision,
     kb_policy: Optional[KbAccessPolicy] = None,
+    *,
+    prior_stage: str = "",
+    prior_auth: Optional[dict] = None,
+    turn_relation: str = "",
 ) -> SkillZone:
     """有界路由纠正（FR08.6）：分区与已授权浏览器目标冲突时升到 browser，不扩大写权限。"""
     text = (message or "").strip()
@@ -101,6 +105,30 @@ def correct_misrouted_zone(
     # 已是执行/写/工单区则不抢占
     if zone.zone_id in {ZONE_EXECUTE, ZONE_PLATFORM, ZONE_TICKET_KB}:
         return zone
+
+    # 跨轮：未完成浏览器任务 + 补充/继续 → 服务端升区重挂（不依赖本轮触发词）
+    from orchestrator_integration.turn_context import (
+        BROWSER_ACTIONS,
+        TURN_CONTINUE,
+        TURN_SUPPLEMENT,
+    )
+
+    prior_allows = set((prior_auth or {}).get("allow_actions") or [])
+    prior_browser = prior_stage == "browser_interact" or bool(
+        prior_allows & BROWSER_ACTIONS
+    )
+    if (
+        prior_browser
+        and turn_relation in {TURN_CONTINUE, TURN_SUPPLEMENT}
+        and zone.zone_id in {ZONE_KB_QA, ZONE_WEB, ZONE_GENERAL}
+    ):
+        return SkillZone(
+            ZONE_BROWSER,
+            zone_skills(ZONE_BROWSER),
+            allow_execute=True,
+            reason=f"route_correct:prior_task:{zone.zone_id}->browser",
+        )
+
     from orchestrator_integration.intent_router import (
         _BROWSER_SESSION_FOLLOWUP_RE,
         _INTERACTIVE_SPA_HOST_RE,
@@ -137,6 +165,10 @@ def resolve_skill_zone(
     message: str,
     decision: IntentDecision,
     kb_policy: Optional[KbAccessPolicy] = None,
+    *,
+    prior_stage: str = "",
+    prior_auth: Optional[dict] = None,
+    turn_relation: str = "",
 ) -> SkillZone:
     text = (message or "").strip()
     zone: SkillZone
@@ -215,7 +247,15 @@ def resolve_skill_zone(
             allow_execute=True,
             reason="general",
         )
-    return correct_misrouted_zone(text, zone, decision, kb_policy)
+    return correct_misrouted_zone(
+        text,
+        zone,
+        decision,
+        kb_policy,
+        prior_stage=prior_stage,
+        prior_auth=prior_auth,
+        turn_relation=turn_relation,
+    )
 
 
 def zone_hint(zone: SkillZone) -> str:
@@ -225,9 +265,10 @@ def zone_hint(zone: SkillZone) -> str:
     ]
     if not zone.allow_execute:
         lines.append(
-            "- 本轮禁止 execute_skill_script；只做知识库问答。"
-            "若用户原话已含 URL/加购/传图/执行用例/落库，应在下一轮由路由自动升区；"
-            "禁止要求用户重写「执行 / browser-use / playwright」话术。"
+            "- 本轮未挂载执行工具，仅知识库/只读能力可用。"
+            "若会话存在已授权的未完成执行任务，服务端会在分类前自动复用并重挂工具；"
+            "禁止要求用户重写「执行 / browser-use / playwright」或「再发一句带目标的话」。"
+            "禁止以「下一轮再说」推诿；阻塞须报告具体缺参/缺证据。"
         )
         return "\n".join(lines)
 

@@ -114,17 +114,39 @@ def finalize_task_acceptance(
         auth_scope = getattr(task, "auth_scope", None) or session.auth_scope or {}
         target_url = str((getattr(task, "task_scope", None) or {}).get("target_url") or "")
 
+    playbook_id = getattr(commission, "playbook_id", "") or ""
+    # 持久化阶段优先：浏览器任务不得被本轮 QA 立项跳过证据门禁（FR03.2）
+    cur_stage = str(getattr(task, "current_stage", "") or "") if task else ""
+    allow_actions = set((auth_scope or {}).get("allow_actions") or [])
+    browser_persist = cur_stage == "browser_interact" or bool(
+        allow_actions & {"upload", "add_to_cart", "submit_order", "checkout", "pay"}
+    )
+    if browser_persist and playbook_id != "browser_act":
+        playbook_id = "browser_act"
+
     acceptance = evaluate_post_condition(
         post_condition=getattr(commission, "post_condition", "") or "",
         tool_results=tool_results,
         had_unconfirmed_write=False,
-        playbook_id=getattr(commission, "playbook_id", "") or "",
+        playbook_id=playbook_id,
         auth_scope=auth_scope,
         target_url=target_url,
     )
     # 供 Runtime.accept 绑定末阶段证据（R11）
     acceptance = dict(acceptance)
     acceptance["tool_results"] = tool_results
+    if browser_persist and acceptance.get("ok"):
+        from orchestrator_integration.agent_runtime import stage_acceptance_heuristic
+
+        verdict = stage_acceptance_heuristic(cur_stage or "browser_interact", tool_results)
+        if not verdict.get("ok"):
+            acceptance["ok"] = False
+            reasons = list(acceptance.get("reasons") or [])
+            reasons.append(
+                "原浏览器任务缺少页面动作/产物证据，禁止 completed（不得以用户重发结束）"
+            )
+            acceptance["reasons"] = reasons
+            acceptance["stage_verdict"] = verdict
 
     evt_payload: Dict[str, Any] = {
         "type": "task_completed" if acceptance.get("ok") else "task_blocked",

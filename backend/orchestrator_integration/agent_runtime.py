@@ -49,9 +49,15 @@ def create_or_resume_task(
     auth_scope: Optional[Dict[str, Any]] = None,
     stage_plan: Optional[List[Dict[str, Any]]] = None,
     lease_owner: str = "",
+    turn_relation: str = "",
 ) -> Any:
-    """创建新任务或复用同会话未完成任务（继续语义）。"""
+    """创建新任务或复用同会话未完成任务（继续/补充语义）。"""
     from orchestrator_integration.models import AgentTask, AgentBlackboard
+    from orchestrator_integration.turn_context import (
+        TURN_CONTINUE,
+        TURN_SUPPLEMENT,
+        extract_constraint_patch,
+    )
 
     owner = lease_owner or f"worker-{uuid.uuid4().hex[:8]}"
     now = timezone.now()
@@ -68,19 +74,39 @@ def create_or_resume_task(
         .order_by("-updated_at")
         .first()
     )
-    # 「继续」优先挂到未完成任务
+    # 「继续」关键词或显式 turn_relation=supplement/continue → 复用
     continue_like = any(
-        k in (goal or "") for k in ("继续", "接着", "剩下的", "复用 session_id")
+        k in (goal or "")
+        for k in ("继续", "接着", "剩下的", "复用 session_id", "按上面的方案")
     )
-    if existing and continue_like:
+    relation = (turn_relation or "").strip()
+    should_resume = bool(existing) and (
+        relation in {TURN_CONTINUE, TURN_SUPPLEMENT} or continue_like
+    )
+    if should_resume:
         task = existing
         if not acquire_lease(task, owner):
             return task
-        # 继续语义：保留原目标与授权，不覆盖 goal（AC17）
+        # 继续/补充：保留原目标与授权，不覆盖 goal（AC17 / FR08.5）
         scope = dict(task.task_scope or {})
         if not scope.get("raw_goal"):
             scope["raw_goal"] = task.goal or ""
-        scope["continue_message"] = (goal or "")[:2000]
+        msg = (goal or "")[:2000]
+        if relation == TURN_SUPPLEMENT or (
+            not continue_like and relation != TURN_CONTINUE
+        ):
+            scope["supplement_message"] = msg
+            constraints = dict(scope.get("constraints") or {})
+            constraints.update(extract_constraint_patch(msg))
+            if constraints:
+                scope["constraints"] = constraints
+        else:
+            scope["continue_message"] = msg
+            # 「按上面的方案继续」类也可能带环境补充
+            constraints = dict(scope.get("constraints") or {})
+            constraints.update(extract_constraint_patch(msg))
+            if constraints:
+                scope["constraints"] = constraints
         task.task_scope = scope
         if auth_scope:
             merged = dict(task.auth_scope or {})
@@ -1170,6 +1196,7 @@ class AgentRuntime:
         commission,
         auth_scope: Optional[Dict[str, Any]] = None,
         stage_plan: Optional[List[Dict[str, Any]]] = None,
+        turn_relation: str = "",
     ):
         self.task = create_or_resume_task(
             session=session,
@@ -1180,6 +1207,7 @@ class AgentRuntime:
             auth_scope=auth_scope,
             stage_plan=stage_plan,
             lease_owner=self.lease_owner,
+            turn_relation=turn_relation,
         )
         return self.task
 
@@ -1248,11 +1276,12 @@ class AgentRuntime:
             return {}
         # 多阶段：未到末阶段不得标 completed；推进只由 maybe_advance 负责（FLOW02）
         # R11：刚进入末阶段但末阶段自身验收未通过时，也不得整任务 completed
+        # 单阶段 browser_interact 同样要求阶段证据，禁止无动作 completed
         stages = self.task.stage_plan or []
-        if len(stages) > 1 and acceptance.get("ok"):
+        cur = self.task.current_stage or ""
+        if acceptance.get("ok"):
             ids = [str(s.get("stage_id") or "") for s in stages if isinstance(s, dict)]
-            cur = self.task.current_stage or ""
-            if cur and ids and cur != ids[-1]:
+            if len(stages) > 1 and cur and ids and cur != ids[-1]:
                 return {
                     "type": "stage_changed",
                     "status": "running",
@@ -1264,12 +1293,14 @@ class AgentRuntime:
                     },
                     "deferred_completion": True,
                 }
-            if cur and ids and cur == ids[-1]:
-                last_verdict = stage_acceptance_heuristic(
-                    cur, list((acceptance.get("tool_results") or []))
-                )
-                # finalize 会把 tool_results 放进 acceptance 可选字段；否则再读任务步骤
-                if not acceptance.get("tool_results"):
+            need_stage_proof = bool(
+                cur == "browser_interact"
+                or (len(stages) > 1 and cur and ids and cur == ids[-1])
+            )
+            if need_stage_proof:
+                tool_results = list((acceptance.get("tool_results") or []))
+                last_verdict = stage_acceptance_heuristic(cur, tool_results)
+                if not tool_results:
                     try:
                         from orchestrator_integration.models import AgentStep
 

@@ -1382,7 +1382,44 @@ class AgentLoopStreamAPIView(View):
                 classify_user_intent,
                 decide_kb_access_policy,
             )
-            from orchestrator_integration.skill_zones import resolve_skill_zone
+            from orchestrator_integration.skill_zones import (
+                ZONE_BROWSER,
+                resolve_skill_zone,
+                zone_skills,
+            )
+            from orchestrator_integration.turn_context import (
+                classify_turn_relation,
+                load_open_task_context,
+                routing_text_for_classify,
+                should_preserve_execution,
+                stage_specs_from_prior,
+            )
+
+            # FR08.4/08.5：分类与工具裁剪前加载未完成任务（顺序不得颠倒）
+            _prior_task = None
+            try:
+                _prior_task = await sync_to_async(load_open_task_context)(
+                    session_id=session_id or "",
+                    user_id=int(request.user.id),
+                    project_id=int(project_id) if project_id else None,
+                )
+            except Exception as prior_err:
+                logger.warning(
+                    "AgentLoopStreamAPI: load prior task failed: %s", prior_err
+                )
+                _prior_task = None
+            _turn_relation = classify_turn_relation(user_message, _prior_task)
+            _preserve_exec = should_preserve_execution(_prior_task, _turn_relation)
+            _routing_message = routing_text_for_classify(
+                user_message, _prior_task, _turn_relation
+            )
+            logger.info(
+                "AgentLoopStreamAPI: turn_relation=%s preserve_exec=%s prior=%s stage=%s",
+                _turn_relation,
+                _preserve_exec,
+                getattr(_prior_task, "public_task_id", None),
+                getattr(_prior_task, "current_stage", None),
+            )
 
             user_write_approved = detect_user_write_approval(user_message)
             logger.info(
@@ -1393,14 +1430,19 @@ class AgentLoopStreamAPIView(View):
             _prefetch_for_policy = sanitize_prefetch_query(
                 user_message, keep_hosts=False
             )
-            _early_decision = classify_user_intent(user_message)
+            _early_decision = classify_user_intent(_routing_message)
             _early_kb_policy = decide_kb_access_policy(
-                user_message,
+                _routing_message,
                 _early_decision,
                 prefetch_query=_prefetch_for_policy,
             )
             skill_zone = resolve_skill_zone(
-                user_message, _early_decision, _early_kb_policy
+                _routing_message,
+                _early_decision,
+                _early_kb_policy,
+                prior_stage=getattr(_prior_task, "current_stage", "") or "",
+                prior_auth=getattr(_prior_task, "auth_scope", None) or {},
+                turn_relation=_turn_relation,
             )
             from orchestrator_integration.domain_specialists import run_specialist_prep
             from orchestrator_integration.playbooks import (
@@ -1418,10 +1460,10 @@ class AgentLoopStreamAPIView(View):
 
             # 剧本前置：先命中高频路径，再立项主/辅授权（未命中才走更宽动态面）
             active_playbook = resolve_playbook(
-                user_message, skill_zone, _early_decision, _early_kb_policy
+                _routing_message, skill_zone, _early_decision, _early_kb_policy
             )
             task_commission = commission_task(
-                message=user_message,
+                message=_routing_message,
                 zone=skill_zone,
                 playbook=active_playbook,
                 decision=_early_decision,
@@ -1435,37 +1477,61 @@ class AgentLoopStreamAPIView(View):
             )
 
             _stage_specs = build_stage_plan(
-                user_message,
+                _routing_message,
                 _early_decision,
                 playbook_id=active_playbook.playbook_id if active_playbook else "",
             )
+            # 补充/继续：沿用持久化阶段，避免 QA 立项覆盖浏览器验收口径
+            if _preserve_exec and _prior_task is not None:
+                prior_specs = stage_specs_from_prior(_prior_task)
+                if prior_specs:
+                    _stage_specs = prior_specs
             _current_stage_id = (
-                _stage_specs[0].stage_id if _stage_specs else ""
-            )
+                (getattr(_prior_task, "current_stage", "") or "")
+                if _preserve_exec and _prior_task is not None
+                else ""
+            ) or (_stage_specs[0].stage_id if _stage_specs else "")
             _stage_mount = stage_mount_policy(_stage_specs, _current_stage_id)
             specialist_spec, specialist_hint_text, specialist_allow = (
-                run_specialist_prep(skill_zone, user_message)
+                run_specialist_prep(skill_zone, _routing_message)
             )
-            # 未挂知识库时即使分区是 kb_qa 也挂 execute（无处可答；写入另有确认门）
-            mount_execute = skill_zone.allow_execute or not kb_qa_mode
+            # 知识库与执行解耦：已授权未完成执行任务不得因 kb 开启被卸掉
+            mount_execute = (
+                skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
+            )
             # 小工具面 = 任务主类（完整授权）；辅类需 Escape Hatch
             skill_allowlist = task_commission.effective_allowlist()
             if skill_allowlist is None and skill_zone.allow_execute:
                 skill_allowlist = skill_zone.effective_allowlist()
-            if not skill_zone.allow_execute and kb_qa_mode:
+            if _preserve_exec:
+                # 服务端有界重挂：恢复浏览器/阶段 Skill，并保留元工具纠正通道
+                restored = set(zone_skills(ZONE_BROWSER))
+                stage_skills = set(_stage_mount.get("skill_names") or [])
+                if stage_skills:
+                    restored |= stage_skills
+                if skill_allowlist is None:
+                    skill_allowlist = restored
+                else:
+                    skill_allowlist = set(skill_allowlist) | restored
+            elif not skill_zone.allow_execute and kb_qa_mode:
                 skill_allowlist = set()
             if specialist_allow is not None and skill_allowlist is not None:
                 skill_allowlist = skill_allowlist & specialist_allow
             elif specialist_allow is not None:
                 skill_allowlist = specialist_allow
             # 复合任务：与当前阶段 Skill 能力求交（保留元工具路径）
-            if _stage_mount.get("restrict") and skill_allowlist is not None:
+            if (
+                _stage_mount.get("restrict")
+                and skill_allowlist is not None
+                and not _preserve_exec
+            ):
                 stage_skills = set(_stage_mount.get("skill_names") or [])
                 if stage_skills:
                     skill_allowlist = skill_allowlist & stage_skills or skill_allowlist
 
             # 短路轮：去掉知识库工具，避免预检索干扰极速路径
             # R17：当前阶段需要 knowledge_search 时不得因 short_circuit 裁掉
+            # 补充轮可并行查库，但不得因此卸掉执行工具
             stage_needs_kb = False
             try:
                 stage_needs_kb = (
@@ -1477,7 +1543,12 @@ class AgentLoopStreamAPIView(View):
                 )
             except Exception:
                 stage_needs_kb = False
-            if task_commission.short_circuit and tools and not stage_needs_kb:
+            if (
+                task_commission.short_circuit
+                and tools
+                and not stage_needs_kb
+                and not _preserve_exec
+            ):
                 tools = [
                     t
                     for t in tools
@@ -1532,12 +1603,27 @@ class AgentLoopStreamAPIView(View):
 
             # 6.1 意图路由：按用户话术裁剪工具，减少误调
             intent_decision, tools, intent_hint, kb_policy = apply_intent_routing(
-                user_message,
+                _routing_message,
                 tools,
-                kb_active=kb_qa_mode and not task_commission.short_circuit,
+                kb_active=kb_qa_mode
+                and not (task_commission.short_circuit and not _preserve_exec),
                 prefetch_query=_prefetch_for_policy,
                 skill_zone=skill_zone,
             )
+            # 跨轮执行保留：强制确保 execute + 元工具纠正通道存在
+            if _preserve_exec and mount_execute:
+                have = {getattr(t, "name", "") for t in tools}
+                for mt in builtin_tools:
+                    name = getattr(mt, "name", "")
+                    if name in {
+                        "execute_skill_script",
+                        "request_tool_expansion",
+                        "assert_task_postcondition",
+                        "report_task_blocked",
+                        "read_skill_content",
+                    } and name not in have:
+                        tools.append(mt)
+                        have.add(name)
             # 短路时强制保留元工具
             if task_commission.short_circuit:
                 meta_names = {
@@ -1677,7 +1763,22 @@ class AgentLoopStreamAPIView(View):
                 )
 
                 stages = [s.to_dict() for s in _stage_specs]
-                auth_scope = infer_auth_scope(user_message)
+                # 补充轮：授权以持久化为主，本轮仅合并显式新增（create_or_resume 内处理）
+                auth_scope = (
+                    dict(getattr(_prior_task, "auth_scope", None) or {})
+                    if _preserve_exec and _prior_task is not None
+                    else infer_auth_scope(user_message)
+                )
+                if _preserve_exec and _prior_task is not None:
+                    # 补充话术可能带出新约束，但不得用本轮短句覆盖原 deny
+                    patch_auth = infer_auth_scope(_routing_message)
+                    allow = set(auth_scope.get("allow_actions") or [])
+                    deny = set(auth_scope.get("deny_actions") or [])
+                    allow |= set(patch_auth.get("allow_actions") or [])
+                    deny |= set(patch_auth.get("deny_actions") or [])
+                    allow -= deny
+                    auth_scope["allow_actions"] = sorted(allow)
+                    auth_scope["deny_actions"] = sorted(deny)
                 agent_runtime = AgentRuntime()
                 runtime_task = await sync_to_async(agent_runtime.start)(
                     session=chat_session,
@@ -1687,6 +1788,9 @@ class AgentLoopStreamAPIView(View):
                     commission=task_commission,
                     auth_scope=auth_scope,
                     stage_plan=stages,
+                    turn_relation=_turn_relation
+                    if "_turn_relation" in locals()
+                    else "",
                 )
                 # R15：未获租约不得构造执行器/派发动作
                 if (

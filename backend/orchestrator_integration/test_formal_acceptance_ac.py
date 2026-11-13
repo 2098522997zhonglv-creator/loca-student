@@ -463,6 +463,11 @@ class FormalAcceptanceAC16to30Tests(TestCase):
     def test_ac19_natural_language_browser_intent(self):
         from orchestrator_integration.intent_router import classify_user_intent
         from orchestrator_integration.stage_plan import infer_auth_scope
+        from orchestrator_integration.turn_context import (
+            PriorTaskContext,
+            classify_turn_relation,
+            should_preserve_execution,
+        )
 
         for text in (
             "帮我上传后加购",
@@ -477,6 +482,17 @@ class FormalAcceptanceAC16to30Tests(TestCase):
                 or "upload" in auth["allow_actions"],
                 msg=text,
             )
+        # 多轮：无「继续」词的环境补充仍复用未完成浏览器任务
+        prior = PriorTaskContext(
+            task_pk=1,
+            public_task_id="ac19",
+            goal="上传后加购 https://a.callie.cc/p1",
+            current_stage="browser_interact",
+            auth_scope={"allow_actions": ["upload", "add_to_cart"]},
+        )
+        follow = "后台用测试环境，站点选美站。"
+        rel = classify_turn_relation(follow, prior)
+        self.assertTrue(should_preserve_execution(prior, rel), rel)
 
     def test_ac20_route_correction_to_browser(self):
         from orchestrator_integration.intent_router import IntentDecision
@@ -487,6 +503,7 @@ class FormalAcceptanceAC16to30Tests(TestCase):
             correct_misrouted_zone,
             zone_skills,
         )
+        from orchestrator_integration.turn_context import TURN_SUPPLEMENT
 
         text = "打开这个商品页上传图片后加购 https://a.callie.cc/p1"
         bad = SkillZone(ZONE_KB_QA, frozenset(), allow_execute=False, reason="kb_qa")
@@ -495,6 +512,17 @@ class FormalAcceptanceAC16to30Tests(TestCase):
         )
         self.assertEqual(fixed.zone_id, ZONE_BROWSER)
         self.assertEqual(fixed.allowed_skills, zone_skills(ZONE_BROWSER))
+        # 多轮：仅补参、无操作关键词，也须据 prior 升区
+        patched = correct_misrouted_zone(
+            "站点选美站",
+            bad,
+            IntentDecision(intents=set(), primary="qa"),
+            prior_stage="browser_interact",
+            prior_auth={"allow_actions": ["upload", "add_to_cart"]},
+            turn_relation=TURN_SUPPLEMENT,
+        )
+        self.assertEqual(patched.zone_id, ZONE_BROWSER)
+        self.assertIn("prior_task", patched.reason)
 
     def test_ac21_order_branch_clarification_does_not_block_cart_auth(self):
         from orchestrator_integration.stage_plan import infer_auth_scope
