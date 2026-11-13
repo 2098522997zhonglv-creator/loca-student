@@ -247,7 +247,8 @@ def commission_hint(commission: TaskCommission) -> str:
             lines.append(
                 "- 短路只限制 Skill 探索：入口优先预检索/knowledge_search（≤2 次），入口已定禁止再查库；"
                 "所见所得/传图必须传图预览有效，禁止改做刻字/戒指等非传图品凑 cart_id；"
-                "禁止本机扫盘猜 URL；页面结果必须来自真实浏览器。"
+                "禁止本机扫盘猜 URL；页面结果必须来自真实浏览器；"
+                "失败后同轮自愈重试（勿写「下一步续跑」等用户）；加购成功前禁止问邮箱/下单。"
             )
         else:
             lines.append(

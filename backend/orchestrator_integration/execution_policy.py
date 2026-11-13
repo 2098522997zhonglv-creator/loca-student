@@ -617,6 +617,40 @@ def evaluate_delivery_evidence(
                     {"blocker_code": "wysiwyg_upload_required", "step": "upload"}
                 )
 
+    # 假自主：已写出可执行改法却停下来等用户「续跑」
+    deferred_heal = bool(
+        re.search(
+            r"下一步.{0,48}(可直接续跑|无需你重写|请.?确认续跑|我这边可直接续跑)",
+            joined,
+        )
+        or re.search(
+            r"(重新进入同一\s*PDP|先填\s*Size.{0,24}再传图).{0,80}(直接点\s*Add To Cart|直接加购)",
+            joined,
+            re.I,
+        )
+    )
+    still_upload_blocked = bool(
+        re.search(
+            r"Please upload your photo|无任何\s*`?cart`?\s*相关\s*POST|导航栏\s*Cart\s*仍为\s*0",
+            joined,
+            re.I,
+        )
+    )
+    asked_order_too_early = bool(
+        re.search(r"(白名单.{0,8}邮箱|是否继续到.{0,12}提交订单)", joined)
+        and still_upload_blocked
+    )
+    if deferred_heal and still_upload_blocked:
+        ok = False
+        reasons.append(
+            "已定位可执行改法（续跑步骤）却停写「下一步」等用户；须同轮自愈重试后再交付或 blocked"
+        )
+        blockers.append({"blocker_code": "deferred_self_heal", "step": "autonomy"})
+    if asked_order_too_early:
+        ok = False
+        reasons.append("加购尚未成功时不得索要白名单邮箱或询问是否提交订单")
+        blockers.append({"blocker_code": "premature_checkout_ask", "step": "autonomy"})
+
     # RC22：证据 epoch 不匹配的旧 cart_id
     epoch_now = (
         int(evidence_epoch)

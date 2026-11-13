@@ -122,12 +122,19 @@ def resolve_playbook(
                 "禁止 url-reader；禁止用知识库结论代替真实页面结果",
                 "read_skill_content(playwright-skill)（同会话已读过可跳过）",
                 "用户要「所见即所得/传图」时：必须选带 Upload Photo 的商品；禁止改做刻字/戒指/仅填名字的品交差",
-                "execute_skill_script：打开已取证目标站 → 传图（须有上传请求或预览非占位）→ 加购；交付真实 cart_id 等",
+                "默认短链：打开已取证目标站 → 填 Size/必填文本 → 传图（须有上传请求或预览非占位）→ 不关 Live preview → Add To Cart；交付真实 cart_id 等",
                 "上传：filechooser 优先，失败再 setInputFiles；计数器停在 0/1 或仍 upload.svg 视为失败，不得宣称加购成功",
-                "同一失败（上传/加购）至多换策略 2 次；仍失败则 report_task_blocked 说明阻塞，禁止换品类凑 cart_id",
+                "自主自愈：若加购报 Please upload your photo / 角标仍 0，立即同轮按上序重试（最多再 2 次）；禁止写成「下一步请续跑」等用户确认",
+                "同一失败策略用尽仍失败 → report_task_blocked（写清技术阻塞）；禁止换品类凑 cart_id；加购成功前禁止问邮箱/是否下单",
                 "只授权加购时不得提交订单；支付/写库才走确认；知识库示例编号不得充当本次结果",
             ),
-            skip=("url-reader", "本机考古", "未确认的平台写入", "非目标品类交差"),
+            skip=(
+                "url-reader",
+                "本机考古",
+                "未确认的平台写入",
+                "非目标品类交差",
+                "假下一步等用户续跑",
+            ),
             preferred_skills=("playwright-skill", "ui-automation"),
         )
 
@@ -193,4 +200,8 @@ def playbook_hint(playbook: Optional[Playbook]) -> str:
     if playbook.skip:
         lines.append("- 禁止/跳过: " + ", ".join(playbook.skip))
     lines.append("- 不要偏离剧本自由探索其它 Skill。")
+    lines.append(
+        "- 自主：同轮内自行抉择与自愈；发现可执行改法必须立刻继续调用工具，"
+        "禁止用「下一步/可直接续跑」把决策推回用户。"
+    )
     return "\n".join(lines)

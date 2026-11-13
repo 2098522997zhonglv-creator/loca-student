@@ -242,7 +242,8 @@ def get_meta_tools() -> list:
     def report_task_blocked(summary: str, missing_capability: str = "") -> str:
         """任务无法由当前工具面完成时的降级出口（草稿/人工托管说明）。
 
-        在 Escape Hatch 用尽或确认无匹配工具时调用，禁止继续无差别重试。
+        仅当策略已用尽或确认技术不可达时调用。若你已想出可执行改法（换序/换上传方式），
+        必须先同轮继续 execute_skill_script 自愈，禁止用本工具代替「下一步请续跑」。
 
         Args:
             summary: 已收集的参数与进展摘要
@@ -271,6 +272,8 @@ def get_meta_tools() -> list:
             "message": (
                 "任务受阻：把下列进展与技术阻塞原样告知用户，不要再调用执行工具。"
                 "禁止要求用户重写指令、说「执行」、点名 Skill，或二选一确认目标。"
+                "若 summary 里仍写着可执行的「下一步续跑」步骤，说明过早调用了本工具——"
+                "下次应先同轮自愈执行那些步骤。"
             ),
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
