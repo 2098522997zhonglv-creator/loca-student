@@ -1526,12 +1526,22 @@ export function applyTaskSnapshotToStream(
     stream.taskEvents = merged;
   }
 
-  const terminal = new Set(['completed', 'failed', 'cancelled']);
+  // 终态/阻塞态：恢复阶段条即可，禁止把 isComplete 置 false，
+  // 否则 displayedMessages 会画出「正在生成」气泡，像重新触发了对话。
+  const terminal = new Set([
+    'completed',
+    'task_completed',
+    'failed',
+    'cancelled',
+    'blocked',
+    'task_blocked',
+    'paused',
+  ]);
   if (terminal.has(status)) {
     stream.isComplete = true;
     stream.isWaitingForApproval = false;
   } else if (status === 'awaiting_approval') {
-    stream.isComplete = false;
+    stream.isComplete = true; // 不在生成，只是等人确认
     stream.isWaitingForApproval = true;
     // RC07：优先用快照 pending_approval（含原动作），刷新后可再确认
     const pendingAppr = snap.pending_approval as Record<string, unknown> | undefined;
@@ -1571,8 +1581,16 @@ export function applyTaskSnapshotToStream(
   } else if (status === 'cancelling') {
     stream.isComplete = false;
     stream.isWaitingForApproval = false;
+  } else if (status === 'running' || status === 'in_progress') {
+    // 仅确认仍在跑时保持加载态；无 status 的空快照不当成生成中
+    stream.isComplete = false;
+    stream.isWaitingForApproval = false;
+  } else if (!status) {
+    // 快照无状态：不要凭空制造「生成中」
+    if (!stream.content && !(stream.messages && stream.messages.length)) {
+      stream.isComplete = true;
+    }
   } else {
-    // running / blocked / paused：不假装已完成
     stream.isComplete = false;
   }
 }
