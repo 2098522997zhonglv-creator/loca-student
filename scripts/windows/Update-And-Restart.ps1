@@ -64,15 +64,17 @@ if ($needPipInstall) {
     if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 }
 
+# 始终 migrate：避免「代码已更新但 SQLite 缺列」（如 agent_task.project_id）导致质量指标/Agent 接口 500
+Write-UpdateLog "Running Django migrations (always)..."
+Push-Location (Join-Path $script:RepoRoot "backend")
+try {
+    & $script:PythonExe manage.py migrate --noinput
+    if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
+} finally {
+    Pop-Location
+}
 if ($needMigrate) {
-    Write-UpdateLog "Running Django migrations..."
-    Push-Location (Join-Path $script:RepoRoot "backend")
-    try {
-        & $script:PythonExe manage.py migrate --noinput
-        if ($LASTEXITCODE -ne 0) { throw "migrate failed" }
-    } finally {
-        Pop-Location
-    }
+    Write-UpdateLog "Migration was also flagged by diff (schema files changed)."
 }
 
 if ($needFrontendBuild) {
