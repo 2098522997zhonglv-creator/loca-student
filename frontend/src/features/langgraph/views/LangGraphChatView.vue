@@ -196,6 +196,7 @@ import { IconFullscreen, IconFullscreenExit } from '@arco-design/web-vue/es/icon
 import type { ToolFileAttachment } from '@/features/langgraph/utils/toolResultParser';
 import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolResultParser';
 import {
+  absorbToolResultEvent,
   looksLikeEnglishToolNarration,
   buildProgressText,
   mergeHistoryToolMessages,
@@ -2206,19 +2207,43 @@ const handleNormalMessage = async (requestData: ChatRequest, originalMessage: st
         };
       }
 
-      // 添加工具结果消息（如果有）
+      // 非流式：工具结果汇总为一张折叠执行记录（禁止一结果一卡）
       if (data.tool_results && data.tool_results.length > 0) {
+        const stub = { content: '', messages: [] as any[], seenToolEventKeys: new Set<string>() };
         for (const toolResult of data.tool_results) {
-          const toolPayload = parseToolResultDisplayPayload(toolResult.tool_output || toolResult.summary);
+          const toolPayload = parseToolResultDisplayPayload(
+            toolResult.tool_output || toolResult.summary
+          );
+          absorbToolResultEvent(
+            stub,
+            {
+              event_id: `ns-${toolResult.step}-${toolResult.tool_name}-${String(toolResult.summary || '').slice(0, 40)}`,
+              tool_name: toolResult.tool_name,
+              summary: toolResult.summary,
+              step: toolResult.step,
+              tool_output: toolResult.tool_output || toolResult.summary,
+            },
+            {
+              time: getCurrentTime(),
+              content: toolPayload.content || toolResult.summary || '',
+              imageDataUrl: toolPayload.imageDataUrl,
+              summary: toolResult.summary,
+            }
+          );
+        }
+        for (const msg of stub.messages) {
           messages.value.push({
-            content: toolPayload.content || toolResult.summary,
+            content: msg.content,
             isUser: false,
-            time: getCurrentTime(),
-            messageType: 'tool',
-            toolName: toolResult.tool_name,
-            imageDataUrl: toolPayload.imageDataUrl,
-            fileAttachments: toolPayload.fileAttachments,
-            isExpanded: false
+            time: msg.time || getCurrentTime(),
+            messageType: (msg.type as ChatMessage['messageType']) || 'tool',
+            toolName: msg.toolName,
+            isExpanded: false,
+            isProgress: msg.isProgress,
+            isExecutionLog: msg.isExecutionLog,
+            toolEntries: msg.toolEntries,
+            imageDataUrl: msg.imageDataUrl as string | undefined,
+            fileAttachments: msg.fileAttachments as ToolFileAttachment[] | undefined,
           });
         }
       }
