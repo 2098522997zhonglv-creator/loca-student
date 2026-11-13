@@ -1061,34 +1061,76 @@ def get_skill_tools(
         except Exception as exc:
             logger.debug("skill telemetry 失败: %s", exc)
 
-    def _consume_budget(n: int = 1, *, duration_ms: int = 0) -> Optional[str]:
+    def _persist_task():
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+            from orchestrator_integration.models import AgentTask
+
+            ctx = get_telemetry_context()
+            if not ctx.runtime_task_id:
+                return None
+            return AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+        except Exception:
+            return None
+
+    def _reserve_batch_budget(n: int) -> int:
+        task = _persist_task()
+        if task is None:
+            return 0
+        try:
+            from orchestrator_integration.agent_runtime import reserve_tool_actions
+
+            ok, took, _detail = reserve_tool_actions(task, n)
+            return int(took if ok else 0)
+        except Exception as exc:
+            logger.debug("reserve_tool_actions failed: %s", exc)
+            return 0
+
+    def _release_batch_reservation() -> None:
+        task = _persist_task()
+        if task is None:
+            return
+        try:
+            from orchestrator_integration.agent_runtime import release_tool_reservation
+
+            release_tool_reservation(task)
+        except Exception as exc:
+            logger.debug("release_tool_reservation failed: %s", exc)
+
+    def _consume_budget(
+        n: int = 1, *, duration_ms: int = 0, prefer_reserved: bool = False
+    ) -> Optional[str]:
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
             ctx = get_telemetry_context()
             commission = ctx.commission
             # 先扣持久化任务预算（FLOW03），再扣内存立项计数
-            if ctx.runtime_task_id:
+            task = _persist_task()
+            if task is not None:
                 try:
-                    from orchestrator_integration.agent_runtime import consume_budget
-                    from orchestrator_integration.models import AgentTask
+                    from orchestrator_integration.agent_runtime import (
+                        consume_budget,
+                        settle_reserved_action,
+                    )
 
-                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
-                    if task is not None:
+                    if prefer_reserved and n == 1 and not duration_ms:
+                        ok_db, detail_db = settle_reserved_action(task)
+                    else:
                         ok_db, detail_db = consume_budget(
                             task,
                             tool_steps=n,
                             duration_ms=max(0, int(duration_ms or 0)),
                         )
-                        if not ok_db:
-                            _emit_telemetry(
-                                tool_name="execute_skill_script",
-                                skill_name="budget",
-                                success=False,
-                                error_kind="budget_exceeded",
-                                result_text=detail_db,
-                            )
-                            return detail_db
+                    if not ok_db:
+                        _emit_telemetry(
+                            tool_name="execute_skill_script",
+                            skill_name="budget",
+                            success=False,
+                            error_kind="budget_exceeded",
+                            result_text=detail_db,
+                        )
+                        return detail_db
                 except Exception as persist_err:
                     logger.debug("persist budget consume failed: %s", persist_err)
             if commission is None:
@@ -1755,7 +1797,7 @@ def get_skill_tools(
                         "result": redirect,
                     }
 
-                budget_err = _consume_budget(1)
+                budget_err = _consume_budget(1, prefer_reserved=True)
                 if budget_err:
                     return {
                         "index": idx,
@@ -1849,6 +1891,8 @@ def get_skill_tools(
                 f"parallel={run_parallel}, max_workers={max_workers}, "
                 f"user_confirmed={user_confirmed}, notes={list(batch_plan.notes)}"
             )
+            # FR07：批次预留额度；结束时释放未启动预留（不计实耗）
+            _reserve_batch_budget(len(commands))
 
             results: list[Optional[dict[str, object]]] = [None] * len(commands)
             from orchestrator_integration.tool_result import (
@@ -2096,6 +2140,7 @@ def get_skill_tools(
                 error_kind="" if batch_summary.get("ok") else "batch_partial_error",
                 result_text=out[:800],
             )
+            _release_batch_reservation()
             return out
 
         # 单个执行模式

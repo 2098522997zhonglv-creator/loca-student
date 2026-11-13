@@ -1,0 +1,29 @@
+Found 57 test(s).
+System check identified no issues (0 silenced).
+
+ounts.signals 用户 rc20u 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc15u 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc15u 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc15u 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc23u 默认提示词初始化完成: created=10 skipped=0
+2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc23o 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc23u 默认提示词初始化完成: created=10 skipped=0
+2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc23o 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rsv_u 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc08m 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc08m 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 rc09m 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:54 [INFO] accounts.signals 用户 mt-cap 默认提示词初始化完成: created=10 skipped=0
+2026-11-13 15:59:54 [INFO] orchestrator_integration [BuiltinTools] 加载 4 个元工具(Escape Hatch)
+2026-11-13 15:59:54 [INFO] orchestrator_integration [BuiltinTools] 加载 2 个 Skill 工具 allow_execute=True allowlist=['browser-use', 'playwright-cli', 'playwright-skill', 'ui-automation']
+..2026-11-13 15:59:54 [INFO] accounts.signals 用户 mt-acc 默认提示词初始化完成: created=10 skipped=0
+.2026-11-13 15:59:55 [INFO] accounts.signals 用户 mt-sup 默认提示词初始化完成: created=10 skipped=0
+.........................
+----------------------------------------------------------------------
+Ran 57 tests in 2.742s
+
+OK
+Destroying test database for alias 'default'...
+2026-11-13 15:59:55 [INFO] mcp_tools.persistent_client Cleaning up all MCP clients...
+2026-11-13 15:59:55 [INFO] mcp_tools.persistent_client All MCP clients and session contexts cleaned up
+2026-11-13 15:59:55 [INFO] mcp_tools.signals MCP sessions cleaned up on application exit

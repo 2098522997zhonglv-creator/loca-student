@@ -20,14 +20,31 @@ from pathlib import Path
 from django.test import SimpleTestCase
 
 
+_REQUIRED_ENV = (
+    "CALLIE_BASE_URL",
+    "CALLIE_USERNAME",
+    "CALLIE_PASSWORD",
+    "CALLIE_PRODUCT_URL",
+)
+
+
+def missing_callie_env() -> list:
+    """RC18：显式列出缺失的联验环境变量（跳过项可复核）。"""
+    return [k for k in _REQUIRED_ENV if not (os.environ.get(k) or "").strip()]
+
+
 def _env_ready() -> bool:
-    required = (
-        "CALLIE_BASE_URL",
-        "CALLIE_USERNAME",
-        "CALLIE_PASSWORD",
-        "CALLIE_PRODUCT_URL",
-    )
-    return all(os.environ.get(k) for k in required)
+    return not missing_callie_env()
+
+
+def _skip_reason() -> str:
+    missing = missing_callie_env()
+    if missing:
+        return (
+            "RC18 SKIP 真实 Callie E2E：缺少环境变量 "
+            f"{missing}；已配置项不计入通过。设置全部 CALLIE_* 后重跑。"
+        )
+    return "CALLIE_* 未就绪"
 
 
 def _sample_image() -> Path:
@@ -38,19 +55,35 @@ def _sample_image() -> Path:
     return fixture
 
 
-@unittest.skipUnless(_env_ready(), "CALLIE_* 未配置，跳过真实站点 E2E")
+@unittest.skipUnless(_env_ready(), _skip_reason())
 class CallieUploadCartOrderE2ETests(SimpleTestCase):
     """真实浏览器路径：登录 → 打开商品 → 上传 → 预览/加购 →（可选）提交订单。"""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        # RC18：verbose 输出可复核跳过清单（即使未 skip 也打印策略）
+        print(
+            "[RC18 Callie E2E] required_env=%s missing=%s "
+            "ALLOW_SUBMIT_ORDER=%s REQUIRE_NATIVE=%s"
+            % (
+                list(_REQUIRED_ENV),
+                missing_callie_env(),
+                os.environ.get("CALLIE_ALLOW_SUBMIT_ORDER", "0"),
+                os.environ.get("CALLIE_REQUIRE_NATIVE", "0"),
+            ),
+            flush=True,
+        )
 
     def test_upload_add_to_cart_and_optional_submit_order(self):
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
-            self.skipTest(f"playwright 未安装: {exc}")
+            self.skipTest(f"RC18 SKIP：playwright 未安装: {exc}")
 
         image = _sample_image()
         if not image.is_file():
-            self.skipTest(f"上传样例不存在: {image}")
+            self.skipTest(f"RC18 SKIP：上传样例不存在: {image}")
 
         base = os.environ["CALLIE_BASE_URL"].rstrip("/")
         user = os.environ["CALLIE_USERNAME"]
@@ -144,10 +177,20 @@ class CallieUploadCartOrderE2ETests(SimpleTestCase):
                 re.I,
             )
             if m:
-                evidence["cart_id"] = m.group(2)
+                cid = m.group(2)
+                # D03/RC18：禁止用点击观察值冒充真实编号
+                if cid.lower() in {
+                    "observed_cart_action",
+                    "placeholder",
+                    "static_preview",
+                    "preview",
+                }:
+                    evidence["cart_id"] = ""
+                else:
+                    evidence["cart_id"] = cid
             elif cart_clicked:
-                # 页面未必暴露文本 ID；至少记录 URL 线索
-                evidence["cart_id"] = "observed_cart_action"
+                # 仅记录动作发生，不写入伪 cart_id
+                evidence["cart_clicked"] = True
 
             if allow_submit:
                 for sel in (
@@ -178,9 +221,14 @@ class CallieUploadCartOrderE2ETests(SimpleTestCase):
         require_native = os.environ.get("CALLIE_REQUIRE_NATIVE", "0") == "1"
         if require_native:
             self.assertEqual(evidence["upload_method"], "filechooser")
+        # D03：必须有真实类型化 cart_id；静态 Preview 文案或仅点击不得过关
         self.assertTrue(
-            evidence["cart_id"] or evidence["preview_ok"],
-            f"加购/预览证据不足: {evidence}",
+            bool(evidence.get("cart_id")),
+            f"缺少真实 cart_id/cart_item_id（禁止 observed_cart_action/静态 Preview）: {evidence}",
+        )
+        self.assertNotEqual(
+            str(evidence.get("cart_id") or "").lower(),
+            "observed_cart_action",
         )
         if allow_submit:
             self.assertTrue(

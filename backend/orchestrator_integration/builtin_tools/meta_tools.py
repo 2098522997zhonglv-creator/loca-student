@@ -115,11 +115,35 @@ def get_meta_tools() -> list:
             return json.dumps(
                 {"ok": False, "reasons": ["无任务立项"]}, ensure_ascii=False
             )
+        facts: dict = {}
+        stage_plan: list = []
+        target_url = ""
+        auth_scope = {}
+        task = getattr(ctx, "task", None)
+        if task is None and getattr(ctx, "task_id", None):
+            try:
+                from orchestrator_integration.models import AgentTask
+
+                task = AgentTask.objects.filter(task_id=ctx.task_id).first()
+            except Exception:
+                task = None
+        if task is not None:
+            facts = dict(getattr(task, "facts", None) or {})
+            stage_plan = list(getattr(task, "stage_plan", None) or [])
+            auth_scope = getattr(task, "auth_scope", None) or {}
+            target_url = str(
+                (getattr(task, "task_scope", None) or {}).get("target_url") or ""
+            )
         verdict = evaluate_post_condition(
             post_condition=commission.post_condition,
             tool_results=list(commission.last_tool_results),
             had_unconfirmed_write=bool(had_unconfirmed_write),
             playbook_id=commission.playbook_id,
+            auth_scope=auth_scope,
+            target_url=target_url,
+            stage_plan=stage_plan,
+            facts=facts,
+            evidence_epoch=facts.get("evidence_epoch"),
         )
         record_tool_telemetry(
             zone=commission.zone_id,
@@ -132,6 +156,87 @@ def get_meta_tools() -> list:
             user_id=ctx.user_id,
         )
         return json.dumps(verdict, ensure_ascii=False, indent=2)
+
+    @langchain_tool
+    def request_executor_heal(
+        from_skill: str,
+        to_skill: str,
+        reason: str = "",
+    ) -> str:
+        """RC03：在已授权的等价执行器组内有界切换（不扩权、不改 deny）。
+
+        仅当当前执行器不可用且备用在同组且已授权时使用。禁止要求用户改路由话术。
+        """
+        from orchestrator_integration.action_auth import (
+            record_heal_switch,
+            resolve_equivalent_executor,
+        )
+        from orchestrator_integration.models import AgentTask
+        from orchestrator_integration.telemetry_context import get_telemetry_context
+        from orchestrator_integration.tool_telemetry import record_tool_telemetry
+
+        ctx = get_telemetry_context()
+        commission = ctx.commission
+        allowed = set()
+        if commission is not None:
+            allowed = set(commission.effective_allowlist() or set())
+        allowed |= set(ctx.granted_skills or set())
+        resolved = resolve_equivalent_executor(
+            current=from_skill,
+            candidates=[to_skill],
+            allowed_skills=allowed,
+        )
+        if not resolved.get("ok"):
+            record_tool_telemetry(
+                zone=ctx.zone,
+                tool_name="request_executor_heal",
+                skill_name=to_skill,
+                success=False,
+                error_kind="no_authorized_equivalent",
+                attribution="planning",
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+            )
+            return json.dumps(
+                {
+                    "status": "denied",
+                    "message": resolved.get("message"),
+                    "hint": "请在已授权能力内重试或 report_task_blocked；禁止让用户重写指令。",
+                },
+                ensure_ascii=False,
+            )
+        count = 0
+        if ctx.runtime_task_id:
+            task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+            if task is not None:
+                rec = record_heal_switch(
+                    task,
+                    from_skill=from_skill,
+                    to_skill=to_skill,
+                    reason=reason or "executor_unavailable",
+                )
+                count = int(rec.get("count") or 0)
+        record_tool_telemetry(
+            zone=ctx.zone,
+            tool_name="request_executor_heal",
+            skill_name=to_skill,
+            success=True,
+            error_kind="",
+            attribution="planning",
+            session_id=ctx.session_id,
+            user_id=ctx.user_id,
+        )
+        return json.dumps(
+            {
+                "status": "switched",
+                "from": from_skill,
+                "to": to_skill,
+                "reason": reason or "equivalent_authorized_executor",
+                "heal_switch_count": count,
+                "message": f"已切换到已授权等价执行器 {to_skill}（第 {count} 次自愈）。",
+            },
+            ensure_ascii=False,
+        )
 
     @langchain_tool
     def report_task_blocked(summary: str, missing_capability: str = "") -> str:
@@ -170,4 +275,9 @@ def get_meta_tools() -> list:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    return [request_tool_expansion, assert_task_postcondition, report_task_blocked]
+    return [
+        request_tool_expansion,
+        request_executor_heal,
+        assert_task_postcondition,
+        report_task_blocked,
+    ]

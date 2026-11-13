@@ -1143,6 +1143,24 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertIn("pending_json", approve_msg)
         self.assertIn("重挂", approve_msg)
         self.assertIn("放行工具", approve_msg)
+        # D01：ToolResult 包装后仍能解出 pending
+        from orchestrator_integration.tool_result import classify_skill_output
+
+        wrapped = classify_skill_output(text=raw).to_tool_text()
+        parsed_wrapped = parse_needs_confirmation(wrapped)
+        self.assertIsNotNone(parsed_wrapped)
+        self.assertTrue(
+            isinstance(parsed_wrapped.get("pending"), dict)
+            and bool(parsed_wrapped.get("pending"))
+        )
+        # 服务端已执行路径：汇总，不再要求模型自批写入
+        done_msg = build_resume_user_message(
+            "approve",
+            pending,
+            server_executed={"ok": True, "results": [{"output": "testcase_id=1"}]},
+        )
+        self.assertIn("服务端已精确执行", done_msg)
+        self.assertIn("禁止再次调用写入", done_msg)
         reject_msg = build_resume_user_message("reject", pending)
         self.assertFalse(detect_user_write_approval(reject_msg))
 

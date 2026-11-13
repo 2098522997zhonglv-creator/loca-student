@@ -145,7 +145,7 @@ _TASK_LANGUAGE_HINT = """
 - 进度说明与最终答复必须与用户消息同语种；用户使用中文时，禁止用英文旁白（如 I'll / Let me / Now I will call）。
 - 调用工具前不要向用户输出英文过程独白；需要提示时用一句中文进度（例：「正在检索知识库…」），不要把过程独白当成最终答复。
 - 最终答复只在本轮工具结束后给出一次，使用中文结构化说明：进度、证据、剩余步骤或具体阻塞。
-- 进度标题：本轮有真实浏览器/工具业务动作时可用「已完成事项」；若本轮无业务动作，必须用「已整理的输入」，并写明「本轮业务步骤完成数为 0」，禁止制造进度错觉。
+- 无本轮业务动作时，进度宜写「已整理的输入」并标明完成数为 0；有真实工具动作再用「已完成事项」。不要为了改标题而停住执行。
 - 审批恢复后同样遵守：进度中文、最终答复中文；禁止把工具前英文说明固化成普通回复。
 """.strip()
 
@@ -1242,6 +1242,8 @@ class AgentLoopStreamAPIView(View):
         file_ids: Optional[List[int]] = None,
         similarity_threshold: float = 0.3,
         top_k: int = 5,
+        config_overrides: Optional[Dict[str, Any]] = None,
+        resume_task_id: str = "",
     ):
         """
         创建 SSE 流式生成器（LangChain v1 重构版）
@@ -1251,6 +1253,8 @@ class AgentLoopStreamAPIView(View):
         """
         thread_id = f"{request.user.id}_{project_id}_{session_id}"
         file_ids = file_ids or []
+        resume_task_id = str(resume_task_id or "").strip()
+        config_overrides = config_overrides if isinstance(config_overrides, dict) else None
         similarity_threshold, top_k = _normalize_kb_search_params(
             similarity_threshold, top_k
         )
@@ -1299,6 +1303,9 @@ class AgentLoopStreamAPIView(View):
             )
             return
 
+        agent_runtime = None
+        user_stopped = False
+        interrupt_detected = False
         try:
             # 3. 初始化 LLM
             llm = await sync_to_async(create_llm_instance)(
@@ -1402,7 +1409,10 @@ class AgentLoopStreamAPIView(View):
                 zone_skills,
             )
             from orchestrator_integration.turn_context import (
+                TURN_AMBIGUOUS,
+                ambiguous_candidates_payload,
                 classify_turn_relation,
+                list_open_task_contexts,
                 load_open_task_context,
                 routing_text_for_classify,
                 should_preserve_execution,
@@ -1411,18 +1421,53 @@ class AgentLoopStreamAPIView(View):
 
             # FR08.4/08.5：分类与工具裁剪前加载未完成任务（顺序不得颠倒）
             _prior_task = None
+            _open_tasks = []
             try:
+                _open_tasks = await sync_to_async(list_open_task_contexts)(
+                    session_id=session_id or "",
+                    user_id=int(request.user.id),
+                    project_id=int(project_id) if project_id else None,
+                )
                 _prior_task = await sync_to_async(load_open_task_context)(
                     session_id=session_id or "",
                     user_id=int(request.user.id),
                     project_id=int(project_id) if project_id else None,
+                    resume_task_id=resume_task_id or "",
                 )
             except Exception as prior_err:
                 logger.warning(
                     "AgentLoopStreamAPI: load prior task failed: %s", prior_err
                 )
                 _prior_task = None
-            _turn_relation = classify_turn_relation(user_message, _prior_task)
+            _turn_relation = classify_turn_relation(
+                user_message,
+                _prior_task,
+                open_count=len(_open_tasks),
+                resume_task_id=resume_task_id or "",
+            )
+            # RC20：多任务消歧 — 只问一次，不新建/不静默续错任务
+            if _turn_relation == TURN_AMBIGUOUS:
+                payload = ambiguous_candidates_payload(_open_tasks)
+                yield create_sse_data(
+                    {
+                        "type": "task_status",
+                        "status": "ambiguous",
+                        "error_code": "ambiguous_tasks",
+                        "message": payload.get("message"),
+                        "payload": payload,
+                        "message_kind": "final",
+                    }
+                )
+                yield create_sse_data(
+                    {
+                        "type": "complete",
+                        "status": "ambiguous",
+                        "task_status": "ambiguous",
+                        "message_kind": "final",
+                    }
+                )
+                yield "data: [DONE]\n\n"
+                return
             _preserve_exec = should_preserve_execution(_prior_task, _turn_relation)
             _routing_message = routing_text_for_classify(
                 user_message, _prior_task, _turn_relation
@@ -1557,6 +1602,10 @@ class AgentLoopStreamAPIView(View):
                 )
             except Exception:
                 stage_needs_kb = False
+            # 保留 KB 工具引用，供后置路由误裁后按阶段重挂（D02/RC02）
+            _kb_tools_snapshot = [
+                t for t in tools if getattr(t, "name", "") == "knowledge_search"
+            ]
             if (
                 task_commission.short_circuit
                 and tools
@@ -1616,11 +1665,19 @@ class AgentLoopStreamAPIView(View):
             )
 
             # 6.1 意图路由：按用户话术裁剪工具，减少误调
+            # D02：kb_research 等阶段需要知识工具时，不得因 short_circuit 把 kb_active 关掉
+            _intent_kb_active = bool(
+                kb_qa_mode
+                and (
+                    stage_needs_kb
+                    or _preserve_exec
+                    or not task_commission.short_circuit
+                )
+            )
             intent_decision, tools, intent_hint, kb_policy = apply_intent_routing(
                 _routing_message,
                 tools,
-                kb_active=kb_qa_mode
-                and not (task_commission.short_circuit and not _preserve_exec),
+                kb_active=_intent_kb_active,
                 prefetch_query=_prefetch_for_policy,
                 skill_zone=skill_zone,
             )
@@ -1632,16 +1689,37 @@ class AgentLoopStreamAPIView(View):
                     if name in {
                         "execute_skill_script",
                         "request_tool_expansion",
+                        "request_executor_heal",
                         "assert_task_postcondition",
                         "report_task_blocked",
                         "read_skill_content",
                     } and name not in have:
                         tools.append(mt)
                         have.add(name)
+            # D02/RC02：阶段能力需要 knowledge_search 时，禁止后置话术规则清空
+            if stage_needs_kb and kb_qa_mode:
+                have = {getattr(t, "name", "") for t in tools}
+                if "knowledge_search" not in have:
+                    for kt in _kb_tools_snapshot:
+                        tools.append(kt)
+                        have.add(getattr(kt, "name", "knowledge_search"))
+                    logger.info(
+                        "AgentLoopStreamAPI: 阶段 %s 强制重挂 knowledge_search（防后置误裁）",
+                        _current_stage_id,
+                    )
+                if kb_policy is not None and not kb_policy.allow_knowledge_search:
+                    from dataclasses import replace as _dc_replace
+
+                    kb_policy = _dc_replace(
+                        kb_policy,
+                        allow_knowledge_search=True,
+                        reason=f"{kb_policy.reason}+stage_kb_required",
+                    )
             # 短路时强制保留元工具
             if task_commission.short_circuit:
                 meta_names = {
                     "request_tool_expansion",
+                    "request_executor_heal",
                     "assert_task_postcondition",
                     "report_task_blocked",
                 }
@@ -1805,6 +1883,8 @@ class AgentLoopStreamAPIView(View):
                     turn_relation=_turn_relation
                     if "_turn_relation" in locals()
                     else "",
+                    config_overrides=config_overrides,
+                    resume_task_id=resume_task_id,
                 )
                 # R15：未获租约不得构造执行器/派发动作
                 if (
@@ -1835,17 +1915,47 @@ class AgentLoopStreamAPIView(View):
                     auth_scope=auth_scope,
                 )
                 # create_or_resume_task 已写入 task_started；此处只向客户端推送，避免重复落库
+                _eff = {
+                    "schema_version": (runtime_task.budget or {}).get(
+                        "schema_version", 1
+                    ),
+                    "config_version": (runtime_task.budget or {}).get(
+                        "config_version", 1
+                    ),
+                    "config_hash": (runtime_task.budget or {}).get("config_hash", ""),
+                    "expected_business_steps": (runtime_task.budget or {}).get(
+                        "expected_business_steps", 0
+                    ),
+                    "completed_business_steps": (runtime_task.budget or {}).get(
+                        "completed_business_steps", 0
+                    ),
+                    "max_tool_actions": (runtime_task.budget or {}).get(
+                        "max_tool_actions",
+                        (runtime_task.budget or {}).get("max_tool_steps"),
+                    ),
+                    "used_tool_actions": (runtime_task.budget or {}).get(
+                        "used_tool_actions",
+                        (runtime_task.budget or {}).get("used_tool_steps", 0),
+                    ),
+                    "response_locale": (runtime_task.budget or {}).get(
+                        "response_locale", "auto"
+                    ),
+                }
                 yield create_sse_data(
                     {
                         "type": "task_started",
                         "task_id": runtime_task.public_task_id
                         or str(runtime_task.id),
                         "status": "running",
+                        "message_kind": "progress",
+                        "response_locale": _eff.get("response_locale") or "auto",
                         "payload": {
                             "stage": runtime_task.current_stage,
                             "stage_plan": stages,
                             "auth_scope": auth_scope,
+                            "effective_config": _eff,
                         },
+                        "effective_config": _eff,
                     }
                 )
                 # 回填 runtime_task_id，供工具结果落库 AgentStep
@@ -1870,9 +1980,53 @@ class AgentLoopStreamAPIView(View):
             )
 
             # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
+            # 证据口径仅在执行面注入，避免纯问答被长合规提示压成「只报告不行动」
             from orchestrator_integration.evidence_integrity import (
                 EVIDENCE_INTEGRITY_HINT,
+                should_inject_evidence_hint,
             )
+
+            _evidence_block = ""
+            if should_inject_evidence_hint(
+                preserve_exec=_preserve_exec,
+                allow_execute=bool(getattr(skill_zone, "allow_execute", False)),
+                zone_id=getattr(skill_zone, "zone_id", "") or "",
+                allow_actions=(
+                    getattr(_prior_task, "auth_scope", None) or {}
+                ).get("allow_actions")
+                or [],
+            ):
+                _evidence_block = "\n\n" + EVIDENCE_INTEGRITY_HINT
+
+            # RC11：持久化 locale 注入提示，禁止中文任务英文旁白
+            _response_locale = "auto"
+            _locale_block = ""
+            try:
+                from orchestrator_integration.message_locale import (
+                    infer_response_locale,
+                    locale_hint_for_prompt,
+                )
+
+                _explicit_loc = ""
+                if isinstance(config_overrides, dict):
+                    _explicit_loc = str(
+                        config_overrides.get("response_locale") or ""
+                    )
+                if runtime_task is not None:
+                    _response_locale = str(
+                        (runtime_task.budget or {}).get("response_locale")
+                        or ""
+                    ) or infer_response_locale(
+                        user_message, explicit=_explicit_loc
+                    )
+                else:
+                    _response_locale = infer_response_locale(
+                        user_message, explicit=_explicit_loc
+                    )
+                _locale_block = "\n\n" + locale_hint_for_prompt(_response_locale)
+            except Exception:
+                _response_locale = "auto"
+                _locale_block = ""
 
             effective_prompt = (
                 (effective_prompt or "").rstrip()
@@ -1880,8 +2034,8 @@ class AgentLoopStreamAPIView(View):
                 + _KB_PRIORITY_HINT
                 + "\n\n"
                 + _TASK_LANGUAGE_HINT
-                + "\n\n"
-                + EVIDENCE_INTEGRITY_HINT
+                + _locale_block
+                + _evidence_block
                 + "\n\n"
                 + intent_hint
             ).strip()
@@ -2146,6 +2300,30 @@ class AgentLoopStreamAPIView(View):
                             logger.info(
                                 f"AgentLoopStreamAPI: Stop signal received at step {step_count}"
                             )
+                            # RC10：停止后尝试收口 cancelling→cancelled，禁止后续终态复活
+                            try:
+                                if agent_runtime and agent_runtime.task is not None:
+                                    from orchestrator_integration.agent_runtime import (
+                                        finalize_cancel,
+                                    )
+
+                                    cancel_fin = await sync_to_async(finalize_cancel)(
+                                        agent_runtime.task
+                                    )
+                                    if cancel_fin.get("status") == "cancelled":
+                                        yield create_sse_data(
+                                            {
+                                                "type": "task_completed",
+                                                "status": "cancelled",
+                                                "task_id": cancel_fin.get("task_id"),
+                                                "payload": cancel_fin,
+                                            }
+                                        )
+                            except Exception as cancel_fin_err:
+                                logger.debug(
+                                    "finalize_cancel after stop failed: %s",
+                                    cancel_fin_err,
+                                )
                             yield create_sse_data(
                                 {
                                     "type": "stopped",
@@ -2331,6 +2509,21 @@ class AgentLoopStreamAPIView(View):
                                                     else getattr(tc, "name", "unknown")
                                                     for tc in current_tool_calls
                                                 ]
+                                                # RC08：工具步进时续租心跳
+                                                try:
+                                                    if (
+                                                        agent_runtime
+                                                        and agent_runtime.task
+                                                        is not None
+                                                    ):
+                                                        await sync_to_async(
+                                                            agent_runtime.heartbeat
+                                                        )()
+                                                except Exception as hb_err:
+                                                    logger.debug(
+                                                        "lease heartbeat failed: %s",
+                                                        hb_err,
+                                                    )
                                                 yield create_sse_data(
                                                     {
                                                         "type": "step_start",
@@ -2533,14 +2726,33 @@ class AgentLoopStreamAPIView(View):
                                             for c in content
                                         )
                                     if content:
+                                        # RC11：流式正文带 message_kind；逐 token 不在此降级旁白
                                         yield create_sse_data(
-                                            {"type": "stream", "data": content}
+                                            {
+                                                "type": "stream",
+                                                "data": content,
+                                                "message_kind": "final",
+                                                "response_locale": (
+                                                    _response_locale
+                                                    if "_response_locale" in locals()
+                                                    else "auto"
+                                                ),
+                                            }
                                         )
                             elif hasattr(chunk, "content") and chunk.content:
                                 chunk_type = type(chunk).__name__
                                 if "ToolMessage" not in chunk_type:
                                     yield create_sse_data(
-                                        {"type": "stream", "data": chunk.content}
+                                        {
+                                            "type": "stream",
+                                            "data": chunk.content,
+                                            "message_kind": "final",
+                                            "response_locale": (
+                                                _response_locale
+                                                if "_response_locale" in locals()
+                                                else "auto"
+                                            ),
+                                        }
                                     )
 
                 except Exception as e:
@@ -2722,25 +2934,59 @@ class AgentLoopStreamAPIView(View):
                         )
 
                 if user_stopped:
+                    # RC09/RC10：传输结束 ≠ 业务成功；取消保持 cancelled/cancelling
+                    _stop_status = "stopped"
+                    try:
+                        if agent_runtime and agent_runtime.task is not None:
+                            _ts = str(
+                                getattr(agent_runtime.task, "status", "") or ""
+                            )
+                            if _ts in {"cancelled", "cancelling"}:
+                                _stop_status = _ts
+                    except Exception:
+                        pass
                     yield create_sse_data(
-                        {"type": "complete", "status": "stopped", "steps": step_count}
+                        {
+                            "type": "complete",
+                            "status": _stop_status,
+                            "task_status": _stop_status,
+                            "message_kind": "final",
+                            "steps": step_count,
+                        }
                     )
                 elif interrupt_detected:
                     logger.info(
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
                 else:
+                    # RC09：complete 只表示传输结束；业务态取 acceptance / 任务实态
+                    _biz = "finished"
+                    if acceptance is not None:
+                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    try:
+                        if agent_runtime and agent_runtime.task is not None:
+                            _live = str(
+                                getattr(agent_runtime.task, "status", "") or ""
+                            )
+                            if _live in {
+                                "cancelled",
+                                "cancelling",
+                                "blocked",
+                                "failed",
+                            }:
+                                _biz = _live
+                    except Exception:
+                        pass
                     complete_data = {
                         "type": "complete",
                         "total_steps": step_count,
-                        "task_status": (
-                            "completed"
-                            if acceptance and acceptance.get("ok")
-                            else (
-                                "blocked"
-                                if acceptance and not acceptance.get("ok")
-                                else "finished"
-                            )
+                        "status": _biz,
+                        "task_status": _biz,
+                        "message_kind": "final",
+                        "response_locale": (
+                            _response_locale
+                            if "_response_locale" in locals()
+                            else "auto"
                         ),
                     }
                     if acceptance is not None:
@@ -2778,6 +3024,17 @@ class AgentLoopStreamAPIView(View):
                 yield create_sse_data(
                     {"type": "error", "message": f"执行错误: {str(e)}"}
                 )
+        finally:
+            # RC08：非审批停放态释放租约；已 park / 终态清空均为幂等
+            try:
+                if agent_runtime is not None and getattr(
+                    agent_runtime, "task", None
+                ) is not None:
+                    st = str(getattr(agent_runtime.task, "status", "") or "")
+                    if st != "awaiting_approval":
+                        await sync_to_async(agent_runtime.release)()
+            except Exception as rel_err:
+                logger.debug("stream finally release_lease failed: %s", rel_err)
 
     async def post(self, request, *args, **kwargs):
         """
@@ -2834,6 +3091,19 @@ class AgentLoopStreamAPIView(View):
         generate_playwright_script = body_data.get("generate_playwright_script", False)
         test_case_id = body_data.get("test_case_id")  # 用于关联生成的脚本
         use_pytest = body_data.get("use_pytest", True)  # 生成 pytest 格式还是简单格式
+        # D04/RC12：可选任务执行配置覆盖（经服务端策略裁剪）
+        raw_overrides = body_data.get("execution_config") or body_data.get(
+            "config_overrides"
+        )
+        config_overrides = (
+            raw_overrides if isinstance(raw_overrides, dict) else None
+        )
+        # RC20：多任务消歧后客户端指定继续哪个任务
+        resume_task_id = str(
+            body_data.get("task_id")
+            or body_data.get("resume_task_id")
+            or ""
+        ).strip()
 
         # 兜底：如果前端没传 test_case_id，尝试从消息中解析
         if not test_case_id and user_message:
@@ -2908,6 +3178,8 @@ class AgentLoopStreamAPIView(View):
                     file_ids,
                     similarity_threshold,
                     top_k,
+                    config_overrides,
+                    resume_task_id,
                 ):
                     yield chunk
 
@@ -2930,6 +3202,8 @@ class AgentLoopStreamAPIView(View):
                 file_ids,
                 similarity_threshold,
                 top_k,
+                config_overrides,
+                resume_task_id,
             )
 
     async def _handle_non_stream_request(
@@ -2949,6 +3223,8 @@ class AgentLoopStreamAPIView(View):
         file_ids: Optional[List[int]] = None,
         similarity_threshold: float = 0.3,
         top_k: int = 5,
+        config_overrides: Optional[Dict[str, Any]] = None,
+        resume_task_id: str = "",
     ) -> JsonResponse:
         """
         处理非流式请求，收集所有流式事件后返回统一 JSON 响应
@@ -2982,6 +3258,8 @@ class AgentLoopStreamAPIView(View):
                 file_ids,
                 similarity_threshold,
                 top_k,
+                config_overrides,
+                resume_task_id,
             ):
                 # 解析 SSE 数据
                 if isinstance(chunk, str) and chunk.startswith("data: "):
@@ -3252,6 +3530,315 @@ class AgentTaskSnapshotAPIView(View):
             return api_success_response("ok", data)
         except Exception as e:
             logger.error("AgentTaskSnapshotAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class AgentTaskBudgetExpandAPIView(View):
+    """RC15：仅扩预算（bump config_version），不改 deny/allow。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def post(self, request, *args, **kwargs):
+        try:
+            user = await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+        try:
+            import json as _json
+
+            from orchestrator_integration.action_auth import (
+                confirm_capability_expand,
+                expand_budget_only,
+                request_capability_expand,
+            )
+            from orchestrator_integration.agent_runtime import assert_task_access
+            from orchestrator_integration.models import AgentTask
+
+            try:
+                body = _json.loads(request.body.decode("utf-8") or "{}")
+            except (TypeError, ValueError):
+                return api_error_response("invalid_json", 400)
+            if not isinstance(body, dict):
+                return api_error_response("body_must_be_object", 400)
+
+            task_id = str(body.get("task_id") or "").strip()
+            if not task_id:
+                return api_error_response("task_id required", 400)
+            mode = str(body.get("mode") or "budget").strip()
+
+            def _run():
+                task = (
+                    AgentTask.objects.filter(public_task_id=task_id).first()
+                    or AgentTask.objects.filter(pk=task_id).first()
+                )
+                if task is None:
+                    return None, "not_found"
+                access = assert_task_access(task, user_id=user.id)
+                if not access.get("ok"):
+                    return None, "forbidden"
+                if mode == "capability_request":
+                    return (
+                        request_capability_expand(
+                            task,
+                            allow_actions=list(body.get("allow_actions") or []),
+                            skill_name=str(body.get("skill_name") or ""),
+                            reason=str(body.get("reason") or ""),
+                        ),
+                        "ok",
+                    )
+                if mode == "capability_confirm":
+                    return (
+                        confirm_capability_expand(
+                            task, approve=bool(body.get("approve"))
+                        ),
+                        "ok",
+                    )
+                # default: budget only
+                try:
+                    delta = int(body.get("add_tool_actions") or 0)
+                except (TypeError, ValueError):
+                    delta = 0
+                return (
+                    expand_budget_only(
+                        task,
+                        add_tool_actions=delta,
+                        reason=str(body.get("reason") or ""),
+                    ),
+                    "ok",
+                )
+
+            data, code = await sync_to_async(_run)()
+            if code == "not_found":
+                return api_error_response("task_not_found", 404)
+            if code == "forbidden":
+                return api_error_response("permission_denied", 403)
+            if not data.get("ok"):
+                return api_error_response(
+                    data.get("error_code") or "expand_failed",
+                    400,
+                    errors={"message": [data.get("message") or ""]},
+                )
+            return api_success_response("ok", data)
+        except Exception as e:
+            logger.error("AgentTaskBudgetExpandAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class AgentTaskConfigAPIView(View):
+    """RC12：PATCH 任务配置（expected_version 乐观锁；非法 400；冲突 409）。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def patch(self, request, *args, **kwargs):
+        try:
+            user = await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+        try:
+            import json as _json
+
+            from orchestrator_integration.agent_runtime import assert_task_access
+            from orchestrator_integration.models import AgentTask
+            from orchestrator_integration.task_execution_config import apply_task_config
+
+            try:
+                body = _json.loads(request.body.decode("utf-8") or "{}")
+            except (TypeError, ValueError):
+                return api_error_response("invalid_json", 400)
+            if not isinstance(body, dict):
+                return api_error_response("body_must_be_object", 400)
+
+            task_id = str(body.get("task_id") or "").strip()
+            if not task_id:
+                return api_error_response("task_id required", 400)
+            if "expected_version" not in body:
+                return api_error_response("expected_version required", 400)
+
+            def _run():
+                task = (
+                    AgentTask.objects.filter(public_task_id=task_id).first()
+                    or AgentTask.objects.filter(pk=task_id).first()
+                )
+                if task is None:
+                    return None, "not_found"
+                access = assert_task_access(task, user_id=user.id)
+                if not access.get("ok"):
+                    return None, "forbidden"
+                return (
+                    apply_task_config(
+                        task,
+                        expected_version=body.get("expected_version"),
+                        overrides=body.get("overrides")
+                        if isinstance(body.get("overrides"), dict)
+                        else {},
+                        reason=str(body.get("reason") or ""),
+                    ),
+                    "ok",
+                )
+
+            data, code = await sync_to_async(_run)()
+            if code == "not_found":
+                return api_error_response("task_not_found", 404)
+            if code == "forbidden":
+                return api_error_response("permission_denied", 403)
+            if not data.get("ok"):
+                status = int(data.get("http_status") or 400)
+                return api_error_response(
+                    data.get("error_code") or "config_update_failed",
+                    status,
+                    errors={
+                        "message": [data.get("message") or ""],
+                        "current_version": [str(data.get("current_version") or "")],
+                    },
+                )
+            return api_success_response("ok", data)
+        except Exception as e:
+            logger.error("AgentTaskConfigAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
+
+    async def post(self, request, *args, **kwargs):
+        # 兼容客户端用 POST 表达 patch
+        return await self.patch(request, *args, **kwargs)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class AgentTaskConfigValidateAPIView(View):
+    """任务执行配置预检（D04 / 第8.2节）：无副作用，返回 effective_config。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def post(self, request, *args, **kwargs):
+        try:
+            await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+        try:
+            import json as _json
+
+            from orchestrator_integration.task_execution_config import (
+                build_effective_config,
+                user_visible_config_summary,
+                validate_config_overrides,
+            )
+
+            try:
+                body = _json.loads(request.body.decode("utf-8") or "{}")
+            except (TypeError, ValueError):
+                return api_error_response("invalid_json", 400)
+            if not isinstance(body, dict):
+                return api_error_response("body_must_be_object", 400)
+
+            overrides = body.get("overrides") or {}
+            checked = validate_config_overrides(overrides if isinstance(overrides, dict) else {})
+            if not checked.get("ok"):
+                return api_error_response(
+                    checked.get("message") or "invalid_overrides",
+                    400,
+                    errors={"error_code": [checked.get("error_code") or "invalid"]},
+                )
+
+            stage_plan = body.get("stage_plan") or []
+            auth_scope = body.get("auth_scope") or {}
+            effective = build_effective_config(
+                stage_plan=stage_plan if isinstance(stage_plan, list) else [],
+                auth_scope=auth_scope if isinstance(auth_scope, dict) else {},
+                overrides=checked.get("overrides") or {},
+            )
+            return api_success_response(
+                "ok",
+                {
+                    "effective_config": effective,
+                    "summary": user_visible_config_summary(effective),
+                    "policy_caps_applied": True,
+                },
+            )
+        except Exception as e:
+            logger.error("AgentTaskConfigValidateAPI failed: %s", e, exc_info=True)
+            return api_error_response(str(e), 500)
+
+
+@method_decorator(csrf_exempt, name="dispatch")
+class AgentEvidenceReadAPIView(View):
+    """证据授权分页读取（RC16 / FR09.2）。"""
+
+    async def authenticate_request(self, request):
+        auth_header = request.META.get("HTTP_AUTHORIZATION")
+        if not auth_header or not auth_header.startswith("Bearer "):
+            raise AuthenticationFailed("Authentication credentials were not provided.")
+        token = auth_header.split(" ")[1]
+        jwt_auth = JWTAuthentication()
+        validated_token = await sync_to_async(jwt_auth.get_validated_token)(token)
+        return await sync_to_async(jwt_auth.get_user)(validated_token)
+
+    async def get(self, request, *args, **kwargs):
+        try:
+            user = await self.authenticate_request(request)
+        except AuthenticationFailed as e:
+            return api_error_response(str(e), 401)
+        try:
+            from orchestrator_integration.evidence_store import read_evidence
+
+            evidence_id_raw = (request.GET.get("evidence_id") or "").strip()
+            output_ref = (request.GET.get("output_ref") or "").strip()
+            if not evidence_id_raw and not output_ref:
+                return api_error_response("evidence_id or output_ref required", 400)
+            evidence_id = None
+            if evidence_id_raw:
+                try:
+                    evidence_id = int(evidence_id_raw)
+                except (TypeError, ValueError):
+                    return api_error_response("invalid_evidence_id", 400)
+            try:
+                offset = int(request.GET.get("offset") or 0)
+            except (TypeError, ValueError):
+                offset = 0
+            try:
+                limit = int(request.GET.get("limit") or 4000)
+            except (TypeError, ValueError):
+                limit = 4000
+            project_raw = (request.GET.get("project_id") or "").strip()
+            project_id = int(project_raw) if project_raw.isdigit() else None
+
+            data = await sync_to_async(read_evidence)(
+                evidence_id=evidence_id,
+                output_ref=output_ref,
+                user_id=user.id,
+                project_id=project_id,
+                offset=offset,
+                limit=limit,
+            )
+            if not data.get("ok"):
+                return api_error_response(
+                    data.get("error_code") or "evidence_read_failed",
+                    int(data.get("status") or 400),
+                    errors={"message": [data.get("message") or ""]},
+                )
+            return api_success_response("ok", data)
+        except Exception as e:
+            logger.error("AgentEvidenceReadAPI failed: %s", e, exc_info=True)
             return api_error_response(str(e), 500)
 
 
@@ -3684,6 +4271,7 @@ class AgentLoopResumeAPIView(View):
                         if name in {
                             "execute_skill_script",
                             "request_tool_expansion",
+                            "request_executor_heal",
                             "assert_task_postcondition",
                             "report_task_blocked",
                             "read_skill_content",
@@ -3786,12 +4374,75 @@ class AgentLoopResumeAPIView(View):
                 )
 
                 # 7. 构建输入：写库确认走新 HumanMessage；否则 Command(resume=...)
+                # FR05.4 / D01 / RC07：批准后由服务端执行原 pending 一次，禁止再弹 needs_confirmation
+                server_executed: Optional[Dict[str, Any]] = None
+                if (
+                    write_confirm_resume
+                    and decision_type == "approve"
+                    and isinstance(write_confirm_pending, dict)
+                ):
+                    try:
+                        from orchestrator_integration.write_confirmation import (
+                            execute_approved_pending,
+                        )
+
+                        pending_body = write_confirm_pending.get("pending")
+                        if not isinstance(pending_body, dict):
+                            pending_body = {}
+                        server_executed = await sync_to_async(
+                            execute_approved_pending
+                        )(
+                            pending_body,
+                            user_id=int(user.id),
+                            project_id=int(project_id) if project_id else 0,
+                            chat_session_id=session_id or "",
+                        )
+                        for item in server_executed.get("results") or []:
+                            out_text = ""
+                            if isinstance(item, dict):
+                                out_text = str(
+                                    item.get("output") or item.get("error") or ""
+                                )
+                            if out_text:
+                                yield create_sse_data(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_name": "execute_skill_script",
+                                        "tool_output": out_text,
+                                        "summary": (
+                                            "已批准写入已由服务端执行"
+                                            if server_executed.get("ok")
+                                            else "已批准写入执行失败"
+                                        )[:200],
+                                        "step": 0,
+                                        "approval_executed": True,
+                                    }
+                                )
+                        logger.info(
+                            "AgentLoopResumeAPI: server executed approved pending ok=%s err=%s",
+                            server_executed.get("ok"),
+                            server_executed.get("error_code"),
+                        )
+                    except Exception as exec_err:
+                        logger.exception(
+                            "AgentLoopResumeAPI: execute_approved_pending failed: %s",
+                            exec_err,
+                        )
+                        server_executed = {
+                            "ok": False,
+                            "error_code": "server_execute_exception",
+                            "message": str(exec_err),
+                            "results": [],
+                        }
+
                 if write_confirm_resume:
                     resume_input: Any = {
                         "messages": [
                             HumanMessage(
                                 content=build_resume_user_message(
-                                    decision_type, write_confirm_pending
+                                    decision_type,
+                                    write_confirm_pending,
+                                    server_executed=server_executed,
                                 )
                             )
                         ]
@@ -3926,6 +4577,21 @@ class AgentLoopResumeAPIView(View):
                                                     else getattr(tc, "name", "unknown")
                                                     for tc in msg.tool_calls
                                                 ]
+                                                # RC08：resume 步进续租
+                                                try:
+                                                    if (
+                                                        agent_runtime
+                                                        and agent_runtime.task
+                                                        is not None
+                                                    ):
+                                                        await sync_to_async(
+                                                            agent_runtime.heartbeat
+                                                        )()
+                                                except Exception as hb_err:
+                                                    logger.debug(
+                                                        "resume lease heartbeat failed: %s",
+                                                        hb_err,
+                                                    )
                                                 yield create_sse_data(
                                                     {
                                                         "type": "step_start",
@@ -4238,6 +4904,17 @@ class AgentLoopResumeAPIView(View):
                     session_id,
                 )
                 yield create_sse_data({"type": "error", "message": str(e)})
+        finally:
+            # RC08：resume 结束释放租约（审批停放除外）
+            try:
+                if agent_runtime is not None and getattr(
+                    agent_runtime, "task", None
+                ) is not None:
+                    st = str(getattr(agent_runtime.task, "status", "") or "")
+                    if st != "awaiting_approval":
+                        await sync_to_async(agent_runtime.release)()
+            except Exception as rel_err:
+                logger.debug("resume finally release_lease failed: %s", rel_err)
 
     async def post(self, request, *args, **kwargs):
         """处理 HITL resume 请求 - 返回 SSE 流式响应"""

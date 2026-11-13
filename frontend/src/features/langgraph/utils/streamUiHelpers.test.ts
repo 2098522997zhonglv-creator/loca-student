@@ -75,13 +75,55 @@ describe('streamUiHelpers', () => {
       { content: 'final', messageType: 'ai', time: '3' },
     ]);
     expect(merged).toHaveLength(2);
-    expect(merged[0].isExecutionLog).toBe(true);
-    expect(merged[0].toolEntries).toHaveLength(2);
+    const first = merged[0] as {
+      isExecutionLog?: boolean;
+      toolEntries?: unknown[];
+    };
+    expect(first.isExecutionLog).toBe(true);
+    expect(first.toolEntries).toHaveLength(2);
   });
 
   it('builds stable tool event keys', () => {
     expect(
       toolEventKey({ event_id: 'x', tool_name: 'a', summary: 'b' })
-    ).toBe('x');
+    ).toBe('tx:x');
+    expect(
+      toolEventKey({
+        operation_id: 'op1',
+        tool_name: 'execute_skill_script',
+        step: 2,
+        attempt: 1,
+      })
+    ).toBe('op:op1|execute_skill_script|2|a:1');
+  });
+
+  it('preserves expanded state when appending execution log entries', () => {
+    const stream = { content: '', messages: [] as any[] };
+    absorbToolResultEvent(
+      stream,
+      {
+        event_id: 'tr-1',
+        tool_name: 'knowledge_search',
+        summary: 'a',
+        step: 1,
+        tool_output: 'out-a',
+      },
+      { time: '10:00', content: 'out-a', summary: 'a' }
+    );
+    const log = stream.messages.find((m) => m.isExecutionLog);
+    expect(log).toBeTruthy();
+    if (log) log.isExpanded = true;
+    absorbToolResultEvent(
+      stream,
+      {
+        event_id: 'tr-2',
+        tool_name: 'knowledge_search',
+        summary: 'b',
+        step: 2,
+        tool_output: 'out-b',
+      },
+      { time: '10:01', content: 'out-b', summary: 'b' }
+    );
+    expect(stream.messages.find((m) => m.isExecutionLog)?.isExpanded).toBe(true);
   });
 });

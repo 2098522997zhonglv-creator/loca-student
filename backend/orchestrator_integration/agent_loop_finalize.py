@@ -124,6 +124,8 @@ def finalize_task_acceptance(
     if browser_persist and playbook_id != "browser_act":
         playbook_id = "browser_act"
 
+    facts = dict(getattr(task, "facts", None) or {}) if task is not None else {}
+    stage_plan = list(getattr(task, "stage_plan", None) or []) if task is not None else []
     acceptance = evaluate_post_condition(
         post_condition=getattr(commission, "post_condition", "") or "",
         tool_results=tool_results,
@@ -131,6 +133,9 @@ def finalize_task_acceptance(
         playbook_id=playbook_id,
         auth_scope=auth_scope,
         target_url=target_url,
+        stage_plan=stage_plan,
+        facts=facts,
+        evidence_epoch=facts.get("evidence_epoch"),
     )
     # 供 Runtime.accept 绑定末阶段证据（R11）
     acceptance = dict(acceptance)

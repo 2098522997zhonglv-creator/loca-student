@@ -10,6 +10,8 @@ TURN_CONTINUE = "continue"
 TURN_SUPPLEMENT = "supplement"
 TURN_NEW = "new_question"
 TURN_CANCEL = "cancel"
+TURN_AMBIGUOUS = "ambiguous"
+TURN_CORRECT = "correct"
 
 _OPEN_STATUSES = (
     "pending",
@@ -98,13 +100,59 @@ class PriorTaskContext:
         return bool(self.allow_actions)
 
 
+def _task_to_prior(task, session_id: str = "") -> PriorTaskContext:
+    return PriorTaskContext(
+        task_pk=int(task.pk),
+        public_task_id=str(task.public_task_id or task.pk),
+        goal=str(task.goal or ""),
+        current_stage=str(task.current_stage or ""),
+        stage_plan=list(task.stage_plan or []),
+        auth_scope=dict(task.auth_scope or {}),
+        task_scope=dict(task.task_scope or {}),
+        status=str(task.status or ""),
+        session_id=session_id
+        or str(getattr(getattr(task, "session", None), "session_id", "") or ""),
+    )
+
+
+def list_open_task_contexts(
+    *,
+    session_id: str,
+    user_id: int,
+    project_id: Optional[int] = None,
+    limit: int = 10,
+) -> List[PriorTaskContext]:
+    """RC20：列出同会话未完成任务（按更新时间倒序）。"""
+    if not session_id or not user_id:
+        return []
+    from django.db.models import Q
+    from langgraph_integration.models import ChatSession
+    from orchestrator_integration.models import AgentTask
+
+    chat = (
+        ChatSession.objects.filter(session_id=session_id, user_id=user_id)
+        .order_by("-updated_at")
+        .first()
+    )
+    if chat is None:
+        chat = ChatSession.objects.filter(session_id=session_id).first()
+        if chat is None or int(getattr(chat, "user_id", 0) or 0) != int(user_id):
+            return []
+    qs = AgentTask.objects.filter(session=chat, status__in=_OPEN_STATUSES)
+    if project_id is not None:
+        qs = qs.filter(Q(project_id=project_id) | Q(project_id__isnull=True))
+    rows = list(qs.order_by("-updated_at")[: max(1, int(limit))])
+    return [_task_to_prior(t, session_id) for t in rows]
+
+
 def load_open_task_context(
     *,
     session_id: str,
     user_id: int,
     project_id: Optional[int] = None,
+    resume_task_id: str = "",
 ) -> Optional[PriorTaskContext]:
-    """按 session（及用户/项目）加载最近一条未完成任务。"""
+    """按 session（及用户/项目）加载最近一条未完成任务；可显式指定 task_id。"""
     if not session_id or not user_id:
         return None
     from langgraph_integration.models import ChatSession
@@ -122,6 +170,20 @@ def load_open_task_context(
 
     from django.db.models import Q
 
+    # RC20：显式 task_id 优先（含已取消则返回 None，禁止复活）
+    if resume_task_id:
+        task = (
+            AgentTask.objects.filter(public_task_id=resume_task_id).first()
+            or AgentTask.objects.filter(pk=resume_task_id).first()
+        )
+        if task is None:
+            return None
+        if str(task.status or "") in {"cancelled", "completed", "failed"}:
+            return None
+        if task.user_id and int(task.user_id) != int(user_id):
+            return None
+        return _task_to_prior(task, session_id)
+
     qs = AgentTask.objects.filter(session=chat, status__in=_OPEN_STATUSES)
     if project_id is not None:
         qs = qs.filter(Q(project_id=project_id) | Q(project_id__isnull=True))
@@ -135,28 +197,57 @@ def load_open_task_context(
         if task is None:
             return None
 
-    return PriorTaskContext(
-        task_pk=int(task.pk),
-        public_task_id=str(task.public_task_id or task.pk),
-        goal=str(task.goal or ""),
-        current_stage=str(task.current_stage or ""),
-        stage_plan=list(task.stage_plan or []),
-        auth_scope=dict(task.auth_scope or {}),
-        task_scope=dict(task.task_scope or {}),
-        status=str(task.status or ""),
-        session_id=str(getattr(chat, "session_id", "") or session_id),
-    )
+    return _task_to_prior(task, session_id)
+
+
+_CORRECT_CUES = (
+    "换商品",
+    "换一个商品",
+    "改成这个商品",
+    "换成这个",
+    "换素材",
+    "换图",
+    "改用这张",
+    "新素材",
+    "纠正",
+    "不是这个商品",
+)
+_URL_RE = re.compile(r"https?://[^\s\"'<>]+", re.I)
+_FILE_RE = re.compile(
+    r"(?:[/\\][\w.\-]+)+\.(?:png|jpe?g|gif|webp|pdf|svg)", re.I
+)
 
 
 def classify_turn_relation(
-    message: str, prior: Optional[PriorTaskContext]
+    message: str,
+    prior: Optional[PriorTaskContext],
+    *,
+    open_count: int = 1,
+    resume_task_id: str = "",
 ) -> str:
-    """识别本轮相对未完成任务的关系：继续 / 补充 / 新问题 / 取消。"""
+    """识别本轮相对未完成任务的关系：继续 / 补充 / 纠正 / 消歧 / 新问题 / 取消。"""
     text = (message or "").strip()
-    if not prior:
+    if not prior and open_count <= 0:
         return TURN_NONE
     if any(k in text for k in _CANCEL_CUES):
         return TURN_CANCEL
+    # RC20：≥2 未完成且说「继续」但未指定 task_id → 消歧
+    if (
+        open_count >= 2
+        and not resume_task_id
+        and any(k in text for k in _CONTINUE_CUES)
+    ):
+        return TURN_AMBIGUOUS
+    if prior and any(k in text for k in _CORRECT_CUES):
+        return TURN_CORRECT
+    if prior and (
+        _URL_RE.search(text)
+        and "http" in (prior.goal or "").lower()
+        and any(k in text for k in ("换", "改成", "改用", "纠正", "不是"))
+    ):
+        return TURN_CORRECT
+    if not prior:
+        return TURN_NONE
     if any(k in text for k in _CONTINUE_CUES):
         return TURN_CONTINUE
     if any(k in text for k in _NEW_QUESTION_MARKERS):
@@ -184,9 +275,24 @@ def should_preserve_execution(
 ) -> bool:
     if prior is None:
         return False
-    if relation not in {TURN_CONTINUE, TURN_SUPPLEMENT}:
+    if relation not in {TURN_CONTINUE, TURN_SUPPLEMENT, TURN_CORRECT}:
         return False
     return prior.is_executable_stage
+
+
+def extract_goal_correction(message: str) -> Dict[str, str]:
+    """RC20：从纠正话术提取新商品 URL / 素材路径。"""
+    text = message or ""
+    patch: Dict[str, str] = {}
+    urls = _URL_RE.findall(text)
+    if urls:
+        patch["target_url"] = urls[0].rstrip(").,]，」'")
+    files = _FILE_RE.findall(text)
+    if files:
+        patch["material_path"] = files[0]
+    elif any(k in text for k in ("换素材", "换图", "改用这张", "新素材")):
+        patch["material_changed"] = "1"
+    return patch
 
 
 def routing_text_for_classify(
@@ -245,3 +351,22 @@ def extract_constraint_patch(message: str) -> Dict[str, str]:
     elif "中站" in text or "选中" in text:
         patch["site"] = "cn"
     return patch
+
+
+def ambiguous_candidates_payload(
+    candidates: List[PriorTaskContext],
+) -> Dict[str, Any]:
+    """RC20：消歧询问最小载荷（只问一次）。"""
+    return {
+        "error_code": "ambiguous_tasks",
+        "message": "当前会话有多个未完成任务，请指定要继续哪一个（task_id）。",
+        "candidates": [
+            {
+                "task_id": c.public_task_id,
+                "goal": (c.goal or "")[:120],
+                "status": c.status,
+                "current_stage": c.current_stage,
+            }
+            for c in candidates[:5]
+        ],
+    }

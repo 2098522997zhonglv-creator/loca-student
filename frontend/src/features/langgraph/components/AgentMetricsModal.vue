@@ -11,6 +11,7 @@
       <div class="metrics-toolbar">
         <a-button size="small" :loading="loading" @click="reload">刷新</a-button>
         <span v-if="updatedAt" class="metrics-updated">更新于 {{ updatedAt }}</span>
+        <span v-if="deployLabel" class="metrics-updated">{{ deployLabel }}</span>
       </div>
 
       <a-spin :loading="loading" style="width: 100%">
@@ -112,6 +113,13 @@ const errorKinds = computed(
   () => (telemetry.value.error_kinds as Record<string, number>) || {}
 );
 const telemetryTotal = computed(() => Number(telemetry.value.total_tool_events || 0));
+const deployLabel = computed(() => {
+  const d = (metrics.value?.deploy as Record<string, unknown> | undefined) || {};
+  const sha = String(d.git_sha || '');
+  const schema = d.config_schema_version;
+  if (!sha && schema == null) return '';
+  return `部署 ${sha || '—'} · schema v${schema ?? '—'}`;
+});
 
 function pct(v: unknown): string {
   const n = Number(v);

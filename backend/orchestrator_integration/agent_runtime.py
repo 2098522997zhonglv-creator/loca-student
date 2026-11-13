@@ -39,6 +39,81 @@ def fingerprint_payload(payload: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
+def apply_goal_correction(task, message: str) -> Dict[str, Any]:
+    """RC20：商品/素材纠正 → bump plan_version + evidence_epoch，作废下游证据。"""
+    from orchestrator_integration.models import AgentTask
+    from orchestrator_integration.turn_context import extract_goal_correction
+
+    patch = extract_goal_correction(message)
+    if not patch:
+        return {"ok": False, "error_code": "no_correction_detected"}
+    scope = dict(task.task_scope or {})
+    facts = dict(task.facts or {})
+    old_url = str(scope.get("target_url") or "")
+    if patch.get("target_url"):
+        scope["target_url"] = patch["target_url"]
+        scope["previous_target_url"] = old_url
+    if patch.get("material_path"):
+        scope["material_path"] = patch["material_path"]
+    if patch.get("material_changed"):
+        scope["material_changed"] = True
+    # 作废下游证据，并把旧 typed id 记入 stale 列表（RC22）
+    epoch = int(facts.get("evidence_epoch") or 0) + 1
+    facts["evidence_epoch"] = epoch
+    stale = list(facts.get("stale_typed_ids") or [])
+    for k in ("cart_id", "cart_item_id", "order_sn"):
+        old = facts.get(k)
+        if old:
+            stale.append(str(old))
+    for item in facts.get("typed_ids") or []:
+        if isinstance(item, dict) and item.get("id"):
+            stale.append(str(item["id"]))
+        elif item:
+            stale.append(str(item))
+    facts["stale_typed_ids"] = list(dict.fromkeys(stale))[-50:]
+    for k in list(facts.keys()):
+        if k.startswith("cart_") or k in {
+            "cart_id",
+            "cart_item_id",
+            "order_sn",
+            "typed_ids",
+            "last_delivery",
+        }:
+            facts.pop(k, None)
+    facts["invalidated_downstream"] = {
+        "reason": "goal_correction",
+        "epoch": epoch,
+        "at": timezone.now().isoformat(),
+        "patch": patch,
+    }
+    new_ver = int(task.plan_version or 1) + 1
+    AgentTask.objects.filter(pk=task.pk).update(
+        task_scope=scope,
+        facts=facts,
+        plan_version=new_ver,
+        updated_at=timezone.now(),
+    )
+    task.task_scope = scope
+    task.facts = facts
+    task.plan_version = new_ver
+    append_event(
+        task,
+        "goal_corrected",
+        status=task.status or "running",
+        payload={
+            "plan_version": new_ver,
+            "evidence_epoch": epoch,
+            "patch": patch,
+        },
+    )
+    return {
+        "ok": True,
+        "plan_version": new_ver,
+        "evidence_epoch": epoch,
+        "patch": patch,
+    }
+
+
 def create_or_resume_task(
     *,
     session,
@@ -50,11 +125,15 @@ def create_or_resume_task(
     stage_plan: Optional[List[Dict[str, Any]]] = None,
     lease_owner: str = "",
     turn_relation: str = "",
+    config_overrides: Optional[Dict[str, Any]] = None,
+    resume_task_id: str = "",
 ) -> Any:
     """创建新任务或复用同会话未完成任务（继续/补充语义）。"""
     from orchestrator_integration.models import AgentTask, AgentBlackboard
     from orchestrator_integration.turn_context import (
+        TURN_AMBIGUOUS,
         TURN_CONTINUE,
+        TURN_CORRECT,
         TURN_SUPPLEMENT,
         extract_constraint_patch,
     )
@@ -69,19 +148,59 @@ def create_or_resume_task(
         "paused",
         "cancelling",
     )
-    existing = (
-        AgentTask.objects.filter(session=session, status__in=open_statuses)
-        .order_by("-updated_at")
-        .first()
-    )
-    # 「继续」关键词或显式 turn_relation=supplement/continue → 复用
+    open_qs = AgentTask.objects.filter(session=session, status__in=open_statuses)
+    open_count = open_qs.count()
+    existing = None
+    if resume_task_id:
+        existing = (
+            open_qs.filter(public_task_id=resume_task_id).first()
+            or AgentTask.objects.filter(
+                pk=resume_task_id, status__in=open_statuses
+            ).first()
+        )
+        # RC20：禁止复活终态任务
+        if existing is None:
+            terminal = (
+                AgentTask.objects.filter(public_task_id=resume_task_id).first()
+                or AgentTask.objects.filter(pk=resume_task_id).first()
+            )
+            if terminal is not None and str(terminal.status) in {
+                "cancelled",
+                "completed",
+                "failed",
+            }:
+                return terminal
+    else:
+        existing = open_qs.order_by("-updated_at").first()
+
+    relation = (turn_relation or "").strip()
+    # RC20：多任务消歧 — 不静默 resume
+    if relation == TURN_AMBIGUOUS or (
+        open_count >= 2
+        and not resume_task_id
+        and any(
+            k in (goal or "")
+            for k in ("继续", "接着", "剩下的", "按上面的方案")
+        )
+    ):
+        # 返回最近任务但标记 ambiguous（调用方读 task_scope）
+        if existing is not None:
+            scope = dict(existing.task_scope or {})
+            scope["ambiguous_resume"] = True
+            scope["open_task_count"] = open_count
+            existing.task_scope = scope
+            existing.save(update_fields=["task_scope", "updated_at"])
+        return existing
+
+    # 「继续」关键词或显式 turn_relation=supplement/continue/correct → 复用
     continue_like = any(
         k in (goal or "")
         for k in ("继续", "接着", "剩下的", "复用 session_id", "按上面的方案")
     )
-    relation = (turn_relation or "").strip()
     should_resume = bool(existing) and (
-        relation in {TURN_CONTINUE, TURN_SUPPLEMENT} or continue_like
+        relation in {TURN_CONTINUE, TURN_SUPPLEMENT, TURN_CORRECT}
+        or continue_like
+        or bool(resume_task_id)
     )
     if should_resume:
         task = existing
@@ -89,10 +208,15 @@ def create_or_resume_task(
             return task
         # 继续/补充：保留原目标与授权，不覆盖 goal（AC17 / FR08.5）
         scope = dict(task.task_scope or {})
+        scope.pop("ambiguous_resume", None)
         if not scope.get("raw_goal"):
             scope["raw_goal"] = task.goal or ""
         msg = (goal or "")[:2000]
-        if relation == TURN_SUPPLEMENT or (
+        if relation == TURN_CORRECT:
+            apply_goal_correction(task, msg)
+            scope = dict(task.task_scope or {})
+            scope["correction_message"] = msg
+        elif relation == TURN_SUPPLEMENT or (
             not continue_like and relation != TURN_CONTINUE
         ):
             scope["supplement_message"] = msg
@@ -135,18 +259,49 @@ def create_or_resume_task(
         )
         return task
 
-    budget = dict(DEFAULT_BUDGET)
-    if commission is not None:
-        budget["max_tool_steps"] = int(getattr(commission, "max_tool_steps", 28) or 28)
-        max_tokens = int(getattr(commission, "max_tokens", 0) or 0)
-        if max_tokens:
-            budget["max_tokens"] = max_tokens
-        max_duration = int(getattr(commission, "max_duration_ms", 0) or 0)
-        if max_duration:
-            budget["max_duration_ms"] = max_duration
-    public_id = getattr(commission, "task_id", None) or _new_public_id()
+    # D04：统一任务执行配置快照（业务步数 ≠ 工具上限）
+    from orchestrator_integration.task_execution_config import (
+        budget_from_effective,
+        build_effective_config,
+        validate_config_overrides,
+    )
+
     stages = stage_plan or []
+    ov = {}
+    if config_overrides:
+        checked = validate_config_overrides(
+            config_overrides if isinstance(config_overrides, dict) else {}
+        )
+        if checked.get("ok"):
+            ov = checked.get("overrides") or {}
+    effective = build_effective_config(
+        stage_plan=stages,
+        auth_scope=auth_scope or {},
+        commission=commission,
+        overrides=ov,
+    )
+    # RC11：持久化 response_locale（显式覆盖 > 用户消息推断）
+    try:
+        from orchestrator_integration.message_locale import infer_response_locale
+
+        explicit_locale = ""
+        if isinstance(ov, dict):
+            explicit_locale = str(ov.get("response_locale") or "")
+        budget_locale = infer_response_locale(
+            goal or "", explicit=explicit_locale
+        )
+        effective["response_locale"] = budget_locale
+    except Exception:
+        effective.setdefault("response_locale", "auto")
+    budget = budget_from_effective(effective)
+    budget["response_locale"] = effective.get("response_locale", "auto")
+    # 兼容旧 DEFAULT_BUDGET 键
+    for k, v in DEFAULT_BUDGET.items():
+        budget.setdefault(k, v)
+    public_id = getattr(commission, "task_id", None) or _new_public_id()
     current_stage = stages[0]["stage_id"] if stages else ""
+    merged_auth = dict(auth_scope or {})
+    merged_auth.update(effective.get("auth_scope") or {})
     task = AgentTask.objects.create(
         session=session,
         project_id=project_id,
@@ -154,14 +309,16 @@ def create_or_resume_task(
         public_task_id=public_id,
         goal=goal or "",
         status="running",
-        max_steps=budget["max_tool_steps"],
+        max_steps=int(budget.get("max_tool_actions") or budget.get("max_tool_steps") or 28),
         plan_version=1,
         current_stage=current_stage,
         stage_plan=stages,
-        auth_scope=auth_scope or {},
+        auth_scope=merged_auth,
         task_scope={
             "target_url": _extract_url(goal),
             "raw_goal": (goal or "")[:2000],
+            "config_hash": budget.get("config_hash", ""),
+            "schema_version": budget.get("schema_version", 1),
         },
         budget=budget,
         facts={},
@@ -374,6 +531,108 @@ def resume_preflight(task) -> Dict[str, Any]:
     }
 
 
+def _budget_remaining(budget: Dict[str, Any]) -> Tuple[int, int, int, int]:
+    """返回 (used, reserved, max_steps, remaining)。"""
+    used = int(
+        budget.get("used_tool_actions", budget.get("used_tool_steps", 0)) or 0
+    )
+    reserved = int(budget.get("reserved_tool_actions") or 0)
+    max_steps = int(
+        budget.get("max_tool_actions", budget.get("max_tool_steps", 28)) or 28
+    )
+    remaining = max(0, max_steps - used - reserved)
+    return used, reserved, max_steps, remaining
+
+
+def reserve_tool_actions(task, n: int) -> Tuple[bool, int, str]:
+    """批次预留工具额度（FR07 / 交付物：预算预留结算）。
+
+    预留占用可用额度，未启动项在 release 后不计实耗。
+    """
+    from orchestrator_integration.models import AgentTask
+
+    want = max(0, int(n or 0))
+    if want <= 0:
+        return True, 0, "ok"
+    with transaction.atomic():
+        row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
+        if row is None:
+            return False, 0, "task_missing"
+        budget = dict(DEFAULT_BUDGET)
+        budget.update(row.budget or {})
+        used, reserved, max_steps, remaining = _budget_remaining(budget)
+        take = min(want, remaining)
+        if take <= 0:
+            return (
+                False,
+                0,
+                f"budget_tool_actions_exhausted:{used}/{max_steps}",
+            )
+        budget["reserved_tool_actions"] = reserved + take
+        AgentTask.objects.filter(pk=row.pk, version=row.version).update(
+            budget=budget,
+            version=row.version + 1,
+            updated_at=timezone.now(),
+        )
+        task.budget = budget
+        task.version = row.version + 1
+        return True, take, "ok"
+
+
+def release_tool_reservation(task, n: Optional[int] = None) -> int:
+    """释放未使用的预留；n=None 表示全部释放。返回实际释放数。"""
+    from orchestrator_integration.models import AgentTask
+
+    with transaction.atomic():
+        row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
+        if row is None:
+            return 0
+        budget = dict(DEFAULT_BUDGET)
+        budget.update(row.budget or {})
+        reserved = int(budget.get("reserved_tool_actions") or 0)
+        if reserved <= 0:
+            return 0
+        release = reserved if n is None else max(0, min(int(n), reserved))
+        budget["reserved_tool_actions"] = reserved - release
+        AgentTask.objects.filter(pk=row.pk, version=row.version).update(
+            budget=budget,
+            version=row.version + 1,
+            updated_at=timezone.now(),
+        )
+        task.budget = budget
+        task.version = row.version + 1
+        return release
+
+
+def settle_reserved_action(task) -> Tuple[bool, str]:
+    """将 1 次预留转为实耗；无预留时回退 consume_budget(tool_steps=1)。"""
+    from orchestrator_integration.models import AgentTask
+
+    with transaction.atomic():
+        row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
+        if row is None:
+            return False, "task_missing"
+        budget = dict(DEFAULT_BUDGET)
+        budget.update(row.budget or {})
+        used, reserved, max_steps, _rem = _budget_remaining(budget)
+        if reserved >= 1:
+            budget["reserved_tool_actions"] = reserved - 1
+            next_used = used + 1
+            budget["used_tool_actions"] = next_used
+            budget["used_tool_steps"] = next_used
+            AgentTask.objects.filter(pk=row.pk, version=row.version).update(
+                budget=budget,
+                current_step=next_used,
+                version=row.version + 1,
+                updated_at=timezone.now(),
+            )
+            task.budget = budget
+            task.current_step = next_used
+            task.version = row.version + 1
+            return True, "ok"
+    return consume_budget(task, tool_steps=1)
+
+
 def consume_budget(
     task,
     *,
@@ -391,28 +650,48 @@ def consume_budget(
             return False, "task_missing"
         budget = dict(DEFAULT_BUDGET)
         budget.update(row.budget or {})
-        next_steps = int(budget.get("used_tool_steps", 0)) + tool_steps
+        used_tools, reserved, max_steps, _rem = _budget_remaining(budget)
+        next_steps = used_tools + tool_steps
         next_retries = int(budget.get("used_retries", 0)) + retries
         next_tokens = int(budget.get("used_tokens", 0)) + tokens
         next_duration = int(budget.get("used_duration_ms", 0)) + max(0, duration_ms)
-        max_steps = int(budget.get("max_tool_steps", 28) or 28)
-        max_retries = int(budget.get("max_retries", 3) or 3)
-        max_duration = int(budget.get("max_duration_ms", 0) or 0)
+        max_retries = int(
+            budget.get("max_attempts_per_step", budget.get("max_retries", 3)) or 3
+        )
+        max_duration = int(
+            budget.get("max_duration_ms")
+            or (int(budget.get("max_duration_seconds") or 0) * 1000)
+            or 0
+        )
         max_tokens = int(budget.get("max_tokens", 0) or 0)
-        # R21：实际已消耗量必须入账；超额时标记但仍写入 used_*，不能抹去花费
+        # RC05：未启动不计实耗；可用额度 = max - used - reserved
+        if tool_steps and (used_tools + reserved + tool_steps) > max_steps:
+            return (
+                False,
+                f"budget_tool_actions_exhausted:{used_tools}/{max_steps}"
+                f"|budget_tool_steps_exceeded:{used_tools}/{max_steps}"
+                f"|reserved={reserved}",
+            )
+        if retries and next_retries > max_retries:
+            return (
+                False,
+                f"budget_retries_exceeded:{int(budget.get('used_retries', 0))}/{max_retries}",
+            )
+        # R21：Token/时长等实际已发生开销仍入账；超额标记 over_budget
         exceeded = ""
-        if tool_steps and next_steps > max_steps:
-            exceeded = f"budget_tool_steps_exceeded:{next_steps}/{max_steps}"
-        elif retries and next_retries > max_retries:
-            exceeded = f"budget_retries_exceeded:{next_retries}/{max_retries}"
-        elif max_duration and duration_ms and next_duration > max_duration:
+        if max_duration and duration_ms and next_duration > max_duration:
             exceeded = f"budget_duration_exceeded:{next_duration}/{max_duration}"
         elif tokens and max_tokens and next_tokens > max_tokens:
             exceeded = f"budget_tokens_exceeded:{next_tokens}/{max_tokens}"
-        budget["used_tool_steps"] = next_steps
-        budget["used_retries"] = next_retries
-        budget["used_tokens"] = next_tokens
-        budget["used_duration_ms"] = next_duration
+        if tool_steps:
+            budget["used_tool_steps"] = next_steps
+            budget["used_tool_actions"] = next_steps
+        if retries:
+            budget["used_retries"] = next_retries
+        if tokens:
+            budget["used_tokens"] = next_tokens
+        if duration_ms:
+            budget["used_duration_ms"] = next_duration
         if exceeded:
             budget["over_budget"] = True
             budget["over_budget_reason"] = exceeded
@@ -521,13 +800,15 @@ def append_event(
     step_id: str = "",
     payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    from django.utils import timezone
+
     from orchestrator_integration.models import TaskEvent
 
     seq = TaskEvent.objects.filter(task=task).count() + 1
     event_id = f"{task.public_task_id or task.id}-{seq}-{uuid.uuid4().hex[:6]}"
     # 脱敏：去掉疑似密钥
     safe_payload = _redact(payload or {})
-    TaskEvent.objects.create(
+    row = TaskEvent.objects.create(
         task=task,
         event_id=event_id,
         sequence=seq,
@@ -536,14 +817,31 @@ def append_event(
         status=status or "",
         payload=safe_payload,
     )
+    # D11/FR10.1：普通 append_event 返回必须含时间与配置版本字段
+    occurred = row.created_at or timezone.now()
+    occurred_iso = occurred.isoformat()
+    budget = getattr(task, "budget", None) or {}
+    config_version = (
+        budget.get("config_version")
+        or getattr(task, "plan_version", None)
+        or getattr(task, "version", None)
+        or 0
+    )
     return {
+        "schema_version": 1,
         "type": event_type,
+        "event_type": event_type,
         "task_id": task.public_task_id or str(task.id),
         "event_id": event_id,
         "sequence": seq,
         "step_id": step_id or "",
         "status": status or "",
         "payload": safe_payload,
+        "occurred_at": occurred_iso,
+        "observed_at": occurred_iso,
+        "time": occurred_iso,
+        "created_at": occurred_iso,
+        "config_version": int(config_version or 0),
     }
 
 
@@ -557,6 +855,23 @@ def record_step_result(
     stage_id: str = "",
 ) -> Any:
     from orchestrator_integration.models import AgentStep, AgentTask
+
+    # RC08/RC10：终态任务拒绝迟到步骤写入（不复活）
+    if str(getattr(task, "status", "") or "") in {
+        "completed",
+        "failed",
+        "cancelled",
+    }:
+        append_event(
+            task,
+            "late_step_ignored",
+            status=task.status,
+            payload={
+                "tool_name": tool_name,
+                "reason": "task_already_terminal",
+            },
+        )
+        return None
 
     step_number = (task.current_step or 0) + 1
     status = structured.get("status") or "succeeded"
@@ -609,11 +924,115 @@ def record_step_result(
         duration_ms=int(structured.get("duration_ms") or 0),
         param_fingerprint=fingerprint_payload(tool_input),
     )
-    AgentTask.objects.filter(pk=task.pk).update(
-        current_step=step_number,
-        updated_at=timezone.now(),
+    # RC16：完整输出入证据库，摘要可追溯 output_ref
+    try:
+        from orchestrator_integration.evidence_store import store_tool_output_evidence
+
+        full_text = ""
+        data = structured.get("data") if isinstance(structured.get("data"), dict) else {}
+        if isinstance(data.get("raw_text"), str):
+            full_text = data.get("raw_text") or ""
+        elif isinstance(structured.get("summary"), str):
+            full_text = structured.get("summary") or ""
+        else:
+            full_text = summary or ""
+        stored = store_tool_output_evidence(
+            task,
+            step=step,
+            tool_name=tool_name or "",
+            summary=summary or structured.get("summary") or "",
+            full_text=full_text,
+            structured=structured,
+            claim_type="observation",
+        )
+        if stored.get("ok"):
+            evidence["output_ref"] = stored.get("output_ref")
+            evidence["evidence_id"] = stored.get("evidence_id")
+            evidence["content_hash"] = stored.get("content_hash")
+            structured = dict(structured)
+            structured["output_ref"] = stored.get("output_ref")
+            AgentStep.objects.filter(pk=step.pk).update(
+                evidence=evidence, structured_result=structured
+            )
+            step.evidence = evidence
+            step.structured_result = structured
+    except Exception as evid_err:
+        logger.warning("store_tool_output_evidence failed: %s", evid_err)
+
+    # RC19：同阶段同参数指纹无进展计数；达阈值则 blocked 核查
+    # 合法轮询：输出哈希变化则清零；带 poll+间隔的同参读取按间隔窗口计次，避免误去重误拦
+    no_progress_blocked = False
+    facts = dict(getattr(task, "facts", None) or {})
+    out_hash = (evidence or {}).get("content_hash") or fingerprint_payload(
+        summary or structured.get("summary") or ""
     )
+    # 指纹不含瞬时 poll 时间戳，避免「同页轮询」被当成新进展
+    poll_input = dict(tool_input or {}) if isinstance(tool_input, dict) else {}
+    is_poll = bool(
+        poll_input.pop("poll", False)
+        or poll_input.pop("is_poll", False)
+        or str(tool_name or "").lower() in {"poll", "wait_for", "observe_poll"}
+    )
+    for transient in ("observed_at", "poll_ts", "timestamp", "attempt_ts"):
+        poll_input.pop(transient, None)
+    fp = fingerprint_payload(
+        {
+            "tool": tool_name or "",
+            "stage": stage_id or task.current_stage or "",
+            "input": poll_input if isinstance(tool_input, dict) else tool_input,
+            "out_hash": out_hash,
+        }
+    )
+    last_fp = str(facts.get("last_step_fingerprint") or "")
+    streak = int(facts.get("no_progress_streak") or 0)
+    now_ts = timezone.now().timestamp()
+    last_np_at = float(facts.get("last_no_progress_at") or 0)
+    min_poll_interval = float(
+        (task.budget or {}).get("min_poll_interval_sec")
+        or poll_input.get("min_interval_sec")
+        or 0
+    )
+    if last_fp and last_fp == fp:
+        # 合法轮询：同一窗口内重复观测只计 1 次，跨间隔才累加
+        if is_poll and min_poll_interval > 0 and (now_ts - last_np_at) < min_poll_interval:
+            pass  # 同间隔窗口，不累加
+        else:
+            streak += 1
+            facts["retry_of"] = facts.get("last_step_id") or ""
+            facts["last_no_progress_at"] = now_ts
+    else:
+        streak = 0
+        facts.pop("retry_of", None)
+        facts["last_no_progress_at"] = now_ts
+    facts["last_step_fingerprint"] = fp
+    facts["last_step_id"] = step.step_id
+    facts["no_progress_streak"] = streak
+    max_np = int(
+        (task.budget or {}).get("max_no_progress_repeats")
+        or 3
+    )
+    update_fields: Dict[str, Any] = {
+        "current_step": step_number,
+        "facts": facts,
+        "updated_at": timezone.now(),
+    }
+    if streak >= max_np and str(getattr(task, "status", "") or "") not in {
+        "completed",
+        "failed",
+        "cancelled",
+        "cancelling",
+    }:
+        no_progress_blocked = True
+        update_fields["status"] = "blocked"
+        update_fields["error_message"] = (
+            f"no_progress_loop: fingerprint repeated {streak} times "
+            f"(limit {max_np})"
+        )[:2000]
+        task.status = "blocked"
+
+    AgentTask.objects.filter(pk=task.pk).update(**update_fields)
     task.current_step = step_number
+    task.facts = facts
     append_event(
         task,
         "step_result",
@@ -626,8 +1045,27 @@ def record_step_result(
             "resource_type": structured.get("resource_type"),
             "resource_id": structured.get("resource_id"),
             "execution_method": structured.get("execution_method"),
+            "output_ref": (evidence or {}).get("output_ref")
+            or structured.get("output_ref"),
+            "param_fingerprint": fp,
+            "no_progress_streak": streak,
+            "retry_of": facts.get("retry_of") or "",
         },
     )
+    if no_progress_blocked:
+        append_event(
+            task,
+            "task_blocked",
+            status="blocked",
+            step_id=step.step_id,
+            payload={
+                "blocker_code": "no_progress_loop",
+                "fingerprint": fp,
+                "streak": streak,
+                "max_no_progress_repeats": max_np,
+                "retry_of": facts.get("retry_of") or "",
+            },
+        )
     return step
 
 
@@ -642,14 +1080,18 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
         row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
         if row is None:
             return {"type": "error", "error_code": "task_missing"}
-        if row.status in terminal:
-            # 禁止迟到验收覆盖取消/失败/已完成
+        # RC10：取消中/已终态不得被迟到验收复活为 completed/blocked
+        if row.status in terminal or row.status == "cancelling":
             return {
                 "type": "task_status",
                 "status": row.status,
                 "task_id": row.public_task_id or str(row.id),
                 "ignored": True,
-                "error_code": "already_terminal",
+                "error_code": (
+                    "task_cancelling"
+                    if row.status == "cancelling"
+                    else "already_terminal"
+                ),
             }
         if ok:
             already = TaskEvent.objects.filter(
@@ -691,7 +1133,7 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
 def task_snapshot(
     task, *, after_event_id: str = "", limit: int = 200
 ) -> Dict[str, Any]:
-    from orchestrator_integration.models import AgentStep, TaskEvent
+    from orchestrator_integration.models import AgentStep, ApprovalRequest, TaskEvent
 
     steps = list(
         AgentStep.objects.filter(task=task).order_by("step_number").values(
@@ -706,6 +1148,52 @@ def task_snapshot(
             "evidence",
         )[:100]
     )
+    # RC07/08：刷新后可恢复等待确认的原动作
+    pending_approval: Optional[Dict[str, Any]] = None
+    if str(getattr(task, "status", "") or "") == "awaiting_approval":
+        appr = (
+            ApprovalRequest.objects.filter(task=task, status="pending")
+            .order_by("-created_at")
+            .first()
+        )
+        if appr is not None:
+            args = appr.action_args if isinstance(appr.action_args, dict) else {}
+            pending = args.get("pending") if isinstance(args.get("pending"), dict) else {}
+            cmds = []
+            try:
+                from orchestrator_integration.write_confirmation import (
+                    normalize_pending_commands,
+                )
+
+                cmds = normalize_pending_commands(pending)
+            except Exception:
+                cmds = []
+            original = "；".join(
+                f"{c.get('skill_name')}: {c.get('command')}" for c in cmds
+            ) or str(pending.get("command") or appr.summary or "")
+            pending_approval = {
+                "interrupt_id": appr.interrupt_id,
+                "kind": appr.kind or "write_confirmation",
+                "status": appr.status,
+                "summary": appr.summary or "",
+                "expires_at": appr.expires_at.isoformat() if appr.expires_at else None,
+                "param_fingerprint": appr.param_fingerprint or "",
+                "original_action": original[:2000],
+                "pending": pending,
+                "action_requests": [
+                    {
+                        "name": "确认写入",
+                        "args": {
+                            "tool": appr.action_name or "execute_skill_script",
+                            "summary": appr.summary or "",
+                            "pending": pending,
+                            "original_action": original[:2000],
+                            "mode": args.get("mode") or "confirm",
+                        },
+                        "description": "刷新后恢复的原动作确认，批准后只执行该快照一次。",
+                    }
+                ],
+            }
     event_qs = TaskEvent.objects.filter(task=task).order_by("sequence")
     after_seq = 0
     if after_event_id:
@@ -752,9 +1240,43 @@ def task_snapshot(
                 **e,
                 "created_at": e["created_at"].isoformat() if e.get("created_at") else None,
                 "time": e["created_at"].isoformat() if e.get("created_at") else None,
+                "occurred_at": e["created_at"].isoformat()
+                if e.get("created_at")
+                else None,
+                "observed_at": e["created_at"].isoformat()
+                if e.get("created_at")
+                else None,
+                "schema_version": 1,
+                "config_version": int(
+                    (task.budget or {}).get("config_version")
+                    or task.plan_version
+                    or 0
+                ),
             }
             for e in events
         ],
+        "effective_config": {
+            "schema_version": (task.budget or {}).get("schema_version", 1),
+            "config_version": (task.budget or {}).get("config_version", 1),
+            "config_hash": (task.budget or {}).get("config_hash", ""),
+            "expected_business_steps": (task.budget or {}).get(
+                "expected_business_steps", 0
+            ),
+            "completed_business_steps": (task.budget or {}).get(
+                "completed_business_steps", 0
+            ),
+            "max_tool_actions": (task.budget or {}).get(
+                "max_tool_actions",
+                (task.budget or {}).get("max_tool_steps"),
+            ),
+            "used_tool_actions": (task.budget or {}).get(
+                "used_tool_actions",
+                (task.budget or {}).get("used_tool_steps", 0),
+            ),
+            "response_locale": (task.budget or {}).get("response_locale", "auto"),
+        },
+        "pending_approval": pending_approval,
+        "deploy": runtime_deploy_info(),
     }
 
 
@@ -822,12 +1344,21 @@ def probe_browser_resources(
     import os
     from datetime import datetime
 
+    import platform as _platform
+    import socket as _socket
+
     observed_at = datetime.now().isoformat(timespec="seconds")
     result = {
         "session_ref": session_id or "",
         "file_ref": file_path or "",
         "target_url": target_url or "",
         "observed_at": observed_at,
+        # RC17：本次 probe 结构化字段（时间/环境/URL/登录/素材哈希）
+        "env": {
+            "hostname": _socket.gethostname(),
+            "platform": _platform.system(),
+            "python": _platform.python_version(),
+        },
         "probe_result": {},
         "ok_to_reuse": False,
     }
@@ -1100,6 +1631,20 @@ def advance_task_stage(
     from orchestrator_integration.models import AgentTask
     from orchestrator_integration.stage_plan import StageSpec, advance_stage
 
+    # RC10：终态/取消中禁止阶段推进（避免迟到事件复活任务）
+    if str(getattr(task, "status", "") or "") in {
+        "completed",
+        "failed",
+        "cancelled",
+        "cancelling",
+    }:
+        return {
+            "advanced": False,
+            "current_stage": task.current_stage or "",
+            "reason": "task_terminal",
+            "status": task.status,
+        }
+
     stages_raw = list(task.stage_plan or [])
     if len(stages_raw) <= 1:
         return {
@@ -1128,22 +1673,58 @@ def advance_task_stage(
             "reason": "stage_not_accepted",
             "verdict": verdict,
         }
-    nxt = advance_stage(stages, cur, accepted=True)
+    facts = dict(task.facts or {})
+    completed_ids = set(facts.get("completed_stage_ids") or [])
+    failed_ids = set(facts.get("failed_stage_ids") or [])
+    completed_ids.add(cur)
+    nxt = advance_stage(
+        stages,
+        cur,
+        accepted=True,
+        completed_ids=completed_ids,
+        failed_ids=failed_ids,
+    )
     if nxt == cur:
         return {
             "advanced": False,
             "current_stage": cur,
             "reason": "already_last_stage",
             "verdict": verdict,
+            "completed_stage_ids": sorted(completed_ids),
         }
+    from orchestrator_integration.stage_plan import ready_stages
+
+    ready = ready_stages(
+        stages, completed_ids=completed_ids, failed_ids=failed_ids
+    )
+    waiting = [
+        s.stage_id
+        for s in stages
+        if s.stage_id not in completed_ids
+        and s.stage_id not in failed_ids
+        and s.stage_id not in ready
+        and s.stage_id != nxt
+    ]
     new_version = int(task.plan_version or 1) + 1
+    # D04/RC06：阶段验收通过才增加业务完成数，与工具调用数分开
+    budget = dict(task.budget or {})
+    done = int(budget.get("completed_business_steps") or 0) + 1
+    expected = int(budget.get("expected_business_steps") or len(stages) or 0)
+    budget["completed_business_steps"] = min(done, expected) if expected else done
+    facts["completed_stage_ids"] = sorted(completed_ids)
+    facts["ready_stages"] = ready
+    facts["waiting_stages"] = waiting
     AgentTask.objects.filter(pk=task.pk).update(
         current_stage=nxt,
         plan_version=new_version,
+        budget=budget,
+        facts=facts,
         updated_at=timezone.now(),
     )
     task.current_stage = nxt
     task.plan_version = new_version
+    task.budget = budget
+    task.facts = facts
     evt = append_event(
         task,
         "stage_changed",
@@ -1153,6 +1734,10 @@ def advance_task_stage(
             "to_stage": nxt,
             "plan_version": new_version,
             "verdict": verdict,
+            "completed_business_steps": budget.get("completed_business_steps"),
+            "expected_business_steps": expected,
+            "ready_stages": ready,
+            "waiting_stages": waiting,
         },
     )
     return {
@@ -1160,6 +1745,8 @@ def advance_task_stage(
         "from_stage": cur,
         "current_stage": nxt,
         "plan_version": new_version,
+        "ready_stages": ready,
+        "waiting_stages": waiting,
         "event": evt,
         "verdict": verdict,
     }
@@ -1212,6 +1799,8 @@ class AgentRuntime:
         auth_scope: Optional[Dict[str, Any]] = None,
         stage_plan: Optional[List[Dict[str, Any]]] = None,
         turn_relation: str = "",
+        config_overrides: Optional[Dict[str, Any]] = None,
+        resume_task_id: str = "",
     ):
         self.task = create_or_resume_task(
             session=session,
@@ -1223,6 +1812,8 @@ class AgentRuntime:
             stage_plan=stage_plan,
             lease_owner=self.lease_owner,
             turn_relation=turn_relation,
+            config_overrides=config_overrides,
+            resume_task_id=resume_task_id,
         )
         return self.task
 
@@ -1357,6 +1948,39 @@ class AgentRuntime:
             release_lease(self.task, self.lease_owner)
 
 
+def runtime_deploy_info() -> Dict[str, Any]:
+    """RC23：部署版本与配置 schema，供截图/回放核对。"""
+    import os
+
+    from django.conf import settings
+    from orchestrator_integration.task_execution_config import SCHEMA_VERSION
+
+    git_sha = getattr(settings, "GIT_COMMIT", None) or os.environ.get(
+        "LOCA_STUDE_GIT_SHA", ""
+    )
+    if not git_sha:
+        try:
+            import subprocess
+
+            git_sha = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=str(getattr(settings, "BASE_DIR", ".")),
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+        except Exception:
+            git_sha = "unknown"
+    return {
+        "git_sha": git_sha,
+        "config_schema_version": SCHEMA_VERSION,
+        "event_schema_version": 1,
+        "service": "orchestrator_agent_loop",
+    }
+
+
 def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[str, Any]:
     """质量指标（FR10.4）：任务验收 + 工具遥测聚合。"""
     from orchestrator_integration.models import AgentTask, TaskEvent
@@ -1381,9 +2005,21 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
                 false_complete += 1
         if st == "blocked":
             blocked += 1
-    stage_events = TaskEvent.objects.filter(
-        event_type="stage_changed", task_id__in=[t.id for t in recent]
-    ).count()
+    task_pks = [t.id for t in recent]
+    related_events = list(
+        TaskEvent.objects.filter(task_id__in=task_pks).values("event_type", "payload")
+    )
+    stage_events = sum(1 for e in related_events if e["event_type"] == "stage_changed")
+    # RC23：无进展 / 重确认可计算（不跨项目：上游已按 user_id 过滤任务）
+    no_progress_events = 0
+    reconfirm_events = 0
+    for e in related_events:
+        et = e["event_type"] or ""
+        pl = e["payload"] if isinstance(e["payload"], dict) else {}
+        if et == "task_blocked" and pl.get("blocker_code") == "no_progress_loop":
+            no_progress_events += 1
+        if et in {"approval_requested", "write_confirmation", "needs_confirmation"}:
+            reconfirm_events += 1
     # R26：遥测按用户过滤，与任务列表范围一致
     telem = aggregate_telemetry(limit=2000, user_id=user_id)
     return {
@@ -1393,6 +2029,9 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
         "block_rate": round(blocked / total, 4),
         "false_complete_count": false_complete,
         "stage_advance_events": stage_events,
+        "no_progress_count": no_progress_events,
+        "reconfirm_count": reconfirm_events,
+        "deploy": runtime_deploy_info(),
         "telemetry": {
             "governance_kpis": telem.get("governance_kpis"),
             "error_kinds": telem.get("error_kinds"),

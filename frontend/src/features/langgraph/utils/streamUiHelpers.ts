@@ -92,10 +92,25 @@ function simpleHash(s: string): string {
 }
 
 export function toolEventKey(parsed: Record<string, unknown>): string {
-  const eid = parsed.event_id ?? parsed.eventId;
-  if (typeof eid === 'string' && eid.trim()) return eid.trim();
+  // D09/RC13：业务操作身份优先于传输 event_id，避免同操作不同传输 ID 重复、
+  // 或不同操作仅前 200 字相同被误合并。
+  const opId = parsed.operation_id ?? parsed.operationId;
+  const toolCallId = parsed.tool_call_id ?? parsed.toolCallId;
+  const attempt =
+    parsed.attempt_id ?? parsed.attemptId ?? parsed.attempt ?? parsed.retry_of;
   const tool = String(parsed.tool_name || parsed.toolName || '');
-  const step = String(parsed.step ?? '');
+  const step = String(parsed.step ?? parsed.step_id ?? '');
+  if (typeof opId === 'string' && opId.trim()) {
+    return `op:${opId.trim()}|${tool}|${step}|a:${String(attempt ?? '1')}`;
+  }
+  if (typeof toolCallId === 'string' && toolCallId.trim()) {
+    return `tc:${toolCallId.trim()}|${tool}|a:${String(attempt ?? '1')}`;
+  }
+  const eid = parsed.event_id ?? parsed.eventId;
+  if (typeof eid === 'string' && eid.trim()) {
+    // 传输身份：仅在无业务操作身份时用于去重重放
+    return `tx:${eid.trim()}`;
+  }
   const summary = String(parsed.summary || '').slice(0, 120);
   const output = parsed.tool_output ?? parsed.content;
   let body = '';
@@ -107,7 +122,7 @@ export function toolEventKey(parsed: Record<string, unknown>): string {
   } catch {
     body = String(output ?? '').slice(0, 200);
   }
-  return `${tool}|${step}|${simpleHash(summary + '|' + body)}`;
+  return `fb:${tool}|${step}|${simpleHash(summary + '|' + body)}|a:${String(attempt ?? '1')}`;
 }
 
 export function upsertProgressMessage(
@@ -152,7 +167,7 @@ export function upsertExecutionLogEntry(
     log.toolEntries = entries;
     log.content = formatExecutionLogContent(entries);
     log.time = time;
-    log.isExpanded = false;
+    // D13/RC13：追加条目时保留用户已展开状态，不强制折叠
     return true;
   }
   stream.messages.push({

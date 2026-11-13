@@ -25,31 +25,35 @@ def resolve_output_refs(
     if not refs:
         return None, raw
 
-    def _lookup(step_id: str, field: str) -> Any:
+    def _lookup(step_id: str, field: str) -> Tuple[Optional[Any], Optional[str]]:
+        """返回 (value, error)。D05/RC04：仅 succeeded 可引用；缺 status / unknown / failed / 不存在一律拒绝。"""
+        if step_id not in outputs_by_step:
+            return None, f"来源 step_id 不存在: {step_id}"
         payload = outputs_by_step.get(step_id) or {}
-        status = str(payload.get("status") or "")
-        if status and status not in {"succeeded", "ok", "completed"}:
-            return None
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in {"succeeded", "ok", "completed"}:
+            reason = status or "missing_status"
+            return None, f"来源 {step_id} 状态不可用({reason})"
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         if field in data:
-            return data[field]
-        if field in payload:
-            return payload[field]
+            return data[field], None
+        if field in payload and field not in {"status", "data"}:
+            return payload[field], None
         # a.b 嵌套
         cur: Any = data or payload
         for part in field.split("."):
             if not isinstance(cur, dict) or part not in cur:
-                return None
+                return None, f"来源 {step_id} 缺少字段 {field}"
             cur = cur[part]
-        return cur
+        return cur, None
 
     missing: List[str] = []
 
     def _repl(m: re.Match) -> str:
         sid, field = m.group(1), m.group(2)
-        val = _lookup(sid, field)
-        if val is None:
-            missing.append(f"{sid}.{field}")
+        val, err = _lookup(sid, field)
+        if err or val is None:
+            missing.append(err or f"{sid}.{field}")
             return m.group(0)
         return str(val)
 
@@ -86,11 +90,10 @@ def validate_batch_deps(commands: Sequence[dict]) -> Optional[str]:
                 return f"depends_on 引用不存在的 step_id: {d}"
             if sid:
                 graph[sid].append(d)
-        # 命令文本中的输出引用也必须指向已知 step
+        # 命令文本中的输出引用：本批声明了 step_id 时，引用必须落在已知集合（D05）
         for ref_sid, _field in extract_output_refs(str(c.get("command") or "")):
-            if ref_sid not in id_set and ref_sid not in seen:
-                # 允许引用尚未在本批声明、但由运行时 outputs 提供的外部 step
-                continue
+            if id_set and ref_sid not in id_set:
+                return f"输出引用指向不存在的 step_id: {ref_sid}"
 
     # 环检测
     visiting: set = set()

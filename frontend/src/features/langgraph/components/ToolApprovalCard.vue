@@ -12,6 +12,9 @@
               <span class="tool-name">{{ actionRequest.name }}</span>
               <span class="approval-badge">{{ text.needsApproval }}</span>
             </div>
+            <p v-if="originalActionLabel" class="original-action" :title="originalActionLabel">
+              {{ text.originalAction }}：{{ originalActionLabel }}
+            </p>
           </div>
         </div>
 
@@ -140,6 +143,7 @@ const text = computed(() => (
         cancelWrite: 'Cancel',
         collapseArgs: 'Collapse args',
         viewArgs: 'View full args',
+        originalAction: 'Original action',
         policyAsk: 'Ask every time',
         policyAlwaysAllow: 'Always allow',
         setAlwaysAllowSuccess: (name: string) => `${name} is now always allowed`,
@@ -153,6 +157,7 @@ const text = computed(() => (
         cancelWrite: '取消',
         collapseArgs: '收起参数',
         viewArgs: '查看完整参数',
+        originalAction: '原动作',
         policyAsk: '每次询问',
         policyAlwaysAllow: '始终允许',
         setAlwaysAllowSuccess: (name: string) => `已设置 ${name} 为始终允许`,
@@ -167,6 +172,28 @@ const policyOptions = computed(() => [
 
 const actionRequest = computed(() => {
   return props.interrupt?.action_requests?.[0] || null;
+});
+
+/** RC07：展示待批准的原动作快照（技能+命令），批准后只执行该快照 */
+const originalActionLabel = computed(() => {
+  const args = actionRequest.value?.args;
+  if (!args || typeof args !== 'object') return '';
+  const direct = args.original_action;
+  if (typeof direct === 'string' && direct.trim()) {
+    return direct.length > 160 ? `${direct.slice(0, 160)}…` : direct;
+  }
+  const pending = args.pending;
+  if (pending && typeof pending === 'object') {
+    const p = pending as Record<string, unknown>;
+    const skill = String(p.skill_name || '').trim();
+    const cmd = String(p.command || '').trim();
+    if (skill || cmd) {
+      const label = skill ? `${skill}: ${cmd}` : cmd;
+      return label.length > 160 ? `${label.slice(0, 160)}…` : label;
+    }
+  }
+  const summary = args.summary;
+  return typeof summary === 'string' ? summary.slice(0, 160) : '';
 });
 
 const resolveInterruptId = () =>
@@ -333,6 +360,17 @@ const handleReject = async () => {
   align-items: center;
   gap: 8px;
   margin-bottom: 4px;
+}
+
+.original-action {
+  margin: 0;
+  font-size: 12px;
+  color: #8c6e3a;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
 }
 
 .tool-name {

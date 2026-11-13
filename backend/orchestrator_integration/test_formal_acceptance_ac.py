@@ -704,10 +704,19 @@ class FormalAcceptanceAC16to30Tests(TestCase):
         )
         self.assertFalse(over["ok"])
 
-    def test_ac35_equiv_entry_needs_original_target(self):
+    def test_ac35_equiv_entry_soft_not_delivery_block(self):
+        """替换入口措辞为 soft：提醒但不否决交付（避免模型因怕门禁而停手）。"""
+        from orchestrator_integration.evidence_integrity import (
+            evaluate_evidence_integrity_text,
+        )
         from orchestrator_integration.execution_policy import evaluate_delivery_evidence
 
+        integrity = evaluate_evidence_integrity_text(
+            "工具不可用，请给一个可用的等价入口"
+        )
+        self.assertTrue(integrity["hard_ok"])
+        self.assertFalse(integrity["soft_ok"])
         delivery = evaluate_delivery_evidence(
             tool_results=["工具不可用，请给一个可用的等价入口"],
         )
-        self.assertFalse(delivery["ok"])
+        self.assertTrue(delivery["ok"])

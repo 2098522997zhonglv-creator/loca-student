@@ -55,6 +55,25 @@ _TYPED_ID_RE = re.compile(
     r"(?!unknown\b|null\b|none\b|n/?a\b|undefined\b)([A-Za-z0-9][A-Za-z0-9_-]{2,})",
     re.IGNORECASE,
 )
+# D03/RC18：点击动作观察值 / 静态 Preview 文案不得冒充类型化编号
+_PLACEHOLDER_ID_VALUES = frozenset(
+    {
+        "observed_cart_action",
+        "observed_cart",
+        "placeholder",
+        "static_preview",
+        "preview",
+        "tbd",
+        "todo",
+        "sample",
+        "demo",
+        "example",
+    }
+)
+_STATIC_PREVIEW_ONLY_RE = re.compile(
+    r"(?i)(static\s*preview|预览文案|preview\s*text\s*only|"
+    r"仅有\s*preview\s*文本|页面含\s*preview\s*字样)"
+)
 _UPLOAD_COUNT_ONLY_RE = re.compile(r"0/1\s*[→\-~]+\s*1/1|计数.*1/1", re.IGNORECASE)
 _NEGATED_SUCCESS_RE = re.compile(
     r"(add\s*to\s*cart|加入购物车|上传|upload|preview|预览).{0,12}"
@@ -224,7 +243,11 @@ def evaluate_browser_checkpoints(
 ) -> Dict[str, Any]:
     """浏览器上传/加购逐项验收（FR03.5 / FR03.6 / AC26 / FLOW06）。"""
     text = joined or ""
-    typed = list(_TYPED_ID_RE.finditer(text))
+    typed = [
+        m
+        for m in _TYPED_ID_RE.finditer(text)
+        if str(m.group(2) or "").strip().lower() not in _PLACEHOLDER_ID_VALUES
+    ]
     negated = bool(_NEGATED_SUCCESS_RE.search(text))
     # 否定/失败语境中的成功关键词不算成功证据；unknown 标识不算成功
     has_success = bool(typed) and not negated
@@ -304,6 +327,19 @@ def evaluate_browser_checkpoints(
         ok = False
         reasons.append("加购有动作证据但未捕获类型化标识（cart_id/cart_item_id 等）")
 
+    # D03/RC18：占位编号与静态 Preview 文案不得当作完成证据
+    if re.search(
+        r"cart_id\s*[:=]\s*(observed_cart_action|placeholder|static_preview)\b",
+        text,
+        re.I,
+    ):
+        ok = False
+        reasons.append("cart_id 为占位观察值，不能作为真实购物车标识")
+        checks["has_typed_identifier"] = False
+    if _STATIC_PREVIEW_ONLY_RE.search(text) and not checks["has_typed_identifier"]:
+        ok = False
+        reasons.append("静态 Preview 文案不能证明预览/加购已完成")
+
     # R05：原生要求必须有允许方式的明确证据，未知方式保持未完成
     scope = auth_scope or {}
     req = str(scope.get("upload_method_requirement") or "")
@@ -326,23 +362,81 @@ def evaluate_delivery_evidence(
     tool_results: Sequence[str],
     auth_scope: Optional[Dict[str, Any]] = None,
     target_url: str = "",
+    stage_plan: Optional[Sequence[Any]] = None,
+    facts: Optional[Dict[str, Any]] = None,
+    evidence_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """交付门禁（FR09.5/9.6 / FR01.5 / AC27–AC30）。"""
+    """交付门禁（FR09.5/9.6 / FR01.5 / AC27–AC30 / RC21–RC22）。"""
     joined = "\n".join(str(x) for x in tool_results if x)
     ok = True
     reasons: List[str] = []
     blockers: List[Dict[str, Any]] = []
     scope = auth_scope or {}
+    facts = facts if isinstance(facts, dict) else {}
+    confirmed_inputs: List[str] = []
+    success_products: List[Dict[str, Any]] = []
 
-    # AC28：知识库示例订单号不得当作本次结果
-    if re.search(r"(示例|样例|example).{0,12}(order_sn|订单号)|不得当作本次", joined, re.I):
-        # 若同时把示例号写成交付结果则失败
-        if re.search(r"(交付|结果|order_sn)\s*[:=].*\d{15,}", joined, re.I) and (
-            "示例" in joined or "样例" in joined or "example" in joined.lower()
+    # AC28 / RC17：知识库/文档示例编号不得当作本次结果
+    if re.search(
+        r"(示例|样例|example|文档).{0,16}(order_sn|订单号|cart_id|cart_item_id)|"
+        r"不得当作本次",
+        joined,
+        re.I,
+    ):
+        if re.search(
+            r"(交付|结果|完成|成功).{0,24}"
+            r"(order_sn|cart_id|cart_item_id|订单号)\s*[:=]",
+            joined,
+            re.I,
+        ) or re.search(
+            r"(order_sn|cart_id|cart_item_id)\s*[:=]\s*"
+            r"(示例|样例|sample|example|demo)[\w-]*",
+            joined,
+            re.I,
         ):
             ok = False
-            reasons.append("知识库订单号示例不得作为本次执行结果")
-            blockers.append({"blocker_code": "kb_sample_order_sn", "step": "deliver"})
+            reasons.append("文档/知识库示例编号不得作为本次执行结果")
+            blockers.append({"blocker_code": "kb_sample_typed_id", "step": "deliver"})
+
+    # RC17：缺失素材却宣称上传成功
+    if re.search(r"(素材|文件|图片).{0,12}(缺失|不存在|找不到|不可读)", joined) and re.search(
+        r"(上传成功|已上传|upload\s*succeeded)", joined, re.I
+    ):
+        ok = False
+        reasons.append("素材缺失时不得宣称上传成功")
+        blockers.append({"blocker_code": "missing_asset_claimed_upload", "step": "upload"})
+
+    # RC17：旧 cookie / 未探测会话不得当成本轮可用事实
+    if re.search(
+        r"(旧|历史|上一轮).{0,8}(cookie|会话|session)", joined, re.I
+    ) and re.search(
+        r"(仍在|仍有效|可复用|直接继续|已登录)", joined
+    ):
+        if "本轮探测" not in joined and "observed_at" not in joined:
+            ok = False
+            reasons.append("旧 cookie/会话不得未探测即当成本轮可用事实")
+            blockers.append({"blocker_code": "stale_cookie_as_fact", "step": "probe"})
+
+    # RC17：类目经验不得当作目标 SKU 能力/完成证据
+    if re.search(
+        r"(同类|这类商品|同类目|类目经验|手提袋这类).{0,24}"
+        r"(已启用|支持|可用|因此).{0,24}"
+        r"(上传|加购|完成|成功)",
+        joined,
+    ):
+        if "本商品" not in joined and "实际配置" not in joined and "待验证" not in joined:
+            ok = False
+            reasons.append("类目经验不得当作目标 SKU 能力或完成证据")
+            blockers.append(
+                {"blocker_code": "category_experience_as_capability", "step": "deliver"}
+            )
+
+    # RC17：别的 SKU 预览不得替代当前目标完成
+    if re.search(r"(别的|其他|另一).{0,6}(SKU|商品|sku).{0,12}(预览|preview)", joined, re.I):
+        if re.search(r"(已完成|加购成功|上传成功|任务完成)", joined):
+            ok = False
+            reasons.append("其他 SKU 预览不得作为当前目标完成证据")
+            blockers.append({"blocker_code": "other_sku_preview", "step": "verify"})
 
     # AC27：仅凭 143/dnd 域名差不断言不支持
     if re.search(r"(仅有|只有).{0,8}(143|dnd).{0,20}(不支持|不同于)", joined, re.I):
@@ -407,7 +501,8 @@ def evaluate_delivery_evidence(
             reasons.append("仅授权加购时不得提交订单（即使用户禁止支付）")
             blockers.append({"blocker_code": "order_beyond_auth", "step": "checkout"})
 
-    # 证据完整性：历史 502、未探测资源、能力推断、替换入口、占位交付
+    # 证据硬门禁：只拦甩锅恢复环境 / 未探测宣称可用 / 占位字段
+    # 措辞类（进度标题、能力推断、替换入口）记 soft，不否决交付
     try:
         from orchestrator_integration.evidence_integrity import (
             count_browser_actions,
@@ -419,9 +514,9 @@ def evaluate_delivery_evidence(
             probe_ok_to_reuse=None,
             browser_actions_this_turn=count_browser_actions(tool_results),
         )
-        if not integrity.get("ok"):
+        if not integrity.get("hard_ok", integrity.get("ok")):
             ok = False
-            for r in integrity.get("reasons") or []:
+            for r in integrity.get("hard_reasons") or integrity.get("reasons") or []:
                 if r not in reasons:
                     reasons.append(r)
             blockers.append(
@@ -444,11 +539,88 @@ def evaluate_delivery_evidence(
         reasons.append("尚未实际捕获时不得承诺交付全部购物车标识/数量/金额")
         blockers.append({"blocker_code": "delivery_overpromise", "step": "deliver"})
 
+    # RC22：无本轮浏览器动作却宣称加购/上传完成 → hard fail
+    try:
+        from orchestrator_integration.evidence_integrity import count_browser_actions
+
+        actions = count_browser_actions(tool_results)
+    except Exception:
+        actions = 0
+    claims_exec = bool(
+        re.search(
+            r"(已完成|已加购|加购成功|上传成功|已上传|任务完成|执行完成)",
+            joined,
+        )
+    )
+    if actions == 0 and claims_exec and re.search(
+        r"(加购|上传|购物车|cart|upload)", joined, re.I
+    ):
+        ok = False
+        reasons.append("本轮无业务动作，不得将已整理输入标为已完成执行")
+        blockers.append({"blocker_code": "input_only_claimed_complete", "step": "deliver"})
+        for m in re.findall(
+            r"(目标\s*URL|商品链接|素材路径|账号|环境)\s*[:=：]\s*\S+", joined
+        ):
+            confirmed_inputs.append(m)
+
+    # RC22：证据 epoch 不匹配的旧 cart_id
+    epoch_now = (
+        int(evidence_epoch)
+        if evidence_epoch is not None
+        else int(facts.get("evidence_epoch") or 0)
+    )
+    stale_ids = facts.get("stale_typed_ids") or []
+    if isinstance(stale_ids, list) and stale_ids:
+        for sid in stale_ids:
+            if sid and str(sid) in joined:
+                ok = False
+                reasons.append(f"旧证据标识 {sid} 已随纠正失效（epoch={epoch_now}）")
+                blockers.append(
+                    {
+                        "blocker_code": "stale_typed_id",
+                        "step": "deliver",
+                        "id": str(sid),
+                        "evidence_epoch": epoch_now,
+                    }
+                )
+
+    # 本轮真实捕获的 typed id → success_products / confirmed
+    for m in _TYPED_ID_RE.finditer(joined):
+        key, val = m.group(1).lower(), m.group(2)
+        if val.lower() in _PLACEHOLDER_ID_VALUES:
+            continue
+        success_products.append(
+            {
+                "type": key,
+                "id": val,
+                "evidence_epoch": epoch_now,
+            }
+        )
+        confirmed_inputs.append(f"{key}={val}")
+
+    # RC21：剩余检查点
+    remaining_checkpoints: List[str] = []
+    completed_ids = set(facts.get("completed_stage_ids") or [])
+    for raw in stage_plan or []:
+        if isinstance(raw, dict):
+            sid = str(raw.get("stage_id") or "")
+            if sid and sid not in completed_ids and sid != "summarize":
+                remaining_checkpoints.append(sid)
+        elif isinstance(raw, str) and raw not in completed_ids:
+            remaining_checkpoints.append(raw)
+
+    if not confirmed_inputs and target_url:
+        confirmed_inputs.append(f"target_url={target_url}")
+
     return {
         "ok": ok,
         "reasons": reasons,
         "blockers": blockers,
         "partial_ok": bool(joined.strip()) and not ok,
+        "success_products": success_products,
+        "confirmed_inputs": confirmed_inputs,
+        "remaining_checkpoints": remaining_checkpoints,
+        "evidence_epoch": epoch_now,
     }
 
 
@@ -460,6 +632,9 @@ def evaluate_post_condition(
     playbook_id: str = "",
     auth_scope: Optional[Dict[str, Any]] = None,
     target_url: str = "",
+    stage_plan: Optional[Sequence[Any]] = None,
+    facts: Optional[Dict[str, Any]] = None,
+    evidence_epoch: Optional[int] = None,
 ) -> Dict[str, Any]:
     """确定性后置断言（不靠模型自评）。"""
     joined = "\n".join(str(x) for x in tool_results if x)
@@ -531,12 +706,24 @@ def evaluate_post_condition(
         tool_results=tool_results,
         auth_scope=auth_scope,
         target_url=target_url,
+        stage_plan=stage_plan,
+        facts=facts,
+        evidence_epoch=evidence_epoch,
     )
     if not delivery.get("ok", True):
         ok = False
         reasons.extend(delivery.get("reasons") or [])
         blockers.extend(delivery.get("blockers") or [])
     extra["delivery"] = delivery
+    # RC21：透出成功产物 / 已确认输入 / 剩余检查点
+    for k in (
+        "success_products",
+        "confirmed_inputs",
+        "remaining_checkpoints",
+        "evidence_epoch",
+    ):
+        if k in delivery:
+            extra[k] = delivery[k]
 
     if post_condition and not reasons and not joined.strip():
         ok = False

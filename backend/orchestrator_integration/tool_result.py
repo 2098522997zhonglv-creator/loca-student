@@ -118,14 +118,37 @@ def _try_parse_json_blob(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+_PLACEHOLDER_ID_VALUES = frozenset(
+    {
+        "unknown",
+        "null",
+        "none",
+        "n/a",
+        "undefined",
+        "observed_cart_action",
+        "observed_cart",
+        "placeholder",
+        "static_preview",
+        "preview",
+        "tbd",
+        "todo",
+        "sample",
+        "demo",
+        "example",
+    }
+)
+
+
 def _walk_collect_ids(obj: Any, found: Dict[str, str], depth: int = 0) -> None:
     if depth > 6 or obj is None:
         return
     if isinstance(obj, dict):
         for k, v in obj.items():
             key = str(k).lower()
-            if key in _ID_KEYS and v not in (None, "", "unknown", "null", "none"):
-                found[key] = str(v)
+            if key in _ID_KEYS and v not in (None, ""):
+                val = str(v).strip()
+                if val.lower() not in _PLACEHOLDER_ID_VALUES:
+                    found[key] = val
             elif key == "data" and isinstance(v, dict):
                 _walk_collect_ids(v, found, depth + 1)
             else:
@@ -178,13 +201,20 @@ def _structured_business_status(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def extract_typed_identifiers(text: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
-    """从工具输出提取类型化业务标识（忽略 unknown/null）；优先 JSON。"""
+    """从工具输出提取类型化业务标识（忽略 unknown/null/占位观察值）；优先 JSON。"""
     found: Dict[str, str] = {}
     if payload is not None:
         _walk_collect_ids(payload, found)
     for m in _ID_FIELD_RE.finditer(text or ""):
-        found.setdefault(m.group(1).lower(), m.group(2))
-    return found
+        val = str(m.group(2) or "").strip()
+        if val.lower() in _PLACEHOLDER_ID_VALUES:
+            continue
+        found.setdefault(m.group(1).lower(), val)
+    return {
+        k: v
+        for k, v in found.items()
+        if str(v).strip().lower() not in _PLACEHOLDER_ID_VALUES
+    }
 
 
 def extract_source_url(text: str, payload: Optional[Dict[str, Any]] = None) -> str:

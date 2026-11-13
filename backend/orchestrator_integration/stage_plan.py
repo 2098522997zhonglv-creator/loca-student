@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from orchestrator_integration.intent_router import (
     INTENT_BROWSER,
@@ -168,6 +168,7 @@ _BUILTIN_CAPS = frozenset(
         "execute_skill_script",
         "generate",
         "request_tool_expansion",
+        "request_executor_heal",
         "assert_task_postcondition",
         "report_task_blocked",
     }
@@ -175,6 +176,7 @@ _BUILTIN_CAPS = frozenset(
 _META_ALWAYS = frozenset(
     {
         "request_tool_expansion",
+        "request_executor_heal",
         "assert_task_postcondition",
         "report_task_blocked",
         "read_skill_content",
@@ -244,18 +246,54 @@ def format_stage_plan_hint(
     return "\n".join(lines)
 
 
+def ready_stages(
+    stages: Sequence[StageSpec],
+    *,
+    completed_ids: Optional[Set[str]] = None,
+    failed_ids: Optional[Set[str]] = None,
+) -> List[str]:
+    """RC21：依赖已满足（或无依赖）的就绪阶段；失败依赖使下游 waiting。"""
+    done = set(completed_ids or set())
+    failed = set(failed_ids or set())
+    ready: List[str] = []
+    for s in stages or []:
+        sid = s.stage_id
+        if not sid or sid in done or sid in failed:
+            continue
+        deps = list(s.depends_on or [])
+        if any(d in failed for d in deps):
+            continue
+        if all(d in done for d in deps):
+            ready.append(sid)
+    return ready
+
+
 def advance_stage(
-    stages: Sequence[StageSpec], current_stage_id: str, *, accepted: bool
+    stages: Sequence[StageSpec],
+    current_stage_id: str,
+    *,
+    accepted: bool,
+    completed_ids: Optional[Set[str]] = None,
+    failed_ids: Optional[Set[str]] = None,
 ) -> str:
-    """验收通过后推进到下一阶段；失败则停在当前。"""
+    """验收通过后推进到下一个就绪阶段；失败则停在当前。"""
     if not stages or not accepted:
         return current_stage_id or ""
     ids = [s.stage_id for s in stages]
     if current_stage_id not in ids:
         return ids[0]
+    done = set(completed_ids or set())
+    done.add(current_stage_id)
+    ready = ready_stages(stages, completed_ids=done, failed_ids=failed_ids)
+    # 优先选计划顺序中当前之后的第一个就绪阶段
     idx = ids.index(current_stage_id)
-    if idx + 1 < len(ids):
-        return ids[idx + 1]
+    for sid in ids[idx + 1 :]:
+        if sid in ready:
+            return sid
+    # 否则任意就绪（独立可并行分支）
+    for sid in ready:
+        if sid != current_stage_id:
+            return sid
     return current_stage_id
 
 

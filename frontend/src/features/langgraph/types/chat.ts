@@ -23,6 +23,14 @@ export interface ChatRequest {
   // Playwright 脚本生成参数
   generate_playwright_script?: boolean; // 是否在任务完成后自动生成 Playwright 脚本
   test_case_id?: number; // 关联的测试用例ID，生成脚本时必需
+
+  /** D04：任务执行配置覆盖（服务端策略裁剪） */
+  execution_config?: {
+    max_tool_actions?: number;
+    max_no_progress_repeats?: number;
+    max_attempts_per_step?: number;
+    max_duration_seconds?: number;
+  };
 }
 
 /**

@@ -68,10 +68,57 @@ def is_write_confirm_interrupt(interrupt_id: Optional[str]) -> bool:
     return bool(interrupt_id) and str(interrupt_id).startswith(WRITE_CONFIRM_PREFIX)
 
 
+def _coerce_needs_confirmation_dict(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """归一化为顶层含 pending 的 needs_confirmation（兼容 ToolResult 包装）。
+
+    FR05.3 / D01：adapt 后形态为
+    {status, data:{status,pending,...}, evidence:{pending}}，
+    若仍取顶层 pending 会得到 {}，导致批准后无法恢复原动作。
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("status") != "needs_confirmation":
+        return None
+
+    pending = data.get("pending")
+    nested = data.get("data") if isinstance(data.get("data"), dict) else {}
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+
+    if not isinstance(pending, dict) or not pending:
+        for candidate in (
+            nested.get("pending") if isinstance(nested, dict) else None,
+            evidence.get("pending"),
+        ):
+            if isinstance(candidate, dict) and candidate:
+                pending = candidate
+                break
+        else:
+            pending = pending if isinstance(pending, dict) else {}
+
+    mode = data.get("mode") or nested.get("mode") or "confirm"
+    message = data.get("message") or nested.get("message") or data.get("summary") or ""
+    executed_readonly = (
+        data.get("executed_readonly")
+        if isinstance(data.get("executed_readonly"), list)
+        else nested.get("executed_readonly")
+        if isinstance(nested.get("executed_readonly"), list)
+        else []
+    )
+    return {
+        "status": "needs_confirmation",
+        "mode": mode,
+        "message": message,
+        "pending": pending if isinstance(pending, dict) else {},
+        "executed_readonly": executed_readonly or [],
+    }
+
+
 def parse_needs_confirmation(content: Any) -> Optional[Dict[str, Any]]:
     """从工具输出解析 needs_confirmation；失败返回 None。"""
     if content is None:
         return None
+    if isinstance(content, dict):
+        return _coerce_needs_confirmation_dict(content)
     text = content if isinstance(content, str) else str(content)
     text = text.strip()
     if not text or "needs_confirmation" not in text:
@@ -90,9 +137,7 @@ def parse_needs_confirmation(content: Any) -> Optional[Dict[str, Any]]:
             return None
     if not isinstance(data, dict):
         return None
-    if data.get("status") != "needs_confirmation":
-        return None
-    return data
+    return _coerce_needs_confirmation_dict(data)
 
 
 def _summarize_pending(pending: Optional[Dict[str, Any]]) -> str:
@@ -163,6 +208,18 @@ def build_write_confirm_interrupt(
         summary[:200],
     )
     title = "确认写入（草稿）" if mode == "draft" else "确认写入"
+    # RC07 / 交付物：前端须展示原动作（技能+命令），批准后只执行该快照
+    cmds = normalize_pending_commands(pending if isinstance(pending, dict) else {})
+    if cmds:
+        original_action = "；".join(
+            f"{c.get('skill_name')}: {c.get('command')}" for c in cmds
+        )
+    elif isinstance(pending, dict):
+        original_action = str(
+            pending.get("command") or pending.get("summary") or summary or ""
+        )
+    else:
+        original_action = summary or ""
     return {
         "type": "interrupt",
         "interrupt_id": interrupt_id,
@@ -175,6 +232,7 @@ def build_write_confirm_interrupt(
                     "summary": summary,
                     "mode": mode,
                     "pending": pending,
+                    "original_action": original_action[:2000],
                 },
                 "description": (
                     "将执行平台/数据库写入，请确认后继续。"
@@ -318,13 +376,158 @@ def consume_approval(
         }
 
 
+def normalize_pending_commands(pending: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把 pending 归一成 [{skill_name, command, session_id?}, ...]。"""
+    if not isinstance(pending, dict):
+        return []
+    commands = pending.get("commands")
+    out: List[Dict[str, Any]] = []
+    if isinstance(commands, list) and commands:
+        for item in commands:
+            if not isinstance(item, dict):
+                continue
+            skill = str(item.get("skill_name") or "").strip()
+            cmd = str(item.get("command") or "").strip()
+            if not skill or not cmd:
+                continue
+            row = {"skill_name": skill, "command": cmd}
+            if item.get("session_id"):
+                row["session_id"] = str(item.get("session_id"))
+            if item.get("step_id"):
+                row["step_id"] = str(item.get("step_id"))
+            out.append(row)
+        return out
+    skill = str(pending.get("skill_name") or "").strip()
+    cmd = str(pending.get("command") or "").strip()
+    if skill and cmd:
+        return [{"skill_name": skill, "command": cmd}]
+    return []
+
+
+def execute_approved_pending(
+    pending: Optional[Dict[str, Any]],
+    *,
+    user_id: int,
+    project_id: int = 0,
+    chat_session_id: str = "",
+) -> Dict[str, Any]:
+    """FR05.4 / RC07：服务端精确执行已批准的原动作一次，不依赖模型自批。
+
+    使用 user_write_approved=True 的闭包仅跑 pending 内命令；不开放整轮任意写入。
+    """
+    cmds = normalize_pending_commands(pending)
+    if not cmds:
+        return {
+            "ok": False,
+            "error_code": "empty_pending",
+            "message": "审批记录中缺少可执行的 pending 命令",
+            "results": [],
+        }
+
+    from orchestrator_integration.builtin_tools import get_builtin_tools
+
+    tools = get_builtin_tools(
+        user_id=int(user_id),
+        project_id=int(project_id or 0),
+        chat_session_id=chat_session_id or None,
+        user_write_approved=True,
+        allow_execute=True,
+        include_meta_tools=False,
+    )
+    execute_tool = next(
+        (t for t in tools if getattr(t, "name", "") == "execute_skill_script"),
+        None,
+    )
+    if execute_tool is None:
+        return {
+            "ok": False,
+            "error_code": "execute_tool_missing",
+            "message": "未能挂载 execute_skill_script，无法执行已批准写入",
+            "results": [],
+        }
+
+    results: List[Dict[str, Any]] = []
+    all_ok = True
+    invoke = getattr(execute_tool, "invoke", None) or getattr(execute_tool, "run", None)
+    if invoke is None:
+        return {
+            "ok": False,
+            "error_code": "execute_tool_not_callable",
+            "message": "execute_skill_script 不可调用",
+            "results": [],
+        }
+
+    # 批量一次调用，保留依赖顺序
+    payload = {
+        "commands": cmds,
+        "parallel": False,
+        "user_confirmed": True,
+    }
+    try:
+        raw = invoke(payload)
+        text = raw if isinstance(raw, str) else str(raw)
+        # 若仍返回 needs_confirmation，视为失败（不应发生）
+        if parse_needs_confirmation(text) is not None:
+            all_ok = False
+        results.append(
+            {
+                "commands": cmds,
+                "output": text,
+            }
+        )
+    except Exception as exc:
+        logger.exception("execute_approved_pending failed: %s", exc)
+        all_ok = False
+        results.append({"commands": cmds, "error": str(exc)})
+
+    try:
+        from orchestrator_integration.agent_runtime import fingerprint_payload
+
+        fp = fingerprint_payload(pending if isinstance(pending, dict) else {})
+    except Exception:
+        fp = ""
+
+    return {
+        "ok": all_ok,
+        "error_code": "" if all_ok else "approved_execute_failed",
+        "message": "已批准动作已由服务端执行" if all_ok else "已批准动作执行失败",
+        "results": results,
+        "pending_fingerprint": fp,
+    }
+
+
 def build_resume_user_message(
-    decision: str, pending_payload: Optional[Dict[str, Any]]
+    decision: str,
+    pending_payload: Optional[Dict[str, Any]],
+    *,
+    server_executed: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """构造 resume 时注入的用户消息（可被 detect_user_write_approval 识别）。"""
+    """构造 resume 时注入的用户消息。
+
+    批准且服务端已执行时：只要求模型汇总，禁止再次发起写入。
+    """
     pending = (pending_payload or {}).get("pending") if pending_payload else None
     summary = _summarize_pending(pending if isinstance(pending, dict) else None)
     if decision == "approve":
+        if isinstance(server_executed, dict) and server_executed.get("ok"):
+            outputs = []
+            for item in server_executed.get("results") or []:
+                if isinstance(item, dict) and item.get("output"):
+                    outputs.append(str(item["output"]))
+            joined = "\n\n".join(outputs) if outputs else "(无输出摘要)"
+            return (
+                "确认写入。界面按钮已同意；服务端已精确执行下列原动作一次，"
+                "请用中文汇总交付结果与证据，禁止再次调用写入类 execute_skill_script：\n"
+                f"{summary}\n\n执行结果：\n{joined}"
+            )
+        if isinstance(server_executed, dict) and server_executed.get("error_code"):
+            return (
+                "确认写入。界面已同意，但服务端执行已批准动作失败"
+                f"（{server_executed.get('error_code')}）："
+                f"{server_executed.get('message') or ''}。"
+                "请报告该阻塞，不要重新编造写入命令，也不要要求用户再说继续。"
+            )
+        # 兼容旧路径：仍提示模型带 pending 执行（不应作为主路径）
         body = (
             "确认写入。界面按钮已同意本次写入；服务端已按原授权重挂 execute_skill_script。"
             "请立即以 user_confirmed=true 执行下列待写入命令，不要再询问确认；"

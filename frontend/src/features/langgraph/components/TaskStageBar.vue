@@ -3,6 +3,7 @@
     <div class="task-stage-bar__head">
       <span class="task-stage-bar__label">{{ statusLabel }}</span>
       <span v-if="currentStage" class="task-stage-bar__current">{{ currentStage }}</span>
+      <span v-if="budgetLabel" class="task-stage-bar__budget">{{ budgetLabel }}</span>
     </div>
     <ol v-if="stages.length" class="task-stage-bar__list">
       <li
@@ -34,11 +35,20 @@ export interface StageItem {
   acceptance?: string;
 }
 
+export interface EffectiveConfig {
+  expected_business_steps?: number;
+  completed_business_steps?: number;
+  max_tool_actions?: number;
+  used_tool_actions?: number;
+  config_version?: number;
+}
+
 const props = defineProps<{
   taskStatus?: string;
   currentStage?: string;
   stagePlan?: StageItem[];
   acceptance?: Record<string, unknown> | null;
+  effectiveConfig?: EffectiveConfig | null;
 }>();
 
 const stages = computed(() => props.stagePlan || []);
@@ -47,8 +57,20 @@ const visible = computed(
   () =>
     Boolean(props.taskStatus) ||
     Boolean(props.currentStage) ||
-    stages.value.length > 1
+    stages.value.length > 1 ||
+    Boolean(props.effectiveConfig)
 );
+
+const budgetLabel = computed(() => {
+  const cfg = props.effectiveConfig;
+  if (!cfg) return '';
+  const done = Number(cfg.completed_business_steps ?? 0);
+  const exp = Number(cfg.expected_business_steps ?? 0);
+  const used = Number(cfg.used_tool_actions ?? 0);
+  const maxA = Number(cfg.max_tool_actions ?? 0);
+  if (!exp && !maxA) return '';
+  return `业务 ${done}/${exp || '—'} · 工具 ${used}/${maxA || '—'}`;
+});
 
 const statusClass = computed(() => {
   const s = props.taskStatus || '';
@@ -63,6 +85,8 @@ const statusLabel = computed(() => {
   if (s === 'completed' || s === 'task_completed') return '已验收';
   if (s === 'blocked' || s === 'task_blocked') return '未完全完成';
   if (s === 'cancelling') return '取消中';
+  if (s === 'cancelled') return '已取消';
+  if (s === 'failed') return '失败';
   if (s === 'awaiting_approval') return '等待确认';
   return '执行中';
 });
@@ -133,6 +157,11 @@ function isDone(stageId: string): boolean {
 }
 .task-stage-bar__current {
   color: #64748b;
+}
+.task-stage-bar__budget {
+  margin-left: auto;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
 }
 .task-stage-bar__list {
   display: flex;

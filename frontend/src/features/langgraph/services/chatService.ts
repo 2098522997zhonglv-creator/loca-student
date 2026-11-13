@@ -14,9 +14,52 @@ import { parseToolResultDisplayPayload } from '@/features/langgraph/utils/toolRe
 import {
   absorbToolResultEvent,
   buildProgressText,
+  looksLikeEnglishToolNarration,
   upsertProgressMessage,
   type ToolLogEntry,
 } from '@/features/langgraph/utils/streamUiHelpers';
+
+/** RC09：业务硬终态不可被 complete/finished 覆盖 */
+const HARD_TASK_STATUSES = new Set([
+  'cancelled',
+  'cancelling',
+  'failed',
+  'completed',
+  'blocked',
+]);
+
+function applyBusinessTaskStatus(
+  stream: StreamState,
+  incoming: string | undefined | null
+): void {
+  const next = String(incoming || '').trim();
+  if (!next || next === 'finished' || next === 'stopped') {
+    // 传输结束标记：不把业务态改成 finished；stopped 仅在无硬终态时写入
+    if (next === 'stopped' && !HARD_TASK_STATUSES.has(stream.taskStatus || '')) {
+      stream.taskStatus = 'stopped';
+    }
+    return;
+  }
+  const cur = stream.taskStatus || '';
+  if (cur === 'cancelled' || cur === 'cancelling') {
+    if (next === 'cancelled' || next === 'cancelling') {
+      stream.taskStatus = next;
+    }
+    return;
+  }
+  stream.taskStatus = next;
+}
+
+/** RC11：中文任务下英文旁白不得固化为 final 气泡 */
+function demoteEnglishNarrationIfNeeded(stream: StreamState, time: string): void {
+  const locale = stream.responseLocale || stream.effectiveConfig?.response_locale || '';
+  if (locale !== 'zh') return;
+  const text = (stream.content || '').trim();
+  if (!looksLikeEnglishToolNarration(text)) return;
+  upsertProgressMessage(stream, '进度更新', time);
+  // 旁白降级后清空 final 缓冲
+  stream.content = '';
+}
 
 // --- 全局流式状态管理 ---
 interface StreamMessage {
@@ -79,6 +122,18 @@ interface StreamState {
   stagePlan?: Array<{ stage_id: string; goal?: string; acceptance?: string }>;
   acceptance?: Record<string, unknown>;
   taskEvents?: Array<Record<string, unknown>>;
+  /** D04/RC06：业务检查点 vs 工具调用双计数 */
+  effectiveConfig?: {
+    expected_business_steps?: number;
+    completed_business_steps?: number;
+    max_tool_actions?: number;
+    used_tool_actions?: number;
+    config_version?: number;
+    config_hash?: string;
+    response_locale?: string;
+  };
+  /** RC11：任务语言 */
+  responseLocale?: string;
 }
 
 function applyToolResultToStream(
@@ -727,16 +782,43 @@ export async function sendChatMessageStream(
 
           // ⭐ 处理真正的流式输出 (type === 'stream') - Agent Loop 逐字流式
           if (parsed.type === 'stream' && streamSessionId && activeStreams.value[streamSessionId]) {
-            const content = parsed.data;
-            if (content) {
-              activeStreams.value[streamSessionId].content += content;
+            const stream = activeStreams.value[streamSessionId];
+            if (parsed.response_locale) {
+              stream.responseLocale = String(parsed.response_locale);
             }
+            // RC11：显式 progress 不进 final 气泡
+            if (parsed.message_kind === 'progress') {
+              upsertProgressMessage(
+                stream,
+                String(parsed.data || parsed.message || '进度更新'),
+                formatStreamTime()
+              );
+            } else {
+              const content = parsed.data;
+              if (content) {
+                stream.content += content;
+              }
+            }
+          }
+
+          if (
+            parsed.type === 'progress' &&
+            streamSessionId &&
+            activeStreams.value[streamSessionId]
+          ) {
+            upsertProgressMessage(
+              activeStreams.value[streamSessionId],
+              String(parsed.message || parsed.data || '进度更新'),
+              formatStreamTime()
+            );
           }
 
           // ⭐ 流式结束事件
           if (parsed.type === 'stream_end' && streamSessionId && activeStreams.value[streamSessionId]) {
-            // 流式结束，内容已通过 stream 事件累积
-            // 不需要特殊处理，等待 complete 事件标记完成
+            demoteEnglishNarrationIfNeeded(
+              activeStreams.value[streamSessionId],
+              formatStreamTime()
+            );
           }
 
           // 处理AI消息(message事件) - 兼容旧格式（非流式模式）
@@ -759,6 +841,16 @@ export async function sendChatMessageStream(
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
           }
 
+          // 工具步进时本地递增 used_tool_actions（与服务端预算对齐的粗粒度回显）
+          if (
+            parsed.type === 'step_start' &&
+            streamSessionId &&
+            activeStreams.value[streamSessionId]?.effectiveConfig
+          ) {
+            const cfg = activeStreams.value[streamSessionId].effectiveConfig!;
+            cfg.used_tool_actions = Number(cfg.used_tool_actions || 0) + 1;
+          }
+
           // FR10：任务阶段 / 验收终态 / 租约冲突状态
           if (
             (parsed.type === 'task_started' ||
@@ -779,7 +871,13 @@ export async function sendChatMessageStream(
               parsed.type === 'task_blocked' ||
               parsed.type === 'task_cancelling'
             ) {
-              stream.taskStatus = parsed.status || parsed.type;
+              applyBusinessTaskStatus(
+                stream,
+                String(parsed.status || parsed.type || '')
+              );
+            }
+            if (parsed.response_locale) {
+              stream.responseLocale = String(parsed.response_locale);
             }
             if (parsed.payload?.stage) {
               stream.currentStage = String(parsed.payload.stage);
@@ -800,6 +898,47 @@ export async function sendChatMessageStream(
                 unknown
               >;
             }
+            const eff =
+              (parsed.effective_config as Record<string, unknown> | undefined) ||
+              (parsed.payload?.effective_config as
+                | Record<string, unknown>
+                | undefined);
+            if (eff && typeof eff === 'object') {
+              stream.effectiveConfig = {
+                expected_business_steps: Number(
+                  eff.expected_business_steps ?? 0
+                ),
+                completed_business_steps: Number(
+                  eff.completed_business_steps ?? 0
+                ),
+                max_tool_actions: Number(eff.max_tool_actions ?? 0),
+                used_tool_actions: Number(eff.used_tool_actions ?? 0),
+                config_version: Number(eff.config_version ?? 0),
+                config_hash: String(eff.config_hash || ''),
+                response_locale: String(eff.response_locale || ''),
+              };
+              if (stream.effectiveConfig.response_locale) {
+                stream.responseLocale = stream.effectiveConfig.response_locale;
+              }
+            }
+            // stage_changed 可只推业务完成数
+            if (
+              parsed.type === 'stage_changed' &&
+              stream.effectiveConfig &&
+              parsed.payload
+            ) {
+              const p = parsed.payload as Record<string, unknown>;
+              if (p.completed_business_steps != null) {
+                stream.effectiveConfig.completed_business_steps = Number(
+                  p.completed_business_steps
+                );
+              }
+              if (p.expected_business_steps != null) {
+                stream.effectiveConfig.expected_business_steps = Number(
+                  p.expected_business_steps
+                );
+              }
+            }
             stream.taskEvents = [...(stream.taskEvents || []), parsed];
             if (parsed.type === 'task_blocked' || parsed.type === 'task_completed') {
               const reasons = Array.isArray(parsed.acceptance?.reasons)
@@ -812,10 +951,16 @@ export async function sendChatMessageStream(
                       parsed.payload.acceptance as { reasons: string[] }
                     ).reasons.join('；')
                   : '';
-              const label =
+              const st = String(parsed.status || stream.taskStatus || '');
+              let label =
                 parsed.type === 'task_completed'
                   ? '任务已验收完成'
                   : `任务未完全完成${reasons ? `：${reasons}` : ''}`;
+              if (st === 'cancelled' || st === 'cancelling') {
+                label = st === 'cancelling' ? '任务取消中' : '任务已取消';
+              } else if (st === 'blocked') {
+                label = `任务未完全完成${reasons ? `：${reasons}` : ''}`;
+              }
               stream.messages.push({
                 content: label,
                 type: 'system',
@@ -826,18 +971,26 @@ export async function sendChatMessageStream(
           }
 
           if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
-            // ✅ 修复：标记完成，保持content不变（Vue组件会从content读取最终消息）
-            // 不清空content，因为displayedMessages和watch都依赖stream.content来显示最终AI回复
-            activeStreams.value[streamSessionId].isComplete = true;
+            const stream = activeStreams.value[streamSessionId];
+            // ✅ 标记传输完成；RC09：不覆盖 cancelled/blocked 等业务终态
+            stream.isComplete = true;
+            demoteEnglishNarrationIfNeeded(stream, formatStreamTime());
+            applyBusinessTaskStatus(
+              stream,
+              String(parsed.task_status || parsed.status || '')
+            );
+            if (parsed.acceptance) {
+              stream.acceptance = parsed.acceptance as Record<string, unknown>;
+            }
             
             // ⭐ 保存任务 ID
             if (parsed.task_id) {
-              activeStreams.value[streamSessionId].taskId = parsed.task_id;
+              stream.taskId = parsed.task_id;
             }
             
             // ⭐ 处理脚本生成信息
             if (parsed.script_generation && parsed.script_generation.available) {
-              activeStreams.value[streamSessionId].scriptGeneration = {
+              stream.scriptGeneration = {
                 available: true,
                 playwrightSteps: parsed.script_generation.playwright_steps || 0,
                 message: parsed.script_generation.message || '可生成自动化用例'
@@ -1125,6 +1278,128 @@ export async function fetchTaskSnapshot(options: {
 }
 
 /**
+ * 任务执行配置预检（D04）
+ */
+export async function validateTaskExecutionConfig(payload: {
+  overrides?: Record<string, unknown>;
+  stage_plan?: Array<Record<string, unknown>>;
+  auth_scope?: Record<string, unknown>;
+}): Promise<{
+  ok: boolean;
+  effective_config?: Record<string, unknown>;
+  summary?: string;
+  error?: string;
+}> {
+  const authStore = useAuthStore();
+  let token = authStore.getAccessToken;
+  const url = `${getApiBaseUrl()}${AGENT_LOOP_API_URL}/config/validate/`;
+  const doFetch = (accessToken: string) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload || {}),
+    });
+  try {
+    if (!token) return { ok: false, error: '未登录' };
+    let response = await doFetch(token);
+    if (response.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (!newToken) return { ok: false, error: '登录已过期' };
+      token = newToken;
+      response = await doFetch(token);
+    }
+    const body = await response.json().catch(() => null);
+    if (response.ok && body?.status === 'success') {
+      const data = (body.data || {}) as Record<string, unknown>;
+      return {
+        ok: true,
+        effective_config: (data.effective_config || {}) as Record<string, unknown>,
+        summary: String(data.summary || ''),
+      };
+    }
+    return {
+      ok: false,
+      error:
+        (typeof body?.message === 'string' && body.message) ||
+        `HTTP ${response.status}`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : '网络错误',
+    };
+  }
+}
+
+/**
+ * RC12：任务配置 PATCH（expected_version 乐观锁；409 冲突）
+ */
+export async function patchTaskExecutionConfig(payload: {
+  task_id: string;
+  expected_version: number;
+  overrides?: Record<string, unknown>;
+  reason?: string;
+}): Promise<{
+  ok: boolean;
+  config_version?: number;
+  budget?: Record<string, unknown>;
+  summary?: string;
+  error?: string;
+  conflict?: boolean;
+  current_version?: number;
+}> {
+  const authStore = useAuthStore();
+  let token = authStore.getAccessToken;
+  const url = `${getApiBaseUrl()}${AGENT_LOOP_API_URL}/config/`;
+  const doFetch = (accessToken: string) =>
+    fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload || {}),
+    });
+  try {
+    if (!token) return { ok: false, error: '未登录' };
+    let response = await doFetch(token);
+    if (response.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (!newToken) return { ok: false, error: '登录已过期' };
+      token = newToken;
+      response = await doFetch(token);
+    }
+    const body = await response.json().catch(() => null);
+    if (response.ok && body?.status === 'success') {
+      const data = (body.data || {}) as Record<string, unknown>;
+      return {
+        ok: true,
+        config_version: Number(data.config_version || 0),
+        budget: (data.budget || {}) as Record<string, unknown>,
+        summary: String(data.summary || ''),
+      };
+    }
+    const currentRaw = body?.errors?.current_version?.[0];
+    return {
+      ok: false,
+      conflict: response.status === 409,
+      current_version: currentRaw != null ? Number(currentRaw) : undefined,
+      error:
+        (typeof body?.message === 'string' && body.message) ||
+        `HTTP ${response.status}`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : '网络错误',
+    };
+  }
+}
+
+/**
  * 质量指标看板（FR10.4）
  * 返回 { data, error }：失败时透出 HTTP/业务原因，便于弹窗展示（不再吞成笼统「服务不可用」）。
  */
@@ -1216,6 +1491,21 @@ export function applyTaskSnapshotToStream(
   if (snap.acceptance && typeof snap.acceptance === 'object') {
     stream.acceptance = snap.acceptance as Record<string, unknown>;
   }
+  if (snap.effective_config && typeof snap.effective_config === 'object') {
+    const eff = snap.effective_config as Record<string, unknown>;
+    stream.effectiveConfig = {
+      expected_business_steps: Number(eff.expected_business_steps ?? 0),
+      completed_business_steps: Number(eff.completed_business_steps ?? 0),
+      max_tool_actions: Number(eff.max_tool_actions ?? 0),
+      used_tool_actions: Number(eff.used_tool_actions ?? 0),
+      config_version: Number(eff.config_version ?? 0),
+      config_hash: String(eff.config_hash || ''),
+      response_locale: String(eff.response_locale || ''),
+    };
+    if (stream.effectiveConfig.response_locale) {
+      stream.responseLocale = stream.effectiveConfig.response_locale;
+    }
+  }
   // R28：按 event_id 去重合并；由快照原子恢复完成/审批/取消态
   const events = Array.isArray(snap.events) ? snap.events : [];
   if (events.length) {
@@ -1243,23 +1533,40 @@ export function applyTaskSnapshotToStream(
   } else if (status === 'awaiting_approval') {
     stream.isComplete = false;
     stream.isWaitingForApproval = true;
-    const approvalEvt = [...(stream.taskEvents || [])]
-      .reverse()
-      .find((e) => String(e.event_type || e.type || '') === 'approval_required');
-    const payload = (approvalEvt?.payload || {}) as Record<string, unknown>;
-    if (payload.interrupt_id || approvalEvt) {
+    // RC07：优先用快照 pending_approval（含原动作），刷新后可再确认
+    const pendingAppr = snap.pending_approval as Record<string, unknown> | undefined;
+    if (pendingAppr && pendingAppr.interrupt_id) {
       stream.interrupt = {
-        id: String(payload.interrupt_id || ''),
-        interrupt_id: String(payload.interrupt_id || ''),
-        kind: String(payload.kind || 'write_confirmation'),
-        action_requests: Array.isArray(payload.action_requests)
-          ? (payload.action_requests as Array<{
+        id: String(pendingAppr.interrupt_id),
+        interrupt_id: String(pendingAppr.interrupt_id),
+        kind: String(pendingAppr.kind || 'write_confirmation'),
+        action_requests: Array.isArray(pendingAppr.action_requests)
+          ? (pendingAppr.action_requests as Array<{
               name: string;
               args: Record<string, unknown>;
               description?: string;
             }>)
           : [],
       };
+    } else {
+      const approvalEvt = [...(stream.taskEvents || [])]
+        .reverse()
+        .find((e) => String(e.event_type || e.type || '') === 'approval_required');
+      const payload = (approvalEvt?.payload || {}) as Record<string, unknown>;
+      if (payload.interrupt_id || approvalEvt) {
+        stream.interrupt = {
+          id: String(payload.interrupt_id || ''),
+          interrupt_id: String(payload.interrupt_id || ''),
+          kind: String(payload.kind || 'write_confirmation'),
+          action_requests: Array.isArray(payload.action_requests)
+            ? (payload.action_requests as Array<{
+                name: string;
+                args: Record<string, unknown>;
+                description?: string;
+              }>)
+            : [],
+        };
+      }
     }
   } else if (status === 'cancelling') {
     stream.isComplete = false;
