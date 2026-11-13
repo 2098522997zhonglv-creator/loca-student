@@ -178,35 +178,6 @@ def _normalize_kb_search_params(similarity_threshold=None, top_k=None):
     return threshold, k
 
 
-def _record_tool_behavior_safe(
-    user_id: int,
-    tool_name: str,
-    content: str,
-    project_id=None,
-) -> None:
-    """工具结果落账号行为库；过滤噪声；异常吞掉，不影响主流程。"""
-    try:
-        from orchestrator_integration.behavior_memory import (
-            extract_skill_meta_from_tool_message,
-            record_tool_call_behavior,
-            should_record_tool_behavior,
-        )
-
-        if not should_record_tool_behavior(tool_name or ""):
-            return
-
-        skill_meta = extract_skill_meta_from_tool_message(
-            tool_name or "", str(content or "")
-        )
-        record_tool_call_behavior(
-            user_id,
-            tool_name or "unknown",
-            str(content or "")[:500],
-            project_id=int(project_id) if project_id else None,
-            skill_name=skill_meta.get("skill_name"),
-        )
-    except Exception as e:
-        logger.debug("记录工具行为失败: %s", e)
 
 
 def _extract_hosts_from_text(text: str) -> set:
@@ -1605,13 +1576,23 @@ class AgentLoopStreamAPIView(View):
                 active_playbook
                 and "knowledge_search" in set(getattr(active_playbook, "skip", ()) or ())
             )
+            _has_kb_stage = any(
+                getattr(s, "stage_id", "") == "kb_research" for s in (_stage_specs or [])
+            )
+            # 复合任务进入 browser_interact 后不再强制挂 KB，避免检索与操作交叉空转
             _browser_needs_kb = bool(
                 kb_qa_mode
                 and task_commission.playbook_id == "browser_act"
                 and not _playbook_bans_kb
+                and (
+                    not _has_kb_stage
+                    or str(_current_stage_id or "") in {"", "kb_research", "single"}
+                )
             )
             _keep_kb = bool(
-                stage_needs_kb or _browser_needs_kb or _preserve_exec
+                stage_needs_kb or _browser_needs_kb or (
+                    _preserve_exec and not _has_kb_stage
+                )
             )
             # 保留 KB 工具引用，供后置路由误裁后按阶段重挂
             _kb_tools_snapshot = [
@@ -1661,8 +1642,8 @@ class AgentLoopStreamAPIView(View):
                 include_meta_tools=mount_execute,
             )
             tools.extend(builtin_tools)
-            # FR08：按阶段裁剪检索类工具；浏览器主链/_keep_kb 时不得裁掉
-            if _stage_mount.get("restrict") and not _keep_kb:
+            # FR08：阶段能力是权威；browser_interact 未声明 KB 时必须裁掉，防交叉空转
+            if _stage_mount.get("restrict"):
                 allowed_builtins = set(_stage_mount.get("builtin_tools") or [])
                 if "knowledge_search" not in allowed_builtins:
                     tools = [
@@ -1670,6 +1651,10 @@ class AgentLoopStreamAPIView(View):
                         for t in tools
                         if getattr(t, "name", "") != "knowledge_search"
                     ]
+                    logger.info(
+                        "AgentLoopStreamAPI: 阶段 %s 未声明 knowledge_search，已裁掉",
+                        _current_stage_id,
+                    )
             logger.info(
                 "AgentLoopStreamAPI: Added %s builtin tools zone=%s allow_execute=%s "
                 "allowlist=%s task=%s short_circuit=%s specialist=%s%s",
@@ -1714,8 +1699,13 @@ class AgentLoopStreamAPIView(View):
                     } and name not in have:
                         tools.append(mt)
                         have.add(name)
-            # 阶段/浏览器主链需要 knowledge_search 时，禁止后置话术规则清空
-            if _keep_kb and kb_qa_mode:
+            # 阶段允许时才重挂 KB；browser_interact 未声明则不得重挂
+            _stage_allows_kb = bool(
+                not _stage_mount.get("restrict")
+                or "knowledge_search"
+                in set(_stage_mount.get("builtin_tools") or [])
+            )
+            if _keep_kb and kb_qa_mode and _stage_allows_kb:
                 have = {getattr(t, "name", "") for t in tools}
                 if "knowledge_search" not in have:
                     for kt in _kb_tools_snapshot:
@@ -2689,23 +2679,6 @@ class AgentLoopStreamAPIView(View):
                                                     if event.get("type") == "interrupt":
                                                         interrupt_detected = True
                                                     yield create_sse_data(event)
-                                                await sync_to_async(
-                                                    _record_tool_behavior_safe
-                                                )(
-                                                    request.user.id,
-                                                    tool_name or "unknown",
-                                                    str(
-                                                        (
-                                                            events[0].get(
-                                                                "tool_output"
-                                                            )
-                                                            if events
-                                                            else content
-                                                        )
-                                                        or ""
-                                                    ),
-                                                    project_id,
-                                                )
                                         # 步骤完成
                                         if step_count > 0:
                                             yield create_sse_data(
@@ -4691,23 +4664,6 @@ class AgentLoopResumeAPIView(View):
                                                             "resume park_for_approval failed: %s",
                                                             park_err,
                                                         )
-                                                await sync_to_async(
-                                                    _record_tool_behavior_safe
-                                                )(
-                                                    user.id,
-                                                    tool_name or "unknown",
-                                                    str(
-                                                        (
-                                                            events[0].get(
-                                                                "tool_output"
-                                                            )
-                                                            if events
-                                                            else content
-                                                        )
-                                                        or ""
-                                                    ),
-                                                    project_id,
-                                                )
                                         if step_count > 0:
                                             yield create_sse_data(
                                                 {

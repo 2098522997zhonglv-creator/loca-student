@@ -1610,12 +1610,37 @@ def stage_acceptance_heuristic(
         k in joined for k in ("execution_id", "终态", "get_execution_records")
     ):
         ok, reason = True, "execution_evidence"
-    elif sid == "browser_interact" and re.search(
-        r"(cart_id|cart_item_id)\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+",
-        joined,
-        re.I,
-    ):
-        ok, reason = True, "browser_typed_id"
+    elif sid == "browser_interact":
+        has_cart = bool(
+            re.search(
+                r"(cart_id|cart_item_id)\s*[:=]\s*(?!unknown\b|null\b|none\b)\S+",
+                joined,
+                re.I,
+            )
+        )
+        upload_blocked = bool(
+            re.search(
+                r"Please upload your photo|requires personalization|"
+                r"计数器始终停在\s*0\s*/\s*1|无任何上传请求|upload\.svg|"
+                r"传图类所见所得商品未能通过",
+                joined,
+                re.I,
+            )
+        )
+        substituted = bool(
+            re.search(
+                r"Name Stacking|Number of Names|Ring Size|Stacking Rings|刻字|名字戒指",
+                joined,
+                re.I,
+            )
+        )
+        if has_cart and upload_blocked and substituted:
+            ok, reason = False, "wysiwyg_substituted_cart"
+        elif has_cart and not upload_blocked:
+            ok, reason = True, "browser_typed_id"
+        elif has_cart and upload_blocked:
+            # 传图失败却有 cart：多半是换品交差，不推进验收
+            ok, reason = False, "upload_blocked_with_cart"
     elif sid == "summarize":
         ok, reason = True, "summarize_ready"
     return {"ok": ok, "reason": reason, "stage_id": sid}

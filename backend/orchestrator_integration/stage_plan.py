@@ -74,6 +74,7 @@ def build_stage_plan(
     composite = is_composite_request(text, decision)
     if not composite:
         if playbook_id == "browser_act" or INTENT_BROWSER in decision.intents:
+            # 单阶段：允许一次知识取证；复合任务则拆到 kb_research，浏览器阶段不再挂 KB
             return [
                 StageSpec(
                     stage_id="browser_interact",
@@ -84,7 +85,7 @@ def build_stage_plan(
                         "read_skill_content",
                         "execute_skill_script",
                     ],
-                    acceptance="入口来自知识库或明确 URL；交互检查点通过且标识类型明确",
+                    acceptance="入口明确；若目标为所见所得/传图则须上传预览有效后再加购",
                     auth_actions=["knowledge_search", "upload", "add_to_cart"],
                 )
             ]
@@ -166,16 +167,15 @@ def build_stage_plan(
         stages.append(
             StageSpec(
                 stage_id="browser_interact",
-                goal="按已取证入口完成页面交互并交付真实标识",
+                goal="按已取证入口完成页面交互并交付真实标识；禁止再查知识库",
                 tool_capabilities=[
-                    "knowledge_search",
                     "playwright-skill",
                     "read_skill_content",
                     "execute_skill_script",
                 ],
                 depends_on=[s.stage_id for s in stages if s.stage_id == "kb_research"]
                 or ([s.stage_id for s in stages[-1:]] if stages else []),
-                acceptance="交互检查点通过且标识类型明确",
+                acceptance="所见所得/传图须预览有效；禁止用非传图商品加购交差",
                 auth_actions=["upload", "add_to_cart"],
             )
         )
@@ -240,7 +240,11 @@ def stage_mount_policy(
     for dep in cur.depends_on or []:
         prev = by_id.get(dep)
         if prev:
-            caps.update(prev.tool_capabilities or [])
+            # knowledge_search 只属于取证阶段，不随 depends_on 继承到 browser_interact
+            for c in prev.tool_capabilities or []:
+                if c == "knowledge_search" and cur.stage_id != "kb_research":
+                    continue
+                caps.add(c)
     if not caps and cur.stage_id in {"single", "summarize"}:
         return {"restrict": False, "skill_names": set(), "builtin_tools": set()}
     skills = {c for c in caps if c not in _BUILTIN_CAPS}
@@ -337,6 +341,21 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
         allow.append("add_to_cart")
     if any(k in text for k in ("上传", "传图", "Upload Photo", "upload")):
         allow.append("upload")
+    requires_wysiwyg = any(
+        k in text
+        for k in (
+            "所见即所得",
+            "所见所得",
+            "传图",
+            "Upload Photo",
+            "wysiwyg",
+            "WYSIWYG",
+            "上传照片",
+            "上传图片",
+        )
+    )
+    if requires_wysiwyg and "upload" not in allow:
+        allow.append("upload")
 
     # 否定优先：不要下单/不要支付 不得因子串「下单」「支付」被误授权
     deny_order = any(
@@ -397,5 +416,6 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
         "deny_actions": sorted(set(deny)),
         "deliver_identifiers": sorted(set(deliver)),
         "upload_method_requirement": method,
+        "requires_wysiwyg_upload": requires_wysiwyg,
         "raw_goal": text[:2000],
     }

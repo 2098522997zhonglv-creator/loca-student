@@ -1131,6 +1131,13 @@ def get_skill_tools(
                             result_text=detail_db,
                         )
                         return detail_db
+                    # A persisted task has one authoritative budget. Keep the
+                    # commission counters as a display mirror, never a second cap.
+                    if commission is not None:
+                        budget = task.budget or {}
+                        commission.max_tool_steps = int(budget.get("max_tool_actions", budget.get("max_tool_steps", commission.max_tool_steps)))
+                        commission.tool_steps_used = int(budget.get("used_tool_actions", budget.get("used_tool_steps", 0)))
+                    return None
                 except Exception as persist_err:
                     logger.debug("persist budget consume failed: %s", persist_err)
             if commission is None:

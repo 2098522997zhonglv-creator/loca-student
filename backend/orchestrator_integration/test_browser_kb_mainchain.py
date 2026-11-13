@@ -36,7 +36,8 @@ class BrowserKbMainchainTests(SimpleTestCase):
         kb_pol = stage_mount_policy(stages, "kb_research")
         self.assertIn("knowledge_search", kb_pol["builtin_tools"])
         br_pol = stage_mount_policy(stages, "browser_interact")
-        self.assertIn("knowledge_search", br_pol["builtin_tools"])
+        # 复合主链：浏览器阶段不再挂 KB，避免检索与操作交叉空转
+        self.assertNotIn("knowledge_search", br_pol["builtin_tools"])
         self.assertIn("playwright-skill", br_pol["skill_names"])
 
     def test_browser_playbook_steps_require_kb_first(self):

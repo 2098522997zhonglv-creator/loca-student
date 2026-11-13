@@ -563,6 +563,60 @@ def evaluate_delivery_evidence(
         ):
             confirmed_inputs.append(m)
 
+    # 所见所得/传图目标：禁止用非传图商品加购交差；传图失败不得标完成
+    requires_wysiwyg = bool(scope.get("requires_wysiwyg_upload"))
+    raw_goal = str(scope.get("raw_goal") or "")
+    if not requires_wysiwyg and any(
+        k in raw_goal
+        for k in ("所见即所得", "所见所得", "传图", "Upload Photo", "wysiwyg", "WYSIWYG")
+    ):
+        requires_wysiwyg = True
+    if requires_wysiwyg or "upload" in allow:
+        upload_blocked = bool(
+            re.search(
+                r"Please upload your photo|requires personalization|"
+                r"计数器始终停在\s*0\s*/\s*1|停在\s*0/1|"
+                r"无任何上传请求|upload\.svg|传图类所见所得商品未能通过|"
+                r"未能通过.{0,12}Upload Photo",
+                joined,
+                re.I,
+            )
+        )
+        non_photo_substitute = bool(
+            re.search(
+                r"Name Stacking|Number of Names|Ring Size|Engraved\s+\d+-\d+\s+Bands|"
+                r"刻字|名字戒指|Stacking Rings|仅填名字|非传图",
+                joined,
+                re.I,
+            )
+        )
+        has_cart = bool(re.search(r"cart_id\s*[:=]\s*\S+", joined, re.I))
+        upload_ok = bool(
+            re.search(
+                r"(上传成功|预览已(?!占位)|preview\s*(refresh|updated|已刷新)|"
+                r"计数器.{0,8}[1-9]\s*/\s*[1-9]|UPLOAD_REQS.+http)",
+                joined,
+                re.I,
+            )
+        )
+        if upload_blocked and (claims_exec or has_cart) and non_photo_substitute:
+            ok = False
+            reasons.append(
+                "目标为所见所得/传图：传图失败后不得改用非传图商品加购交差"
+            )
+            blockers.append(
+                {"blocker_code": "wysiwyg_goal_substituted", "step": "deliver"}
+            )
+        elif requires_wysiwyg and claims_exec and has_cart and not upload_ok:
+            if non_photo_substitute or upload_blocked:
+                ok = False
+                reasons.append(
+                    "目标为所见所得/传图：须上传预览有效后再加购，禁止无传图证据交付"
+                )
+                blockers.append(
+                    {"blocker_code": "wysiwyg_upload_required", "step": "upload"}
+                )
+
     # RC22：证据 epoch 不匹配的旧 cart_id
     epoch_now = (
         int(evidence_epoch)
