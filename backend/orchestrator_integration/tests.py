@@ -1629,6 +1629,7 @@ class AgentSmartnessTests(SimpleTestCase):
         pb = resolve_playbook(text, z, d, p)
         self.assertIsNotNone(pb)
         self.assertEqual(pb.playbook_id, PLAYBOOK_BROWSER_ACT)
+        self.assertNotIn("knowledge_search", pb.skip)
         c = commission_task(
             message=text, zone=z, playbook=pb, decision=d, kb_policy=p
         )
@@ -1636,6 +1637,29 @@ class AgentSmartnessTests(SimpleTestCase):
         self.assertEqual(c.primary_skills, frozenset({"playwright-skill"}))
         self.assertEqual(c.effective_allowlist(), {"playwright-skill"})
         self.assertGreaterEqual(c.max_tool_steps, 28)
+        from orchestrator_integration.task_commission import commission_hint
+
+        hint = commission_hint(c)
+        self.assertIn("knowledge_search", hint)
+        self.assertNotIn("不要 knowledge_search 绕路", hint)
+
+        from orchestrator_integration.stage_plan import (
+            build_stage_plan,
+            stage_mount_policy,
+        )
+
+        stages = build_stage_plan(text, d, playbook_id=PLAYBOOK_BROWSER_ACT)
+        ids = [s.stage_id for s in stages]
+        self.assertTrue(
+            "browser_interact" in ids or "kb_research" in ids,
+            ids,
+        )
+        bi = next(
+            (s for s in stages if s.stage_id in ("browser_interact", "kb_research")),
+            stages[0],
+        )
+        policy = stage_mount_policy(stages, bi.stage_id)
+        self.assertIn("knowledge_search", policy["builtin_tools"])
 
         # 纯问答含「购物车」：仍走 kb_qa，不升 browser
         qa = "购物车逻辑是什么"

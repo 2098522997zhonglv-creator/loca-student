@@ -50,6 +50,13 @@ def is_composite_request(message: str, decision: Optional[IntentDecision] = None
         return True
     if decision and INTENT_WRITE in decision.intents and "执行" in text:
         return True
+    # 浏览器任务依赖知识库事实时按复合主链：先取证再交互
+    if decision and INTENT_BROWSER in decision.intents and INTENT_SEARCH in decision.intents:
+        return True
+    if decision and INTENT_BROWSER in decision.intents and any(
+        k in text for k in ("知识库", "根据文档", "分支", "tip-", "CALLIE", "callie")
+    ):
+        return True
     return False
 
 
@@ -70,14 +77,15 @@ def build_stage_plan(
             return [
                 StageSpec(
                     stage_id="browser_interact",
-                    goal="在授权范围内完成页面交互并交付真实标识",
+                    goal="先取证入口再完成页面交互并交付真实标识",
                     tool_capabilities=[
+                        "knowledge_search",
                         "playwright-skill",
                         "read_skill_content",
                         "execute_skill_script",
                     ],
-                    acceptance="上传/加购检查点通过且标识类型明确",
-                    auth_actions=["upload", "add_to_cart"],
+                    acceptance="入口来自知识库或明确 URL；交互检查点通过且标识类型明确",
+                    auth_actions=["knowledge_search", "upload", "add_to_cart"],
                 )
             ]
         if playbook_id == "testcase_execute":
@@ -104,13 +112,17 @@ def build_stage_plan(
         ]
 
     stages: List[StageSpec] = []
-    if any(k in text for k in ("知识库", "查规则", "根据文档", "检索")) or INTENT_SEARCH in decision.intents:
+    if (
+        any(k in text for k in ("知识库", "查规则", "根据文档", "检索", "分支", "tip-"))
+        or INTENT_SEARCH in decision.intents
+        or INTENT_BROWSER in decision.intents
+    ):
         stages.append(
             StageSpec(
                 stage_id="kb_research",
-                goal="检索规则并记录来源",
+                goal="检索入口 URL/分支环境/规则并记录来源",
                 tool_capabilities=["knowledge_search"],
-                acceptance="有效内容与来源",
+                acceptance="有效内容与来源（含可打开的入口）",
                 auth_actions=["knowledge_search"],
             )
         )
@@ -136,7 +148,9 @@ def build_stage_plan(
                 auth_actions=["write"],
             )
         )
-    if any(k in text for k in ("执行用例", "执行测试", "跑一遍", "执行")):
+    if any(k in text for k in ("执行用例", "执行测试", "跑一遍", "执行")) and (
+        INTENT_BROWSER not in decision.intents
+    ):
         stages.append(
             StageSpec(
                 stage_id="execute",
@@ -146,6 +160,23 @@ def build_stage_plan(
                 or ([s.stage_id for s in stages[-1:]] if stages else []),
                 acceptance="执行记录终态",
                 auth_actions=["execute_testcase"],
+            )
+        )
+    if INTENT_BROWSER in decision.intents or playbook_id == "browser_act":
+        stages.append(
+            StageSpec(
+                stage_id="browser_interact",
+                goal="按已取证入口完成页面交互并交付真实标识",
+                tool_capabilities=[
+                    "knowledge_search",
+                    "playwright-skill",
+                    "read_skill_content",
+                    "execute_skill_script",
+                ],
+                depends_on=[s.stage_id for s in stages if s.stage_id == "kb_research"]
+                or ([s.stage_id for s in stages[-1:]] if stages else []),
+                acceptance="交互检查点通过且标识类型明确",
+                auth_actions=["upload", "add_to_cart"],
             )
         )
     stages.append(

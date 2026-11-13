@@ -118,16 +118,17 @@ def resolve_playbook(
             PLAYBOOK_BROWSER_ACT,
             "浏览器交互操作",
             steps=(
-                "禁止 url-reader / knowledge_search（加购/登录/传图是交互 SPA）",
+                "先用知识库预检索/knowledge_search 拿到入口 URL、分支环境、规则与成功标准；禁止本机扫盘/读日志猜地址",
+                "禁止 url-reader（交互 SPA）；禁止用知识库结论代替真实页面结果",
                 "read_skill_content(playwright-skill)（同会话已读过可跳过）",
-                "execute_skill_script(playwright-skill)：打开目标站、完成交互（登录/传图/加购等）",
+                "execute_skill_script(playwright-skill)：打开已取证的目标站，完成交互（登录/传图/加购等）",
                 "连续完成交互后直接回报关键结果；交付真实字段名（cart_id/cart_item_id 等）与来源，勿混称「cart或订单标识」",
                 "上传须记录实际方法（filechooser/setInputFiles）；仅 1/1 不够，需预览/素材证据",
                 "只授权加购时不得提交订单换 order_sn；不要支付≠允许下单；订单歧义只阻断下单分支",
-                "filechooser 超时改 setInputFiles；禁止要求用户重写指令或点名 Skill",
+                "同一失败（上传/加购）至多换策略重试 2 次，禁止同质空转；filechooser 超时改 setInputFiles",
                 "支付/写库才走确认按钮；知识库示例 order_sn 不得充当本次结果",
             ),
-            skip=("url-reader", "knowledge_search", "未确认的平台写入"),
+            skip=("url-reader", "本机考古", "未确认的平台写入"),
             preferred_skills=("playwright-skill", "ui-automation"),
         )
 

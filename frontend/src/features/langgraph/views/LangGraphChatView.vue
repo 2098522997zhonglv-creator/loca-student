@@ -27,8 +27,6 @@
         @clear-chat="clearChat"
         @show-system-prompt="showSystemPromptModal"
         @show-tool-approval-settings="isToolApprovalSettingsVisible = true"
-        @show-agent-metrics="isAgentMetricsVisible = true"
-        @show-task-exec-config="isTaskExecConfigVisible = true"
         @update:use-knowledge-base="useKnowledgeBase = $event"
         @update:selected-knowledge-base-id="selectedKnowledgeBaseId = $event"
         @update:similarity-threshold="similarityThreshold = $event"
@@ -103,17 +101,6 @@
       @update-system-prompt="handleUpdateSystemPrompt"
       @cancel="closeSystemPromptModal"
       @prompts-updated="handlePromptsUpdated"
-    />
-
-    <AgentMetricsModal v-model:visible="isAgentMetricsVisible" />
-
-    <TaskExecutionConfigModal
-      v-model:visible="isTaskExecConfigVisible"
-      v-model:model-value="executionConfigOverrides"
-      :task-id="activeTaskIdForConfig"
-      :config-version="activeConfigVersion"
-      :effective-config="activeEffectiveConfig"
-      @saved="onTaskConfigSaved"
     />
 
     <!-- ⭐工具审批设置弹窗 -->
@@ -223,9 +210,6 @@ import SystemPromptModal from '../components/SystemPromptModal.vue';
 import ToolApprovalCard from '../components/ToolApprovalCard.vue';
 import ToolApprovalSettingsModal from '../components/ToolApprovalSettingsModal.vue';
 import TaskStageBar from '../components/TaskStageBar.vue';
-import AgentMetricsModal from '../components/AgentMetricsModal.vue';
-import TaskExecutionConfigModal from '../components/TaskExecutionConfigModal.vue';
-import type { ExecutionConfigOverrides } from '../components/TaskExecutionConfigModal.vue';
 import type { InterruptEvent } from '../components/ToolApprovalCard.vue';
 
 const { isEnglish } = useAppI18n();
@@ -586,10 +570,6 @@ const currentLlmConfig = ref<LlmConfig | null>(null);
 
 // ⭐工具审批设置弹窗
 const isToolApprovalSettingsVisible = ref(false);
-const isAgentMetricsVisible = ref(false);
-const isTaskExecConfigVisible = ref(false);
-const executionConfigOverrides = ref<ExecutionConfigOverrides | null>(null);
-
 // 项目store
 const projectStore = useProjectStore();
 const { getRefreshTrigger } = useLlmConfigRefresh();
@@ -2024,16 +2004,6 @@ const handleSendMessage = async (data: {
     return;
   }
 
-  if (executionConfigOverrides.value) {
-    const cleaned: Record<string, number> = {};
-    for (const [k, v] of Object.entries(executionConfigOverrides.value)) {
-      if (typeof v === 'number' && !Number.isNaN(v)) cleaned[k] = v;
-    }
-    if (Object.keys(cleaned).length) {
-      requestData.execution_config = cleaned;
-    }
-  }
-
   if (isStreamMode.value) {
     // 流式模式（传递用户消息用于立即创建会话标题）
     await handleStreamMessage(requestData, message);
@@ -2053,51 +2023,6 @@ const activeAcceptance = computed(() => activeStream.value?.acceptance || null);
 const activeEffectiveConfig = computed(
   () => activeStream.value?.effectiveConfig || null
 );
-const activeTaskIdForConfig = computed(() => {
-  const id = activeStream.value?.taskId;
-  return id != null && String(id) ? String(id) : null;
-});
-const activeConfigVersion = computed(() => {
-  const cfg = activeEffectiveConfig.value;
-  if (cfg?.config_version != null) return Number(cfg.config_version);
-  return null;
-});
-function onTaskConfigSaved(payload: {
-  config_version?: number;
-  budget?: Record<string, unknown>;
-}) {
-  const stream = activeStream.value;
-  if (!stream) return;
-  const budget = payload.budget || {};
-  stream.effectiveConfig = {
-    ...(stream.effectiveConfig || {}),
-    expected_business_steps: Number(
-      budget.expected_business_steps ??
-        stream.effectiveConfig?.expected_business_steps ??
-        0
-    ),
-    completed_business_steps: Number(
-      budget.completed_business_steps ??
-        stream.effectiveConfig?.completed_business_steps ??
-        0
-    ),
-    max_tool_actions: Number(
-      budget.max_tool_actions ?? stream.effectiveConfig?.max_tool_actions ?? 0
-    ),
-    used_tool_actions: Number(
-      budget.used_tool_actions ?? stream.effectiveConfig?.used_tool_actions ?? 0
-    ),
-    config_version: Number(
-      payload.config_version ??
-        budget.config_version ??
-        stream.effectiveConfig?.config_version ??
-        1
-    ),
-    response_locale: String(
-      budget.response_locale || stream.effectiveConfig?.response_locale || ''
-    ),
-  };
-}
 
 // 计算用于显示的最终消息列表
 const displayedMessages = computed(() => {

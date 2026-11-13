@@ -1588,29 +1588,47 @@ class AgentLoopStreamAPIView(View):
                 if stage_skills:
                     skill_allowlist = skill_allowlist & stage_skills or skill_allowlist
 
-            # 短路轮：去掉知识库工具，避免预检索干扰极速路径
-            # R17：当前阶段需要 knowledge_search 时不得因 short_circuit 裁掉
-            # 补充轮可并行查库，但不得因此卸掉执行工具
+            # 短路 ≠ 禁知识库。仅当剧本/策略显式禁止，或阶段能力未声明 KB 且非浏览器主链时才裁掉。
             stage_needs_kb = False
             try:
                 stage_needs_kb = (
                     "knowledge_search" in set(_stage_mount.get("builtin_tools") or [])
-                    or str(_current_stage_id or "") in {"kb_research", "research"}
+                    or str(_current_stage_id or "")
+                    in {"kb_research", "research", "browser_interact"}
                     or "knowledge" in set(_stage_mount.get("skill_names") or [])
                     or "knowledge_search"
                     in set(_stage_mount.get("skill_names") or [])
                 )
             except Exception:
                 stage_needs_kb = False
-            # 保留 KB 工具引用，供后置路由误裁后按阶段重挂（D02/RC02）
+            _playbook_bans_kb = bool(
+                active_playbook
+                and "knowledge_search" in set(getattr(active_playbook, "skip", ()) or ())
+            )
+            _browser_needs_kb = bool(
+                kb_qa_mode
+                and task_commission.playbook_id == "browser_act"
+                and not _playbook_bans_kb
+            )
+            _keep_kb = bool(
+                stage_needs_kb or _browser_needs_kb or _preserve_exec
+            )
+            # 保留 KB 工具引用，供后置路由误裁后按阶段重挂
             _kb_tools_snapshot = [
                 t for t in tools if getattr(t, "name", "") == "knowledge_search"
             ]
             if (
-                task_commission.short_circuit
-                and tools
-                and not stage_needs_kb
-                and not _preserve_exec
+                tools
+                and not _keep_kb
+                and (
+                    _playbook_bans_kb
+                    or (
+                        _early_kb_policy is not None
+                        and not getattr(
+                            _early_kb_policy, "allow_knowledge_search", True
+                        )
+                    )
+                )
             ):
                 tools = [
                     t
@@ -1618,17 +1636,18 @@ class AgentLoopStreamAPIView(View):
                     if getattr(t, "name", "") != "knowledge_search"
                 ]
                 logger.info(
-                    "AgentLoopStreamAPI: 剧本短路 short_circuit=True 已移除 knowledge_search "
-                    "playbook=%s channel=%s",
+                    "AgentLoopStreamAPI: 按剧本/策略移除 knowledge_search "
+                    "playbook=%s bans=%s",
                     task_commission.playbook_id,
-                    task_commission.channel,
+                    _playbook_bans_kb,
                 )
-            elif task_commission.short_circuit and stage_needs_kb:
+            elif _keep_kb:
                 logger.info(
-                    "AgentLoopStreamAPI: 阶段需要知识检索，保留 knowledge_search "
-                    "stage=%s playbook=%s",
+                    "AgentLoopStreamAPI: 保留 knowledge_search "
+                    "stage=%s playbook=%s browser_kb=%s",
                     _current_stage_id,
                     task_commission.playbook_id,
+                    _browser_needs_kb,
                 )
 
             builtin_tools = get_builtin_tools(
@@ -1642,8 +1661,8 @@ class AgentLoopStreamAPIView(View):
                 include_meta_tools=mount_execute,
             )
             tools.extend(builtin_tools)
-            # FR08：按阶段裁剪检索类工具（Skill/元工具由 allowlist 控制，此处只关 knowledge_search）
-            if _stage_mount.get("restrict"):
+            # FR08：按阶段裁剪检索类工具；浏览器主链/_keep_kb 时不得裁掉
+            if _stage_mount.get("restrict") and not _keep_kb:
                 allowed_builtins = set(_stage_mount.get("builtin_tools") or [])
                 if "knowledge_search" not in allowed_builtins:
                     tools = [
@@ -1665,12 +1684,11 @@ class AgentLoopStreamAPIView(View):
             )
 
             # 6.1 意图路由：按用户话术裁剪工具，减少误调
-            # D02：kb_research 等阶段需要知识工具时，不得因 short_circuit 把 kb_active 关掉
+            # 浏览器主链/阶段需要 KB 时，short_circuit 不得关掉 kb_active
             _intent_kb_active = bool(
                 kb_qa_mode
                 and (
-                    stage_needs_kb
-                    or _preserve_exec
+                    _keep_kb
                     or not task_commission.short_circuit
                 )
             )
@@ -1696,16 +1714,18 @@ class AgentLoopStreamAPIView(View):
                     } and name not in have:
                         tools.append(mt)
                         have.add(name)
-            # D02/RC02：阶段能力需要 knowledge_search 时，禁止后置话术规则清空
-            if stage_needs_kb and kb_qa_mode:
+            # 阶段/浏览器主链需要 knowledge_search 时，禁止后置话术规则清空
+            if _keep_kb and kb_qa_mode:
                 have = {getattr(t, "name", "") for t in tools}
                 if "knowledge_search" not in have:
                     for kt in _kb_tools_snapshot:
                         tools.append(kt)
                         have.add(getattr(kt, "name", "knowledge_search"))
                     logger.info(
-                        "AgentLoopStreamAPI: 阶段 %s 强制重挂 knowledge_search（防后置误裁）",
+                        "AgentLoopStreamAPI: 强制重挂 knowledge_search（防后置误裁） "
+                        "stage=%s playbook=%s",
                         _current_stage_id,
+                        task_commission.playbook_id,
                     )
                 if kb_policy is not None and not kb_policy.allow_knowledge_search:
                     from dataclasses import replace as _dc_replace
@@ -1713,7 +1733,8 @@ class AgentLoopStreamAPIView(View):
                     kb_policy = _dc_replace(
                         kb_policy,
                         allow_knowledge_search=True,
-                        reason=f"{kb_policy.reason}+stage_kb_required",
+                        skip_prefetch=False,
+                        reason=f"{kb_policy.reason}+task_kb_required",
                     )
             # 短路时强制保留元工具
             if task_commission.short_circuit:
@@ -2042,9 +2063,12 @@ class AgentLoopStreamAPIView(View):
 
             # 8.0a 账号行为偏好预检索（失败静默）
             _prefetch_query = _prefetch_query_early
-            _skip_prefetch = bool(
-                kb_policy.skip_prefetch or task_commission.short_circuit
-            )
+            # short_circuit 不再跳过预检索；仅策略/剧本显式禁 KB 时跳过
+            _skip_prefetch = bool(getattr(kb_policy, "skip_prefetch", False))
+            if _keep_kb:
+                _skip_prefetch = False
+            elif _playbook_bans_kb:
+                _skip_prefetch = True
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,

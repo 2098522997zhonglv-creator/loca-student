@@ -56,9 +56,7 @@ const stages = computed(() => props.stagePlan || []);
 const visible = computed(
   () =>
     Boolean(props.taskStatus) ||
-    Boolean(props.currentStage) ||
-    stages.value.length > 1 ||
-    Boolean(props.effectiveConfig)
+    (Boolean(props.currentStage) && stages.value.length > 0)
 );
 
 const budgetLabel = computed(() => {

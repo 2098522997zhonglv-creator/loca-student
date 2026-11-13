@@ -243,9 +243,15 @@ def commission_hint(commission: TaskCommission) -> str:
     if commission.post_condition:
         lines.append(f"- 退出断言: {commission.post_condition}")
     if commission.short_circuit:
-        lines.append(
-            "- 本轮为高频剧本短路：禁止探索主类以外 Skill；不要 knowledge_search 绕路。"
-        )
+        if commission.playbook_id == PLAYBOOK_BROWSER_ACT:
+            lines.append(
+                "- 短路只限制 Skill 探索：入口/分支/规则优先知识库预检索或 knowledge_search；"
+                "禁止本机扫盘猜 URL；页面结果必须来自真实浏览器，禁止用文档示例冒充本次结果。"
+            )
+        else:
+            lines.append(
+                "- 本轮为高频剧本短路：禁止探索主类以外 Skill；按剧本步骤收敛，勿横向漂移。"
+            )
     if commission.draft_writes:
         lines.append(
             "- 写入走草稿态：未用户确认前不得真实落库；界面按钮确认，勿要求用户打字。"
