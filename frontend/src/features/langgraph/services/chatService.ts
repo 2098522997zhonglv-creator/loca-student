@@ -1126,32 +1126,64 @@ export async function fetchTaskSnapshot(options: {
 
 /**
  * 质量指标看板（FR10.4）
+ * 返回 { data, error }：失败时透出 HTTP/业务原因，便于弹窗展示（不再吞成笼统「服务不可用」）。
  */
 export async function fetchAgentQualityMetrics(options?: {
   scope?: 'user' | 'all';
   limit?: number;
-}): Promise<Record<string, unknown> | null> {
+}): Promise<{ data: Record<string, unknown> | null; error?: string }> {
   const authStore = useAuthStore();
-  const token = authStore.getAccessToken;
+  let token = authStore.getAccessToken;
   const params = new URLSearchParams();
   if (options?.scope) params.set('scope', options.scope);
   if (options?.limit) params.set('limit', String(options.limit));
+  const url = `${getApiBaseUrl()}${AGENT_LOOP_API_URL}/metrics/?${params.toString()}`;
+
+  const doFetch = (accessToken: string) =>
+    fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
   try {
-    const response = await fetch(
-      `${getApiBaseUrl()}${AGENT_LOOP_API_URL}/metrics/?${params.toString()}`,
-      {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-    const data = await response.json();
-    if (response.ok && data.status === 'success') {
-      return (data.data || null) as Record<string, unknown> | null;
+    if (!token) {
+      return { data: null, error: '未登录或 access token 缺失' };
     }
-    return null;
+    let response = await doFetch(token);
+    if (response.status === 401) {
+      const newToken = await refreshAccessToken();
+      if (!newToken) {
+        return { data: null, error: '登录已过期，请重新登录' };
+      }
+      token = newToken;
+      response = await doFetch(token);
+    }
+
+    let body: { status?: string; message?: string; data?: unknown } | null = null;
+    try {
+      body = await response.json();
+    } catch {
+      return {
+        data: null,
+        error: `响应非 JSON（HTTP ${response.status}），请确认后端已部署 /agent-loop/metrics/`,
+      };
+    }
+
+    if (response.ok && body?.status === 'success') {
+      return {
+        data: (body.data || {}) as Record<string, unknown>,
+      };
+    }
+    const detail =
+      (typeof body?.message === 'string' && body.message) ||
+      `HTTP ${response.status}`;
+    return { data: null, error: `获取指标失败：${detail}` };
   } catch (error) {
     console.warn('[ChatService] fetchAgentQualityMetrics failed:', error);
-    return null;
+    return {
+      data: null,
+      error: error instanceof Error ? error.message : '网络错误，无法获取指标',
+    };
   }
 }
 

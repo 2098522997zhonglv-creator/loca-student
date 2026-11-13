@@ -131,10 +131,13 @@ async function reload() {
   loading.value = true;
   error.value = '';
   try {
-    const data = await fetchAgentQualityMetrics({ scope: 'user', limit: 200 });
-    metrics.value = data;
+    const result = await fetchAgentQualityMetrics({ scope: 'user', limit: 200 });
+    metrics.value = result.data;
     updatedAt.value = new Date().toLocaleTimeString();
-    if (!data) error.value = '未能获取指标（可能未登录或服务不可用）';
+    if (!result.data) {
+      error.value =
+        result.error || '未能获取指标（可能未登录或服务不可用）';
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : '加载失败';
   } finally {
