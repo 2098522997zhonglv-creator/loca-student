@@ -104,6 +104,8 @@ export interface InterruptEvent {
   id: string;
   interrupt_id?: string;
   action_requests: ActionRequest[];
+  /** 切回页面从快照恢复；禁止因此自动 resume */
+  restoredFromSnapshot?: boolean;
 }
 
 const props = defineProps<{

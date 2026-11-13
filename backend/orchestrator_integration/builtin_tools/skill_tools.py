@@ -278,14 +278,39 @@ _BROWSER_SKILLS = frozenset(
 )
 
 
-def is_mutating_skill_command(command: Optional[str]) -> bool:
-    """判断 skill 命令是否会写入平台/数据库（用于确认门与串行策略）。"""
+# 浏览器自动化里的 add_cookies / add_to_cart / save_screenshot / create_context 等
+# 会误命中 _MUTATING_FUNC_RE；这些是页面操作，不是平台/数据库写入，不得弹「确认写入」。
+_BROWSER_CMD_RE = re.compile(
+    r"(?:^|[\s/\"'`])(?:node\s+run\.js|npx\s+playwright|playwright-cli\b|"
+    r"playwright-skill|browser-use)|"
+    r"\bpage\.(?:goto|click|fill|type|setinputfiles|locator|evaluate)\b|"
+    r"\[PERSISTENT_SESS|PERSISTENT_SESSION\b",
+    re.IGNORECASE,
+)
+
+
+def is_mutating_skill_command(
+    command: Optional[str], skill_name: Optional[str] = None
+) -> bool:
+    """判断 skill 命令是否会写入平台/数据库（用于确认门与串行策略）。
+
+    浏览器 Skill / node run.js 页面操作一律不算平台写入，避免加购/传图/登录
+    被误拦后出现「已点确认写入仍像没放行」的体验。
+    """
     if not command or not str(command).strip():
         return False
+    name = (skill_name or "").strip().lower()
+    if name in _BROWSER_SKILLS:
+        return False
     text = str(command)
+    if _BROWSER_CMD_RE.search(text):
+        return False
     actions = [m.group("action") for m in _ACTION_RE.finditer(text)]
     if actions:
         return any(not _READONLY_ACTION_RE.match(a) for a in actions)
+    # 无 --action：仅对 python 脚本里的写入函数名判定，避免 JS 标识符误伤
+    if not re.search(r"(?i)\.py\b", text):
+        return False
     return bool(_MUTATING_FUNC_RE.search(text))
 
 
@@ -410,10 +435,9 @@ def _needs_write_confirmation_payload(
     """返回需用户确认的结构化提示；可附带已放行的只读/执行结果。"""
     message = (
         "检测到平台/数据库写入操作，用户本轮消息没有明确同意写入，已拒绝执行写入。"
-        "服务端按用户原话判定，本轮内任何写入重试（包括 user_confirmed=true）都会被拒绝。"
-        "界面已弹出「确认写入」按钮，请勿要求用户打字确认。"
-        "请立即停止调用写入命令，用一两句话列出将要写入的内容与影响后结束本轮；"
-        "用户点允许后系统会自动 resume 并放行写入。"
+        "本轮内模型自行带 user_confirmed=true 重试无效；必须等用户点界面「确认写入」。"
+        "请勿要求用户打字确认。请立即停止调用写入命令，用一两句话列出将要写入的内容与影响后结束本轮；"
+        "用户点「确认写入」后由服务端 resume 并精确执行原动作一次。"
     )
     if executed_readonly:
         message = (
@@ -1737,12 +1761,18 @@ def get_skill_tools(
             mutating_cmds = [
                 c
                 for c in commands
-                if isinstance(c, dict) and is_mutating_skill_command(c.get("command"))
+                if isinstance(c, dict)
+                and is_mutating_skill_command(
+                    c.get("command"), c.get("skill_name")
+                )
             ]
             readonly_cmds = [
                 c
                 for c in commands
-                if isinstance(c, dict) and not is_mutating_skill_command(c.get("command"))
+                if isinstance(c, dict)
+                and not is_mutating_skill_command(
+                    c.get("command"), c.get("skill_name")
+                )
             ]
             write_blocked = bool(mutating_cmds) and not _write_allowed(
                 user_confirmed, user_write_approved
@@ -1865,7 +1895,9 @@ def get_skill_tools(
                     for idx, cmd in enumerate(commands):
                         if not isinstance(cmd, dict):
                             continue
-                        if is_mutating_skill_command(cmd.get("command")):
+                        if is_mutating_skill_command(
+                            cmd.get("command"), cmd.get("skill_name")
+                        ):
                             continue
                         executed_readonly.append(execute_single(idx, cmd))
                     _emit_telemetry(
@@ -2217,7 +2249,7 @@ def get_skill_tools(
             )
             return msg
 
-        if is_mutating_skill_command(command) and not _write_allowed(
+        if is_mutating_skill_command(command, skill_name) and not _write_allowed(
             user_confirmed, user_write_approved
         ):
             logger.info(

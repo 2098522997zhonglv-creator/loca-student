@@ -4250,12 +4250,17 @@ class AgentLoopResumeAPIView(View):
                                 probe_err,
                             )
 
+                    # 写库确认按钮批准后：本轮工具闭包放行写入（服务端已/将执行 pending；
+                    # 若模型补一枪同快照也不再被「本轮拒绝」误伤）
+                    resume_write_approved = bool(
+                        write_confirm_resume and decision_type == "approve"
+                    )
                     builtin_tools = get_builtin_tools(
                         user_id=user.id,
                         project_id=resume_project_id,
                         test_case_id=None,
                         chat_session_id=session_id,
-                        user_write_approved=False,
+                        user_write_approved=resume_write_approved,
                         allowed_skill_names=resume_allowlist,
                         allow_execute=True,
                         include_meta_tools=True,

@@ -114,6 +114,8 @@ interface StreamState {
       description?: string;
       auto_reject?: boolean;
     }>;
+    /** 切回页面从快照恢复；禁止因此自动 resume */
+    restoredFromSnapshot?: boolean;
   };
   isWaitingForApproval?: boolean; // 是否正在等待用户审批
   /** FR10：任务阶段与验收状态 */
@@ -134,6 +136,10 @@ interface StreamState {
   };
   /** RC11：任务语言 */
   responseLocale?: string;
+  /** 本页是否有活的 SSE 生成；切回恢复快照不得伪装成生成中 */
+  liveGeneration?: boolean;
+  /** 切回快照把流标成空闲完成；禁止触发「流完成」固化副作用 */
+  snapshotIdle?: boolean;
 }
 
 function applyToolResultToStream(
@@ -605,6 +611,7 @@ export async function sendChatMessageStream(
               
               if (parsed.type === 'complete' && streamSessionId && activeStreams.value[streamSessionId]) {
                 activeStreams.value[streamSessionId].isComplete = true;
+                activeStreams.value[streamSessionId].liveGeneration = false;
               }
             } catch (e) {
               console.warn('Failed to parse remaining SSE data:', line);
@@ -666,6 +673,8 @@ export async function sendChatMessageStream(
               activeStreams.value[streamSessionId] = {
                 content: '',
                 isComplete: false,
+                liveGeneration: true,
+                snapshotIdle: false,
                 messages: [],
                 contextTokenCount: prevTokenCount,
                 contextLimit: contextLimit,
@@ -1469,11 +1478,16 @@ export function applyTaskSnapshotToStream(
   sessionId: string,
   snap: Record<string, unknown>
 ): void {
+  const existing = activeStreams.value[sessionId];
+  const wasLiveGenerating = Boolean(
+    existing && !existing.isComplete && existing.liveGeneration
+  );
   if (!activeStreams.value[sessionId]) {
     activeStreams.value[sessionId] = {
       content: '',
-      isComplete: false,
+      isComplete: true,
       messages: [],
+      liveGeneration: false,
     };
   }
   const stream = activeStreams.value[sessionId];
@@ -1526,8 +1540,8 @@ export function applyTaskSnapshotToStream(
     stream.taskEvents = merged;
   }
 
-  // 终态/阻塞态：恢复阶段条即可，禁止把 isComplete 置 false，
-  // 否则 displayedMessages 会画出「正在生成」气泡，像重新触发了对话。
+  // 切回页面只恢复阶段条/审批卡片；不得把 isComplete 置 false 冒充正在对话，
+  // 也不得让快照审批触发自动 resume（见 restoredFromSnapshot）。
   const terminal = new Set([
     'completed',
     'task_completed',
@@ -1537,16 +1551,33 @@ export function applyTaskSnapshotToStream(
     'task_blocked',
     'paused',
   ]);
+  const markInterruptFromSnapshot = (interrupt: {
+    id: string;
+    interrupt_id?: string;
+    kind?: string;
+    action_requests: Array<{
+      name: string;
+      args: Record<string, unknown>;
+      description?: string;
+      auto_reject?: boolean;
+    }>;
+  }) => {
+    stream.interrupt = { ...interrupt, restoredFromSnapshot: true };
+  };
+
   if (terminal.has(status)) {
     stream.isComplete = true;
+    stream.liveGeneration = false;
+    stream.snapshotIdle = !wasLiveGenerating;
     stream.isWaitingForApproval = false;
   } else if (status === 'awaiting_approval') {
-    stream.isComplete = true; // 不在生成，只是等人确认
+    stream.isComplete = true;
+    stream.liveGeneration = false;
+    stream.snapshotIdle = !wasLiveGenerating;
     stream.isWaitingForApproval = true;
-    // RC07：优先用快照 pending_approval（含原动作），刷新后可再确认
     const pendingAppr = snap.pending_approval as Record<string, unknown> | undefined;
     if (pendingAppr && pendingAppr.interrupt_id) {
-      stream.interrupt = {
+      markInterruptFromSnapshot({
         id: String(pendingAppr.interrupt_id),
         interrupt_id: String(pendingAppr.interrupt_id),
         kind: String(pendingAppr.kind || 'write_confirmation'),
@@ -1555,16 +1586,17 @@ export function applyTaskSnapshotToStream(
               name: string;
               args: Record<string, unknown>;
               description?: string;
+              auto_reject?: boolean;
             }>)
           : [],
-      };
+      });
     } else {
       const approvalEvt = [...(stream.taskEvents || [])]
         .reverse()
         .find((e) => String(e.event_type || e.type || '') === 'approval_required');
       const payload = (approvalEvt?.payload || {}) as Record<string, unknown>;
       if (payload.interrupt_id || approvalEvt) {
-        stream.interrupt = {
+        markInterruptFromSnapshot({
           id: String(payload.interrupt_id || ''),
           interrupt_id: String(payload.interrupt_id || ''),
           kind: String(payload.kind || 'write_confirmation'),
@@ -1573,25 +1605,24 @@ export function applyTaskSnapshotToStream(
                 name: string;
                 args: Record<string, unknown>;
                 description?: string;
+                auto_reject?: boolean;
               }>)
             : [],
-        };
+        });
       }
     }
-  } else if (status === 'cancelling') {
+  } else if (wasLiveGenerating) {
+    // 仅本页仍有活 SSE 时保持生成中
     stream.isComplete = false;
+    stream.liveGeneration = true;
+    stream.snapshotIdle = false;
     stream.isWaitingForApproval = false;
-  } else if (status === 'running' || status === 'in_progress') {
-    // 仅确认仍在跑时保持加载态；无 status 的空快照不当成生成中
-    stream.isComplete = false;
-    stream.isWaitingForApproval = false;
-  } else if (!status) {
-    // 快照无状态：不要凭空制造「生成中」
-    if (!stream.content && !(stream.messages && stream.messages.length)) {
-      stream.isComplete = true;
-    }
   } else {
-    stream.isComplete = false;
+    // running / cancelling / 空状态：切回只展示历史+阶段，不请求、不转圈
+    stream.isComplete = true;
+    stream.liveGeneration = false;
+    stream.snapshotIdle = true;
+    stream.isWaitingForApproval = false;
   }
 }
 
@@ -1676,6 +1707,8 @@ export async function resumeAgentLoop(
     activeStreams.value[sessionId] = {
       content: '',
       isComplete: false,
+      liveGeneration: true,
+      snapshotIdle: false,
       messages: [],
       isWaitingForApproval: false,
     };
@@ -1695,6 +1728,8 @@ export async function resumeAgentLoop(
     activeStreams.value[sessionId].interrupt = undefined;
     activeStreams.value[sessionId].isWaitingForApproval = false;
     activeStreams.value[sessionId].isComplete = false;
+    activeStreams.value[sessionId].liveGeneration = true;
+    activeStreams.value[sessionId].snapshotIdle = false;
   }
 
   // 错误处理函数

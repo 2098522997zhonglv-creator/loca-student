@@ -408,6 +408,18 @@ class BehaviorMemoryTests(SimpleTestCase):
             )
         )
         self.assertFalse(is_mutating_skill_command("node scripts/read_url.js https://a.com"))
+        # 浏览器页面操作 ≠ 平台写库：加购/传图/登录不得误弹确认写入
+        for cmd in (
+            'node run.js "await helpers.add_cookies([])"',
+            'node run.js "await cart.add_to_cart()"',
+            'node run.js "await save_screenshot()"',
+            'node run.js "await page.setInputFiles(\'input\', \'a.png\')"',
+            "PERSISTENT_SESSION create_context foo",
+        ):
+            self.assertFalse(is_mutating_skill_command(cmd), cmd)
+            self.assertFalse(
+                is_mutating_skill_command(cmd, "playwright-skill"), cmd
+            )
 
     def test_should_record_tool_behavior_skips_noise(self):
         from orchestrator_integration.behavior_memory import should_record_tool_behavior

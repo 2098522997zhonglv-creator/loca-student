@@ -704,6 +704,13 @@ const currentInterrupt = computed<InterruptEvent | null>(() => {
 watch(currentInterrupt, async (interrupt) => {
   console.log('[LangGraphChatView] currentInterrupt watch triggered:', interrupt);
   if (interrupt) {
+    // 切回对话框从快照恢复的审批：只展示，禁止默认 auto_reject → resume 再发一轮请求
+    if (interrupt.restoredFromSnapshot) {
+      console.log('[LangGraphChatView] Interrupt restored from snapshot, skip auto-resume');
+      toolApprovalDialogVisible.value = true;
+      return;
+    }
+
     // 检查是否所有工具都需要自动拒绝
     const actionRequests = interrupt.action_requests || [];
     const allAutoReject = actionRequests.length > 0 &&
@@ -2520,6 +2527,10 @@ watch(
         console.log(`⏸️ 会话 ${sessionId.value} 等待 HITL 审批，暂不处理流完成`);
         return;
       }
+      // 切回快照标成空闲完成：不固化、不刷标题，避免像「又跑完一轮」
+      if (stream.snapshotIdle) {
+        return;
+      }
 
       console.log(`会话 ${sessionId.value} 的流已完成。`);
 
@@ -2701,9 +2712,13 @@ onActivated(async () => {
   // 4. 如果是同一个会话，检查是否有正在进行的流需要恢复显示
   else if (storedSessionId && activeStreams.value[storedSessionId]) {
     console.log(`Resuming stream display for current session ${storedSessionId}.`);
+    const before = activeStreams.value[storedSessionId];
+    const wasLiveGenerating = Boolean(before.liveGeneration && !before.isComplete);
     await restoreTaskProgressFromSnapshot(storedSessionId);
-    // 如果流在后台已经完成，但UI没有及时更新，这里重新加载历史记录
-    if (activeStreams.value[storedSessionId].isComplete) {
+    const after = activeStreams.value[storedSessionId];
+    // 仅「本页曾有活 SSE 且已结束」时固化历史并清流；
+    // 切回恢复快照也会把 isComplete 置 true，不得因此清掉阶段条或触发误请求
+    if (wasLiveGenerating && after?.isComplete && !after.isWaitingForApproval) {
       await loadChatHistory();
       clearStreamState(storedSessionId);
     }
