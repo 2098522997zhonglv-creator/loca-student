@@ -2644,6 +2644,65 @@ class AuditFlowRegressionTests(TestCase):
         self.assertIn("submit_order", cont.auth_scope.get("deny_actions") or [])
         self.assertNotIn("submit_order", cont.auth_scope.get("allow_actions") or [])
 
+    def test_supplement_auto_topup_when_budget_exhausted(self):
+        """预算打满后用户补充指令必须能续额，不能 0 步死锁。"""
+        from django.contrib.auth import get_user_model
+        from langgraph_integration.models import ChatSession
+        from orchestrator_integration.agent_runtime import create_or_resume_task
+        from orchestrator_integration.task_commission import TaskCommission
+        from orchestrator_integration.turn_context import TURN_SUPPLEMENT
+
+        User = get_user_model()
+        user = User.objects.create_user(username="topup1", password="x")
+        chat = ChatSession.objects.create(user=user, session_id="sess-topup-1", title="t")
+        c = TaskCommission(
+            task_id="topup",
+            zone_id="browser",
+            playbook_id="browser_act",
+            primary_skills=frozenset({"playwright-skill"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=False,
+            channel="light",
+        )
+        task = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="所见即所得传图加购",
+            commission=c,
+            lease_owner="w1",
+        )
+        budget = dict(task.budget or {})
+        max_a = int(budget.get("max_tool_actions") or budget.get("max_tool_steps") or 28)
+        max_tok = int(budget.get("max_tokens") or 50_000)
+        budget["used_tool_actions"] = max_a
+        budget["used_tool_steps"] = max_a
+        budget["used_tokens"] = max_tok
+        budget["max_tokens"] = max_tok
+        task.budget = budget
+        task.status = "blocked"
+        task.save(update_fields=["budget", "status", "updated_at"])
+
+        cont = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="图片生成一张含人脸的就行，触发提交但不提交",
+            commission=c,
+            lease_owner="w1",
+            turn_relation=TURN_SUPPLEMENT,
+        )
+        self.assertEqual(cont.id, task.id)
+        b2 = cont.budget or {}
+        new_max = int(b2.get("max_tool_actions") or b2.get("max_tool_steps") or 0)
+        self.assertGreater(new_max, max_a)
+        remaining = new_max - int(b2.get("used_tool_actions") or 0)
+        self.assertGreater(remaining, 0)
+        self.assertGreater(int(b2.get("max_tokens") or 0), max_tok)
+        self.assertEqual(cont.status, "running")
+        self.assertIn("continuation_budget_topup", cont.task_scope or {})
+
     def test_token_budget_enforced(self):
         from django.contrib.auth import get_user_model
         from langgraph_integration.models import ChatSession

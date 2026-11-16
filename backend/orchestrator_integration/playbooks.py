@@ -119,11 +119,13 @@ def resolve_playbook(
             "浏览器交互操作",
             steps=(
                 "先用知识库预检索/knowledge_search（最多 2 次）拿到入口 URL；禁止本机扫盘/读日志猜地址；入口已定则禁止再查库",
+                "预检索/知识库已给出分支域名或 PDP 链接时：禁止再 Escape Hatch 调 ui-automation 扫配置；立刻 playwright goto",
                 "禁止 url-reader；禁止用知识库结论代替真实页面结果",
-                "read_skill_content(playwright-skill)（同会话已读过可跳过）",
+                "read_skill_content(playwright-skill)（同会话已读过可跳过）；禁止反复只读 Skill 不操作",
                 "用户要「所见即所得/传图」时：必须选带 Upload Photo 的商品；禁止改做刻字/戒指/仅填名字的品交差",
-                "默认短链：打开已取证目标站 → 填 Size/必填文本 → 传图（须有上传请求或预览非占位）→ 不关 Live preview → Add To Cart；交付真实 cart_id 等",
-                "上传：filechooser 优先，失败再 setInputFiles；计数器停在 0/1 或仍 upload.svg 视为失败，不得宣称加购成功",
+                "默认短链（目标 ≤8 次工具调用完成加购）：goto 目标站 → 进所见即所得 PDP → Size/必填文本 → 传图成功 → Add To Cart → 交付 cart_id/角标",
+                "上传：filechooser 优先，失败再 setInputFiles；每种策略最多 1 次；计数器停在 0/1 或仍 upload.svg 视为失败，不得宣称加购成功",
+                "禁止空转：禁止纯 wait/轮询超 15s 且无状态变化；禁止连续 ≥3 次仅 dump DOM/截图不推进；AI 流程弹窗失败则 Cancel 后换图重试或 blocked",
                 "自主自愈：若加购报 Please upload your photo / 角标仍 0，立即同轮按上序重试（最多再 2 次）；禁止写成「下一步请续跑」等用户确认",
                 "同一失败策略用尽仍失败 → report_task_blocked（写清技术阻塞）；禁止换品类凑 cart_id；加购成功前禁止问邮箱/是否下单",
                 "只授权加购时不得提交订单；支付/写库才走确认；知识库示例编号不得充当本次结果",
@@ -134,6 +136,8 @@ def resolve_playbook(
                 "未确认的平台写入",
                 "非目标品类交差",
                 "假下一步等用户续跑",
+                "入口已知仍扫 ui-automation",
+                "长等待空转",
             ),
             preferred_skills=("playwright-skill", "ui-automation"),
         )
@@ -204,4 +208,9 @@ def playbook_hint(playbook: Optional[Playbook]) -> str:
         "- 自主：同轮内自行抉择与自愈；发现可执行改法必须立刻继续调用工具，"
         "禁止用「下一步/可直接续跑」把决策推回用户。"
     )
+    if playbook.playbook_id == PLAYBOOK_BROWSER_ACT:
+        lines.append(
+            "- 步数纪律：工具额度有限；每步必须推进「开页/传图/加购」之一；"
+            "重复探查无进展 → 换策略或 report_task_blocked，禁止耗尽额度后才汇报。"
+        )
     return "\n".join(lines)

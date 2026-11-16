@@ -247,10 +247,21 @@ def create_or_resume_task(
                 if k not in {"allow_actions", "deny_actions"} and k not in merged:
                     merged[k] = v
             task.auth_scope = merged
+        # 用户明确继续/补充：预算打满则自动续额，否则承接指令会 0 步空转
+        pb_id = ""
+        if commission is not None:
+            pb_id = str(getattr(commission, "playbook_id", "") or "")
+        topup = topup_budget_for_user_continuation(task, playbook_id=pb_id)
+        if topup.get("tool_topup") or topup.get("token_topup"):
+            scope = dict(task.task_scope or {})
+            scope["continuation_budget_topup"] = topup
+            task.task_scope = scope
         task.save(
             update_fields=[
                 "task_scope",
                 "auth_scope",
+                "budget",
+                "max_steps",
                 "updated_at",
                 "lease_owner",
                 "lease_expires_at",
@@ -334,6 +345,88 @@ def create_or_resume_task(
         payload={"goal": task.goal[:500], "stage": current_stage},
     )
     return task
+
+
+def topup_budget_for_user_continuation(
+    task,
+    *,
+    playbook_id: str = "",
+    tool_add: int = 0,
+    token_add: int = 50_000,
+) -> Dict[str, Any]:
+    """用户继续/补充指令时：若工具或 token 预算已尽则自动续额。
+
+    避免「承接上一轮明细」却因 28/28 直接 0 步死锁；不改 deny/allow。
+    """
+    from orchestrator_integration.action_auth import expand_budget_only
+    from orchestrator_integration.models import AgentTask
+    from orchestrator_integration.task_execution_config import SERVER_HARD_CAPS
+
+    budget = dict(task.budget or {})
+    used = int(
+        budget.get("used_tool_actions") or budget.get("used_tool_steps") or 0
+    )
+    reserved = int(budget.get("reserved_tool_actions") or 0)
+    max_a = int(
+        budget.get("max_tool_actions") or budget.get("max_tool_steps") or 28
+    )
+    remaining = max_a - used - reserved
+    out: Dict[str, Any] = {
+        "tool_topup": None,
+        "token_topup": None,
+        "remaining_before": remaining,
+    }
+
+    if remaining <= 0:
+        pb = (playbook_id or "").strip()
+        if tool_add > 0:
+            add = int(tool_add)
+        elif pb == "browser_act" or "browser" in pb:
+            add = 28
+        else:
+            add = 8
+        expanded = expand_budget_only(
+            task,
+            add_tool_actions=add,
+            reason="user_continuation_auto_topup",
+        )
+        out["tool_topup"] = expanded
+        if expanded.get("ok"):
+            logger.info(
+                "AgentTask auto top-up tools task=%s +%s → max=%s",
+                getattr(task, "public_task_id", None) or task.pk,
+                add,
+                expanded.get("max_tool_actions"),
+            )
+
+    # token 预算同样可能在长浏览器轮打满，补充指令时一并抬额
+    used_tok = int(budget.get("used_tokens") or 0)
+    max_tok = int(budget.get("max_tokens") or 0)
+    if max_tok > 0 and used_tok >= max_tok and token_add > 0:
+        hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 500_000)
+        new_tok = min(max_tok + int(token_add), hard_tok)
+        if new_tok > max_tok:
+            fresh = dict(task.budget or {})
+            fresh["max_tokens"] = new_tok
+            fresh["last_token_expand"] = {
+                "from": max_tok,
+                "to": new_tok,
+                "reason": "user_continuation_auto_topup",
+                "at": timezone.now().isoformat(),
+            }
+            AgentTask.objects.filter(pk=task.pk).update(
+                budget=fresh,
+                updated_at=timezone.now(),
+            )
+            task.budget = fresh
+            out["token_topup"] = {"ok": True, "max_tokens": new_tok}
+            logger.info(
+                "AgentTask auto top-up tokens task=%s %s→%s",
+                getattr(task, "public_task_id", None) or task.pk,
+                max_tok,
+                new_tok,
+            )
+    return out
 
 
 def acquire_lease(task, owner: str, ttl_minutes: int = 15) -> bool:

@@ -82,3 +82,5 @@ class WysiwygDeliveryGateTests(SimpleTestCase):
         hint = playbook_hint(pb)
         self.assertIn("同轮", hint)
         self.assertIn("禁止用「下一步/可直接续跑」", hint)
+        self.assertIn("步数纪律", hint)
+        self.assertIn("入口已知仍扫 ui-automation", hint)
