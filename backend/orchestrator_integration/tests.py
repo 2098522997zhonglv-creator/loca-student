@@ -1068,6 +1068,18 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertIsNone(ok_run)
 
+        # UI 用例为空时的浏览器实测：无 --action 也不得按「平台写入」拦截
+        ok_browser = reject_zone_privilege_escalation(
+            zone_id=ZONE_EXECUTE,
+            skill_name="playwright-skill",
+            command=(
+                'node run.js "await page.goto('
+                "'https://ps-local-test-svg-canvas-option-1113.a.callie.cc/'"
+                ');"'
+            ),
+        )
+        self.assertIsNone(ok_browser)
+
         # 确认执行 ≠ 同意写入
         self.assertFalse(detect_user_write_approval("确认执行测试用例 35"))
         self.assertTrue(detect_user_write_approval("确认写入"))

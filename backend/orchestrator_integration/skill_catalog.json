@@ -93,7 +93,7 @@
     },
     {
       "name": "playwright-skill",
-      "zones": ["browser", "ticket_kb"],
+      "zones": ["browser", "ticket_kb", "execute"],
       "side_effect": "write",
       "depends_on": [],
       "timeout_sec": 300,

@@ -22,6 +22,11 @@ from orchestrator_integration.skill_zones import (
     ZONE_WEB,
 )
 
+# 浏览器 Skill：页面实测/登录/拖拽，不是平台 create_ui_*/add_testcase 写入
+_BROWSER_SKILLS = frozenset(
+    {"playwright-skill", "playwright-cli", "browser-use"}
+)
+
 # 同批 commands 内允许共存的 skill 亲和组（组外混用 → 跨 Skill 打架）
 _SKILL_AFFINITY: dict[str, frozenset[str]] = {
     "platform_core": frozenset({"loca-stude", "api-automation", "ui-automation"}),
@@ -96,6 +101,10 @@ def reject_zone_privilege_escalation(
         )
 
     if zone == ZONE_EXECUTE:
+        # UI 自动化为空时的浏览器实测兜底：playwright 无 --action，catalog 标 write
+        # 也不得按「平台写入」拦截（页面操作 ≠ create_ui_*/落库）
+        if name in _BROWSER_SKILLS:
+            return None
         # 未登记写 action
         unreg = catalog_reject_unregistered_write(name, command)
         if unreg:
@@ -108,7 +117,8 @@ def reject_zone_privilege_escalation(
                 "本轮为用例执行区，禁止写入/生成类 action（越权）。"
                 f"当前 skill={name} actions={actions or ['(无--action)']}。"
                 "请只使用 execute_testcase / run_testcase / get_*；"
-                "若要生成 UI 或落库，请另开一轮并明确「确认写入」。"
+                "UI 用例为空时可用 playwright-skill 做页面实测；"
+                "若要生成 UI 或落库，请明确「确认写入」后走确认按钮。"
             )
         if effect is None and actions:
             # 有 action 但不在 catalog：执行区仅放行 execute/run/get/list…
@@ -116,7 +126,7 @@ def reject_zone_privilege_escalation(
                 is_mutating_skill_command,
             )
 
-            if is_mutating_skill_command(command):
+            if is_mutating_skill_command(command, name):
                 return (
                     "本轮为用例执行区，禁止写入类命令（越权）。"
                     f"skill={name} command 含写入语义。"
@@ -126,7 +136,7 @@ def reject_zone_privilege_escalation(
                 is_mutating_skill_command,
             )
 
-            if is_mutating_skill_command(command):
+            if is_mutating_skill_command(command, name):
                 return (
                     "本轮为用例执行区，禁止写入类命令（越权）。"
                     f"skill={name}"

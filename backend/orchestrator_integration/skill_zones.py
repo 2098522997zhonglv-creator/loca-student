@@ -39,7 +39,9 @@ _FALLBACK_ZONE_SKILLS: dict[str, FrozenSet[str]] = {
     ZONE_PLATFORM: frozenset(
         {"loca-stude", "api-automation", "ui-automation", "playwright-skill"}
     ),
-    ZONE_EXECUTE: frozenset({"ui-automation", "loca-stude", "api-automation"}),
+    ZONE_EXECUTE: frozenset(
+        {"ui-automation", "loca-stude", "api-automation", "playwright-skill"}
+    ),
     ZONE_WEB: frozenset({"url-reader"}),
     ZONE_BROWSER: frozenset(
         {"playwright-skill", "playwright-cli", "browser-use", "ui-automation"}
@@ -282,7 +284,8 @@ def zone_hint(zone: SkillZone) -> str:
     )
     if zone.zone_id == ZONE_EXECUTE:
         lines.append(
-            "- 执行区禁止写入/生成类 action（create/update/delete/set_case_steps）；"
+            "- 执行区禁止平台写入/生成类 action（create_ui_*/add_testcase/set_case_steps）；"
             "越权写入会被服务端拒绝。"
+            "若 UI 自动化用例为空：允许 playwright-skill 按功能用例做页面实测（不算平台写入）。"
         )
     return "\n".join(lines)

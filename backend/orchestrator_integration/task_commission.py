@@ -106,12 +106,18 @@ def _split_primary_aux(
     zone_all = set(zone.allowed_skills) if zone.allowed_skills else set()
 
     if zone.zone_id == ZONE_EXECUTE:
-        # 主类只挂核心执行面；其余进辅类（需 Escape Hatch）
-        core = ["ui-automation", "loca-stude"]
+        # 主类：UI 执行 + 功能用例查询 + 浏览器实测兜底（UI 用例为空时不必 Escape Hatch）
+        core = ["ui-automation", "loca-stude", "playwright-skill"]
         primary = frozenset(
             s for s in core if (not zone_all or s in zone_all)
-        ) or frozenset({"ui-automation", "loca-stude"})
-        aux_candidates = set(preferred or []) | (zone_all or {"api-automation"})
+        ) or frozenset(core)
+        # playwright 始终进主类：catalog/白名单滞后时仍可实测，免耗 Escape Hatch
+        primary = frozenset(set(primary) | {"playwright-skill"})
+        aux_candidates = (
+            set(preferred or [])
+            | (zone_all or {"api-automation"})
+            | {"playwright-cli", "browser-use"}
+        )
         aux = frozenset(aux_candidates - set(primary))
         return primary, aux
 
