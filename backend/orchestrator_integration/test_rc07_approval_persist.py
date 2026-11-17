@@ -134,6 +134,33 @@ class Rc07ApprovalPersistTests(TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["error_code"], "empty_pending")
 
+    def test_same_session_project_drift_still_consumable(self):
+        """前端切换当前项目时，同 session 的确认卡仍应可消费。"""
+        from projects.models import Project
+
+        p1 = Project.objects.create(name="p1", creator=self.user)
+        p2 = Project.objects.create(name="p2", creator=self.user)
+        interrupt = build_write_confirm_interrupt(
+            session_id="sess-rc07",
+            thread_id="th-rc07-drift",
+            tool_name="execute_skill_script",
+            confirmation={"status": "needs_confirmation", "pending": self.pending},
+        )
+        iid = interrupt["interrupt_id"]
+        row = ApprovalRequest.objects.get(interrupt_id=iid)
+        row.project_id = p1.id
+        row.save(update_fields=["project_id", "updated_at"])
+        get_write_confirm_store().pop(iid)
+        ok = consume_approval(
+            iid,
+            user_id=self.user.id,
+            decision="approve",
+            project_id=p2.id,
+            session_id="sess-rc07",
+        )
+        self.assertTrue(ok["ok"])
+        self.assertEqual(ok["status"], "consumed")
+
     def test_interrupt_exposes_original_action(self):
         interrupt = build_write_confirm_interrupt(
             session_id="sess-rc07",

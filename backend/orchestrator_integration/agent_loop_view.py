@@ -2756,6 +2756,16 @@ class AgentLoopStreamAPIView(View):
                                         }
                                     )
 
+                        # 写库确认/HITL 发出后立刻停流，避免模型继续跑并与 resume 抢租约
+                        if interrupt_detected:
+                            logger.info(
+                                "AgentLoopStreamAPI: stop astream after interrupt "
+                                "session=%s step=%s",
+                                session_id,
+                                step_count,
+                            )
+                            break
+
                 except Exception as e:
                     friendly_error = get_user_friendly_llm_error(e)
                     if friendly_error:
@@ -4106,6 +4116,141 @@ class AgentLoopResumeAPIView(View):
             "decisions": [{"type": decision_type} for _ in range(action_count)]
         }
 
+        # 关键后立刻落库（在加载 LLM/MCP/checkpointer 之前），避免确认后界面空转却未保存
+        server_executed: Optional[Dict[str, Any]] = None
+        exec_project_id = int(project_id) if project_id else 0
+        try:
+            from langgraph_integration.models import ChatSession as _ChatSession
+
+            _chat = await sync_to_async(
+                _ChatSession.objects.filter(session_id=session_id)
+                .select_related("project")
+                .first
+            )()
+            if _chat is not None and getattr(_chat, "project_id", None):
+                exec_project_id = int(_chat.project_id)
+        except Exception:
+            pass
+        if (
+            write_confirm_resume
+            and decision_type == "approve"
+            and isinstance(write_confirm_pending, dict)
+        ):
+            try:
+                from orchestrator_integration.write_confirmation import (
+                    execute_approved_pending,
+                )
+
+                pending_body = write_confirm_pending.get("pending")
+                if not isinstance(pending_body, dict):
+                    pending_body = {}
+                logger.info(
+                    "AgentLoopResumeAPI: executing approved pending before agent "
+                    "session=%s project=%s cmds=%s",
+                    session_id,
+                    exec_project_id,
+                    len(
+                        pending_body.get("commands")
+                        if isinstance(pending_body.get("commands"), list)
+                        else (
+                            [pending_body]
+                            if pending_body.get("command")
+                            else []
+                        )
+                    ),
+                )
+                server_executed = await sync_to_async(execute_approved_pending)(
+                    pending_body,
+                    user_id=int(user.id),
+                    project_id=exec_project_id,
+                    chat_session_id=session_id or "",
+                )
+                for item in server_executed.get("results") or []:
+                    out_text = ""
+                    if isinstance(item, dict):
+                        out_text = str(
+                            item.get("output") or item.get("error") or ""
+                        )
+                    if out_text:
+                        yield create_sse_data(
+                            {
+                                "type": "tool_result",
+                                "tool_name": "execute_skill_script",
+                                "tool_output": out_text,
+                                "summary": (
+                                    "已批准写入已由服务端执行"
+                                    if server_executed.get("ok")
+                                    else "已批准写入执行失败"
+                                )[:200],
+                                "step": 0,
+                                "approval_executed": True,
+                            }
+                        )
+                logger.info(
+                    "AgentLoopResumeAPI: server executed approved pending ok=%s err=%s",
+                    server_executed.get("ok"),
+                    server_executed.get("error_code"),
+                )
+                # 落库完成后即可向用户收口；后续 LLM 摘要失败也不应回滚已写入
+                if server_executed.get("ok"):
+                    try:
+                        if agent_runtime is not None and runtime_task is not None:
+                            from orchestrator_integration.agent_runtime import (
+                                release_lease,
+                            )
+
+                            await sync_to_async(release_lease)(
+                                runtime_task,
+                                owner=getattr(agent_runtime, "lease_owner", "") or "",
+                            )
+                    except Exception:
+                        pass
+                    yield create_sse_data(
+                        {
+                            "type": "stream",
+                            "data": "已确认并完成写入保存。",
+                            "message_kind": "final",
+                        }
+                    )
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": "finished",
+                            "approval_executed": True,
+                        }
+                    )
+                    return
+            except Exception as exec_err:
+                logger.exception(
+                    "AgentLoopResumeAPI: execute_approved_pending failed: %s",
+                    exec_err,
+                )
+                server_executed = {
+                    "ok": False,
+                    "error_code": "server_execute_exception",
+                    "message": str(exec_err),
+                    "results": [],
+                }
+                try:
+                    if agent_runtime is not None and runtime_task is not None:
+                        from orchestrator_integration.agent_runtime import release_lease
+
+                        await sync_to_async(release_lease)(
+                            runtime_task,
+                            owner=getattr(agent_runtime, "lease_owner", "") or "",
+                        )
+                except Exception:
+                    pass
+                yield create_sse_data(
+                    {
+                        "type": "error",
+                        "error_code": "server_execute_exception",
+                        "message": f"确认后写入执行失败: {exec_err}",
+                    }
+                )
+                yield create_sse_data({"type": "complete", "status": "failed"})
+                return
+
         try:
             from orchestrator_integration.behavior_memory import (
                 record_hitl_decision_behavior,
@@ -4114,7 +4259,7 @@ class AgentLoopResumeAPIView(View):
             await sync_to_async(record_hitl_decision_behavior)(
                 user.id,
                 decision_type,
-                project_id=int(project_id) if project_id else None,
+                project_id=exec_project_id or (int(project_id) if project_id else None),
             )
         except Exception as e:
             logger.debug("记录 HITL 行为失败: %s", e)
@@ -4400,67 +4545,7 @@ class AgentLoopResumeAPIView(View):
                 )
 
                 # 7. 构建输入：写库确认走新 HumanMessage；否则 Command(resume=...)
-                # FR05.4 / D01 / RC07：批准后由服务端执行原 pending 一次，禁止再弹 needs_confirmation
-                server_executed: Optional[Dict[str, Any]] = None
-                if (
-                    write_confirm_resume
-                    and decision_type == "approve"
-                    and isinstance(write_confirm_pending, dict)
-                ):
-                    try:
-                        from orchestrator_integration.write_confirmation import (
-                            execute_approved_pending,
-                        )
-
-                        pending_body = write_confirm_pending.get("pending")
-                        if not isinstance(pending_body, dict):
-                            pending_body = {}
-                        server_executed = await sync_to_async(
-                            execute_approved_pending
-                        )(
-                            pending_body,
-                            user_id=int(user.id),
-                            project_id=int(project_id) if project_id else 0,
-                            chat_session_id=session_id or "",
-                        )
-                        for item in server_executed.get("results") or []:
-                            out_text = ""
-                            if isinstance(item, dict):
-                                out_text = str(
-                                    item.get("output") or item.get("error") or ""
-                                )
-                            if out_text:
-                                yield create_sse_data(
-                                    {
-                                        "type": "tool_result",
-                                        "tool_name": "execute_skill_script",
-                                        "tool_output": out_text,
-                                        "summary": (
-                                            "已批准写入已由服务端执行"
-                                            if server_executed.get("ok")
-                                            else "已批准写入执行失败"
-                                        )[:200],
-                                        "step": 0,
-                                        "approval_executed": True,
-                                    }
-                                )
-                        logger.info(
-                            "AgentLoopResumeAPI: server executed approved pending ok=%s err=%s",
-                            server_executed.get("ok"),
-                            server_executed.get("error_code"),
-                        )
-                    except Exception as exec_err:
-                        logger.exception(
-                            "AgentLoopResumeAPI: execute_approved_pending failed: %s",
-                            exec_err,
-                        )
-                        server_executed = {
-                            "ok": False,
-                            "error_code": "server_execute_exception",
-                            "message": str(exec_err),
-                            "results": [],
-                        }
-
+                # 批准写入已在进入 checkpointer 前由服务端执行（见上方 early return）
                 if write_confirm_resume:
                     resume_input: Any = {
                         "messages": [
@@ -4745,6 +4830,14 @@ class AgentLoopResumeAPIView(View):
                                     yield create_sse_data(
                                         {"type": "stream", "data": chunk.content}
                                     )
+
+                        if interrupt_detected:
+                            logger.info(
+                                "AgentLoopResumeAPI: stop astream after interrupt "
+                                "session=%s",
+                                session_id,
+                            )
+                            break
 
                 except Exception as e:
                     friendly_error = get_user_friendly_llm_error(e)

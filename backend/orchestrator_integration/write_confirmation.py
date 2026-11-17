@@ -330,7 +330,12 @@ def consume_approval(
             and row.project_id is not None
             and int(row.project_id) != int(project_id)
         ):
-            return {"ok": False, "error_code": "project_mismatch"}
+            # 同会话确认卡：允许前端当前项目切换导致的 project_id 漂移，仍以审批记录为准
+            same_session = bool(
+                session_id and row.session_id and row.session_id == session_id
+            )
+            if not same_session:
+                return {"ok": False, "error_code": "project_mismatch"}
         if session_id and row.session_id and row.session_id != session_id:
             return {"ok": False, "error_code": "session_mismatch"}
         if row.status in ("consumed", "rejected", "expired", "cancelled"):
