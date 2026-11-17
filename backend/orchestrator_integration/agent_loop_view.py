@@ -3930,6 +3930,24 @@ class AgentLoopResumeAPIView(View):
 
         decision_info = resume_data[interrupt_id].get("decisions", [{}])[0]
         decision_type = decision_info.get("type", "reject")
+        # 写库确认：用户已精确批准某次 pending，不得被历史浏览器 uncertain 步骤挡死
+        write_confirm_resume = is_write_confirm_interrupt(interrupt_id)
+        logger.info(
+            "AgentLoopResumeAPI: start session=%s interrupt=%s decision=%s write_confirm=%s",
+            session_id,
+            interrupt_id,
+            decision_type,
+            write_confirm_resume,
+        )
+        # 立刻推送，避免 claim/preflight 慢时界面空白
+        yield create_sse_data(
+            {
+                "type": "resume_start",
+                "session_id": session_id,
+                "decision": decision_type,
+                "kind": "write_confirmation" if write_confirm_resume else "hitl",
+            }
+        )
 
         # FR04：经 AgentRuntime 认领租约；已被他人持有则返回现有状态（AC08）
         runtime_task = None
@@ -3983,7 +4001,12 @@ class AgentLoopResumeAPIView(View):
                     yield create_sse_data({"type": "complete", "status": "lease_held"})
                     return
                 preflight = await sync_to_async(agent_runtime.preflight)()
-                if preflight.get("must_reconcile"):
+                if preflight.get("must_reconcile") and not write_confirm_resume:
+                    logger.warning(
+                        "AgentLoopResumeAPI: blocked by must_reconcile task=%s",
+                        getattr(runtime_task, "public_task_id", None)
+                        or runtime_task.pk,
+                    )
                     yield create_sse_data(
                         {
                             "type": "task_blocked",
@@ -4008,11 +4031,18 @@ class AgentLoopResumeAPIView(View):
                         }
                     )
                     return
+                if preflight.get("must_reconcile") and write_confirm_resume:
+                    logger.info(
+                        "AgentLoopResumeAPI: skip must_reconcile for write_confirm "
+                        "task=%s uncertain=%s",
+                        getattr(runtime_task, "public_task_id", None)
+                        or runtime_task.pk,
+                        len(preflight.get("uncertain_steps") or []),
+                    )
         except Exception as lease_err:
             logger.warning("AgentLoopResumeAPI: lease/preflight failed: %s", lease_err)
 
         # 写库确认按钮：非 LangGraph HITL checkpoint，走新一轮带批准消息的 astream
-        write_confirm_resume = is_write_confirm_interrupt(interrupt_id)
         write_confirm_pending = None
         if write_confirm_resume:
             # FR05.4：先消费持久化审批
@@ -4075,16 +4105,6 @@ class AgentLoopResumeAPIView(View):
         resume_value = {
             "decisions": [{"type": decision_type} for _ in range(action_count)]
         }
-
-        # 2. 发送 resume 开始信号
-        yield create_sse_data(
-            {
-                "type": "resume_start",
-                "session_id": session_id,
-                "decision": decision_type,
-                "kind": "write_confirmation" if write_confirm_resume else "hitl",
-            }
-        )
 
         try:
             from orchestrator_integration.behavior_memory import (

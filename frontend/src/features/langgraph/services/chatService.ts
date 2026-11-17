@@ -1877,6 +1877,33 @@ export async function resumeAgentLoop(
           // resume_start 事件 - resume 开始
           if (parsed.type === 'resume_start' && activeStreams.value[sessionId]) {
             console.log('[ChatService] Resume started:', parsed.decision);
+            const stream = activeStreams.value[sessionId];
+            upsertProgressMessage(
+              stream,
+              parsed.kind === 'write_confirmation'
+                ? '已确认，正在执行写入…'
+                : `已确认，正在继续执行（${parsed.decision || 'approve'}）…`,
+              formatStreamTime()
+            );
+          }
+
+          // 租约占用 / 核对阻塞：确认后也要可见，避免「点了没反应」
+          if (
+            (parsed.type === 'task_blocked' || parsed.type === 'task_status') &&
+            activeStreams.value[sessionId]
+          ) {
+            const stream = activeStreams.value[sessionId];
+            const hint =
+              String(parsed.message || '') ||
+              String(
+                (parsed.payload as { hint?: string } | undefined)?.hint || ''
+              ) ||
+              (parsed.type === 'task_blocked'
+                ? '任务被阻塞，无法继续'
+                : '任务状态已更新');
+            upsertProgressMessage(stream, hint, formatStreamTime());
+            stream.taskStatus = String(parsed.status || stream.taskStatus || '');
+            stream.taskEvents = [...(stream.taskEvents || []), parsed];
           }
 
           // 处理上下文 Token 更新
@@ -1944,7 +1971,24 @@ export async function resumeAgentLoop(
 
           // 处理完成事件
           if (parsed.type === 'complete' && activeStreams.value[sessionId]) {
-            activeStreams.value[sessionId].isComplete = true;
+            const stream = activeStreams.value[sessionId];
+            const status = String(parsed.status || '');
+            const errCode = String(parsed.error_code || '');
+            if (status === 'blocked' || errCode === 'must_reconcile') {
+              upsertProgressMessage(
+                stream,
+                '恢复被拦截：存在未核对副作用，请新开一轮或先核对后再确认写入',
+                formatStreamTime()
+              );
+            } else if (status === 'lease_held') {
+              upsertProgressMessage(
+                stream,
+                '任务正由其他执行者处理，请稍后重试确认',
+                formatStreamTime()
+              );
+            }
+            stream.isComplete = true;
+            stream.liveGeneration = false;
           }
         } catch (e) {
           console.warn('[ChatService] Failed to parse resume SSE data:', jsonData);

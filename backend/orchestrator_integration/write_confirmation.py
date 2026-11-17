@@ -188,16 +188,24 @@ def build_write_confirm_interrupt(
         "raw_message": confirmation.get("message") or "",
     }
     get_write_confirm_store().put(interrupt_id, store_payload)
-    # FR05.3：同步持久化审批（失败不影响内存路径）
+    # FR05.3：同步路径直接落库；已在 running event loop 时跳过（由调用方 sync_to_async 落库）
     try:
-        _persist_approval_request(
-            interrupt_id=interrupt_id,
-            session_id=session_id,
-            tool_name=tool_name or "execute_skill_script",
-            pending=pending,
-            summary=summary,
-            mode=mode,
-        )
+        import asyncio
+
+        in_async = True
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            in_async = False
+        if not in_async:
+            _persist_approval_request(
+                interrupt_id=interrupt_id,
+                session_id=session_id,
+                tool_name=tool_name or "execute_skill_script",
+                pending=pending,
+                summary=summary,
+                mode=mode,
+            )
     except Exception as exc:
         logger.warning("WriteConfirm: persist ApprovalRequest failed: %s", exc)
     logger.info(
