@@ -65,6 +65,18 @@ class WysiwygDeliveryGateTests(SimpleTestCase):
         self.assertIn("deferred_self_heal", codes)
         self.assertIn("premature_checkout_ask", codes)
 
+    def test_reject_asking_user_to_confirm_derived_url(self):
+        text = (
+            "按规则推断商品中心：https://ps-local-test-svg-canvas-option-1113.a.callie.cc/\n"
+            "五、可推进的两条路径\n"
+            "路径 A：你补入口地址，或告知「按推导地址试」。\n"
+            "路径 B：授权生成 UI 自动化。\n"
+        )
+        r = evaluate_delivery_evidence(tool_results=[text], auth_scope={})
+        self.assertFalse(r["ok"])
+        codes = {b.get("blocker_code") for b in r.get("blockers") or []}
+        self.assertIn("deferred_derived_url", codes)
+
     def test_browser_playbook_requires_same_turn_heal(self):
         from orchestrator_integration.intent_router import (
             classify_user_intent,

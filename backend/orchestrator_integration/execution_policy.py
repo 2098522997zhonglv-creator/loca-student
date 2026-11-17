@@ -651,6 +651,25 @@ def evaluate_delivery_evidence(
         reasons.append("加购尚未成功时不得索要白名单邮箱或询问是否提交订单")
         blockers.append({"blocker_code": "premature_checkout_ask", "step": "autonomy"})
 
+    # 已能推导入口却停下来让用户选路径/确认推导地址 = 假自主
+    asked_derive_confirm = bool(
+        re.search(
+            r"(按推导地址试|是否按推导|请补.{0,12}入口|请提供.{0,12}(入口|账号|地址)|路径\s*[AB][:：]|可推进的两条路径)",
+            joined,
+        )
+        and re.search(
+            r"(推导|换算规则|推断为|ps-local-test-|callie-us-test-)",
+            joined,
+            re.I,
+        )
+    )
+    if asked_derive_confirm:
+        ok = False
+        reasons.append(
+            "已具备规则推导入口却停问用户确认/选路径；须同轮用浏览器打开推导地址实测"
+        )
+        blockers.append({"blocker_code": "deferred_derived_url", "step": "autonomy"})
+
     # RC22：证据 epoch 不匹配的旧 cart_id
     epoch_now = (
         int(evidence_epoch)

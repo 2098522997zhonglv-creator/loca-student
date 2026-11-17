@@ -98,19 +98,26 @@ def resolve_playbook(
             PLAYBOOK_TESTCASE_EXECUTE,
             "执行测试用例/自动化",
             steps=(
-                "禁止 knowledge_search / 知识库预检索与精排",
-                "同会话若已读过 ui-automation：直接 execute，不要再 read_skill_content",
-                "一条命令：python ui_automation_tools.py --action execute_testcase --testcase_id <N> --wait_result",
-                "成功后直接汇总结果；禁止紧跟 get_execution_records / create_ui_* / 知识沉淀",
-                "若用户还要求生成 UI 自动化：先汇报执行结果；写入由按钮确认，勿中途问「下一步」",
+                "同会话若已读过 ui-automation：直接查询/execute，不要再反复 read_skill_content",
+                "先 get_testcases / get_testcase 判断是否存在可跑的 UI 自动化用例",
+                "若有 UiTestCase：一条 execute_testcase --testcase_id <N> --wait_result；成功后直接汇总，禁止紧跟 get_execution_records",
+                "若 UI 用例/页面/步骤为 0：禁止只写「无法执行」结束；同轮改 playwright，按功能用例步骤对目标环境实测并交截图",
+                "入口 URL：知识库规则+分支名可推导则立刻 goto 实测（标注规则推导）；禁止问用户「是否按推导地址试」",
+                "若用户还要求生成 UI 自动化脚本：先完成浏览器实测汇报；create_ui_* 写入走确认按钮，勿中途问「下一步」",
             ),
             skip=(
-                "knowledge_search",
                 "workorder-knowledge",
                 "url-reader",
                 "未确认的 create_ui_*/set_case_steps",
+                "无 UI 用例就停问用户",
+                "假路径 A/B 等确认",
             ),
-            preferred_skills=("ui-automation", "loca-stude", "api-automation"),
+            preferred_skills=(
+                "ui-automation",
+                "playwright-skill",
+                "loca-stude",
+                "api-automation",
+            ),
         )
 
     if zone.zone_id == ZONE_BROWSER:
@@ -119,8 +126,9 @@ def resolve_playbook(
             "浏览器交互操作",
             steps=(
                 "先用知识库预检索/knowledge_search（最多 2 次）拿到入口 URL；禁止本机扫盘/读日志猜地址；入口已定则禁止再查库",
+                "知识库只有换算规则+分支名、没有现成 URL：自行推导域名并立刻 playwright goto 实测；标注「规则推导，页面验证中」；禁止问用户是否采用推导地址",
                 "预检索/知识库已给出分支域名或 PDP 链接时：禁止再 Escape Hatch 调 ui-automation 扫配置；立刻 playwright goto",
-                "禁止 url-reader；禁止用知识库结论代替真实页面结果",
+                "禁止 url-reader；禁止只用知识库结论交差——页面结果必须以本次浏览器观察为准",
                 "read_skill_content(playwright-skill)（同会话已读过可跳过）；禁止反复只读 Skill 不操作",
                 "用户要「所见即所得/传图」时：必须选带 Upload Photo 的商品；禁止改做刻字/戒指/仅填名字的品交差",
                 "默认短链（目标 ≤8 次工具调用完成加购）：goto 目标站 → 进所见即所得 PDP → Size/必填文本 → 传图成功 → Add To Cart → 交付 cart_id/角标",

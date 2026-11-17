@@ -714,18 +714,17 @@ def build_intent_hint(
     if kb_policy and kb_policy.reason == "testcase_execute":
         lines.extend(
             [
-                "- 本轮为「执行测试用例/自动化」：已跳过知识库预检索与精排；禁止调用 knowledge_search。",
-                "- 同一会话内：若历史已出现过对应 Skill 的 read_skill_content，本轮不要再读；直接 execute_skill_script。",
-                "- 首次需要说明时最多 read_skill_content 一次（ui-automation 或 loca-stude），随后只 execute。",
-                "- 执行命令优先一条搞定："
-                "python ui_automation_tools.py --action execute_testcase --testcase_id <N> --wait_result"
-                "（或平台等价 execute/run action）。execute/run 是只读执行，无需 user_confirmed。",
-                "- 成功后不要再紧跟 get_execution_records；仅当返回失败/timeout 且需要排查时，才查一次记录。",
-                "- 未明确要求「生成/创建 UI 自动化」时：禁止 create_ui_* / set_case_steps / add_testcase；只跑执行。",
-                "- 若用户同时要求生成 UI：先 execute_testcase 出结果；生成类写入须另问确认后再调（服务端会拦未确认写入）。",
-                "- 多条互相独立的只读/执行：用 commands + parallel=true；凡含写入或有先后依赖：parallel=false 串行。",
-                "- 同一命令失败后无差别重试不得超过 1 次；第二次仍失败则停止并原文汇报错误，不要换参连环试。",
-                "- 不要为「显得在干活」去 knowledge_search、重复 read_skill_content 或重复拉执行记录。",
+                "- 本轮为「执行/验证测试」：优先查 UI 自动化用例；有则一条 "
+                "execute_testcase --testcase_id <N> --wait_result（只读执行，无需确认）。",
+                "- 同一会话内：若历史已出现过对应 Skill 的 read_skill_content，本轮不要再读。",
+                "- 若 get_testcases/get_ui_pages 为空：禁止只汇报「无法执行」；同轮改 playwright-skill，"
+                "按功能用例步骤对目标环境实测并交截图。入口可用知识库规则+分支名推导后立刻 goto，"
+                "禁止问「是否按推导地址试 / 请补入口 / 选路径 A/B」。",
+                "- 成功后不要再紧跟 get_execution_records；仅失败/timeout 排查时查一次。",
+                "- 未明确要求「生成/创建 UI 自动化」时：禁止 create_ui_* / set_case_steps；"
+                "浏览器实测不属于写入。",
+                "- 多条互相独立的只读/执行：commands + parallel=true；有依赖则 parallel=false。",
+                "- 同一命令无差别重试不得超过 1 次；第二次仍失败则换浏览器实测或 blocked。",
             ]
         )
     elif kb_policy and kb_policy.reason in ("chitchat", "meta", "continue") and kb_active:
