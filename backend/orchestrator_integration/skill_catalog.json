@@ -152,6 +152,15 @@
         "search": "read",
         "upsert": "write"
       }
+    },
+    {
+      "name": "task-orchestrator",
+      "zones": ["general", "browser", "execute", "platform", "ticket_kb"],
+      "side_effect": "read",
+      "depends_on": [],
+      "timeout_sec": 60,
+      "idempotent": true,
+      "actions": {}
     }
   ]
 }

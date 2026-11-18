@@ -1509,61 +1509,157 @@ class AgentLoopStreamAPIView(View):
             from orchestrator_integration.stage_plan import (
                 build_stage_plan,
                 format_stage_plan_hint,
+                infer_auth_scope,
                 stage_mount_policy,
             )
+            from orchestrator_integration.task_orchestrator import (
+                apply_orchestrator_mount,
+                build_orchestrator_hint,
+                build_task_plan,
+                is_task_orchestrator_enabled,
+                plan_from_dict,
+                sync_plan_to_stage_specs,
+            )
+            from orchestrator_integration.task_orchestrator.flag import (
+                merge_strategy_into_facts,
+            )
 
-            _stage_specs = build_stage_plan(
-                _routing_message,
-                _early_decision,
-                playbook_id=active_playbook.playbook_id if active_playbook else "",
+            _prior_facts = (
+                dict(getattr(_prior_task, "facts", None) or {})
+                if _prior_task is not None
+                else {}
             )
-            # 补充/继续：沿用持久化阶段，避免 QA 立项覆盖浏览器验收口径
-            if _preserve_exec and _prior_task is not None:
-                prior_specs = stage_specs_from_prior(_prior_task)
-                if prior_specs:
-                    _stage_specs = prior_specs
-            _current_stage_id = (
-                (getattr(_prior_task, "current_stage", "") or "")
-                if _preserve_exec and _prior_task is not None
-                else ""
-            ) or (_stage_specs[0].stage_id if _stage_specs else "")
-            _stage_mount = stage_mount_policy(_stage_specs, _current_stage_id)
-            specialist_spec, specialist_hint_text, specialist_allow = (
-                run_specialist_prep(skill_zone, _routing_message)
+            _orch_enabled = is_task_orchestrator_enabled(
+                prior_facts=_prior_facts if _preserve_exec else None
             )
-            # 知识库与执行解耦：已授权未完成执行任务不得因 kb 开启被卸掉
-            mount_execute = (
-                skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
-            )
-            # 小工具面 = 任务主类（完整授权）；辅类需 Escape Hatch
-            skill_allowlist = task_commission.effective_allowlist()
-            if skill_allowlist is None and skill_zone.allow_execute:
-                skill_allowlist = skill_zone.effective_allowlist()
-            if _preserve_exec:
-                # 服务端有界重挂：恢复浏览器/阶段 Skill，并保留元工具纠正通道
-                restored = set(zone_skills(ZONE_BROWSER))
-                stage_skills = set(_stage_mount.get("skill_names") or [])
-                if stage_skills:
-                    restored |= stage_skills
-                if skill_allowlist is None:
-                    skill_allowlist = restored
-                else:
-                    skill_allowlist = set(skill_allowlist) | restored
-            elif not skill_zone.allow_execute and kb_qa_mode:
-                skill_allowlist = set()
-            if specialist_allow is not None and skill_allowlist is not None:
-                skill_allowlist = skill_allowlist & specialist_allow
-            elif specialist_allow is not None:
-                skill_allowlist = specialist_allow
-            # 复合任务：与当前阶段 Skill 能力求交（保留元工具路径）
-            if (
-                _stage_mount.get("restrict")
-                and skill_allowlist is not None
-                and not _preserve_exec
-            ):
-                stage_skills = set(_stage_mount.get("skill_names") or [])
-                if stage_skills:
-                    skill_allowlist = skill_allowlist & stage_skills or skill_allowlist
+            _orch_mount = None
+            _orch_plan = None
+
+            if _orch_enabled:
+                # 新编排：结构化计划 + 三层选择；禁止旧分区/specialist/阶段二次裁剪
+                _auth_scope0 = infer_auth_scope(_routing_message)
+                if _preserve_exec and isinstance(
+                    getattr(_prior_task, "auth_scope", None), dict
+                ):
+                    # 补充续跑：合并授权，不收缩已批准范围
+                    prior_auth = dict(_prior_task.auth_scope or {})
+                    for k in ("allow_actions", "deny_actions", "deliver_identifiers"):
+                        merged = list(
+                            dict.fromkeys(
+                                list(prior_auth.get(k) or [])
+                                + list(_auth_scope0.get(k) or [])
+                            )
+                        )
+                        _auth_scope0[k] = merged
+                    if prior_auth.get("requires_wysiwyg_upload"):
+                        _auth_scope0["requires_wysiwyg_upload"] = True
+                if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
+                    _orch_plan = plan_from_dict(_prior_facts.get("task_plan"))
+                if _orch_plan is None:
+                    _orch_plan = build_task_plan(
+                        _routing_message,
+                        _early_decision,
+                        task_id=getattr(task_commission, "task_id", None),
+                        prior_facts=_prior_facts if _preserve_exec else None,
+                        auth_scope=_auth_scope0,
+                    )
+                _activated_fb = set(
+                    (_prior_facts.get("activated_fallbacks") or [])
+                    if _preserve_exec
+                    else []
+                )
+                _orch_mount = apply_orchestrator_mount(
+                    _orch_plan, activated_fallbacks=_activated_fb
+                )
+                _stage_specs = sync_plan_to_stage_specs(_orch_plan)
+                _current_stage_id = _orch_plan.current_node or (
+                    _stage_specs[0].stage_id if _stage_specs else ""
+                )
+                _stage_mount = {
+                    "restrict": True,
+                    "skill_names": set(_orch_mount.skill_allowlist),
+                    "builtin_tools": set(_orch_mount.builtin_allow),
+                    "stage_id": _current_stage_id,
+                    "acceptance": "",
+                }
+                specialist_spec, specialist_hint_text, specialist_allow = (
+                    None,
+                    "",
+                    None,
+                )
+                mount_execute = (
+                    skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
+                )
+                skill_allowlist = set(_orch_mount.skill_allowlist)
+                if _preserve_exec:
+                    skill_allowlist |= set(zone_skills(ZONE_BROWSER))
+                elif not skill_zone.allow_execute and kb_qa_mode:
+                    skill_allowlist = set()
+                # 将一层 skill 并入 commission 主类，避免旧 _assert 仍按辅类拒
+                try:
+                    task_commission.primary_skills = frozenset(
+                        set(task_commission.primary_skills or []) | skill_allowlist
+                    )
+                    task_commission.granted_auxiliary = set(
+                        task_commission.granted_auxiliary or []
+                    ) | set(_activated_fb)
+                except Exception:
+                    pass
+            else:
+                _stage_specs = build_stage_plan(
+                    _routing_message,
+                    _early_decision,
+                    playbook_id=active_playbook.playbook_id if active_playbook else "",
+                )
+                # 补充/继续：沿用持久化阶段，避免 QA 立项覆盖浏览器验收口径
+                if _preserve_exec and _prior_task is not None:
+                    prior_specs = stage_specs_from_prior(_prior_task)
+                    if prior_specs:
+                        _stage_specs = prior_specs
+                _current_stage_id = (
+                    (getattr(_prior_task, "current_stage", "") or "")
+                    if _preserve_exec and _prior_task is not None
+                    else ""
+                ) or (_stage_specs[0].stage_id if _stage_specs else "")
+                _stage_mount = stage_mount_policy(_stage_specs, _current_stage_id)
+                specialist_spec, specialist_hint_text, specialist_allow = (
+                    run_specialist_prep(skill_zone, _routing_message)
+                )
+                # 知识库与执行解耦：已授权未完成执行任务不得因 kb 开启被卸掉
+                mount_execute = (
+                    skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
+                )
+                # 小工具面 = 任务主类（完整授权）；辅类需 Escape Hatch
+                skill_allowlist = task_commission.effective_allowlist()
+                if skill_allowlist is None and skill_zone.allow_execute:
+                    skill_allowlist = skill_zone.effective_allowlist()
+                if _preserve_exec:
+                    # 服务端有界重挂：恢复浏览器/阶段 Skill，并保留元工具纠正通道
+                    restored = set(zone_skills(ZONE_BROWSER))
+                    stage_skills = set(_stage_mount.get("skill_names") or [])
+                    if stage_skills:
+                        restored |= stage_skills
+                    if skill_allowlist is None:
+                        skill_allowlist = restored
+                    else:
+                        skill_allowlist = set(skill_allowlist) | restored
+                elif not skill_zone.allow_execute and kb_qa_mode:
+                    skill_allowlist = set()
+                if specialist_allow is not None and skill_allowlist is not None:
+                    skill_allowlist = skill_allowlist & specialist_allow
+                elif specialist_allow is not None:
+                    skill_allowlist = specialist_allow
+                # 复合任务：与当前阶段 Skill 能力求交（保留元工具路径）
+                if (
+                    _stage_mount.get("restrict")
+                    and skill_allowlist is not None
+                    and not _preserve_exec
+                ):
+                    stage_skills = set(_stage_mount.get("skill_names") or [])
+                    if stage_skills:
+                        skill_allowlist = (
+                            skill_allowlist & stage_skills or skill_allowlist
+                        )
 
             # 短路 ≠ 禁知识库。仅当剧本/策略显式禁止，或阶段能力未声明 KB 且非浏览器主链时才裁掉。
             stage_needs_kb = False
@@ -1571,10 +1667,18 @@ class AgentLoopStreamAPIView(View):
                 stage_needs_kb = (
                     "knowledge_search" in set(_stage_mount.get("builtin_tools") or [])
                     or str(_current_stage_id or "")
-                    in {"kb_research", "research", "browser_interact"}
+                    in {
+                        "kb_research",
+                        "research",
+                        "browser_interact",
+                        "fetch_conditions",
+                        "check_executable",
+                    }
                     or "knowledge" in set(_stage_mount.get("skill_names") or [])
                     or "knowledge_search"
                     in set(_stage_mount.get("skill_names") or [])
+                    or "knowledge_search"
+                    in set(_stage_mount.get("builtin_tools") or [])
                 )
             except Exception:
                 stage_needs_kb = False
@@ -1583,7 +1687,8 @@ class AgentLoopStreamAPIView(View):
                 and "knowledge_search" in set(getattr(active_playbook, "skip", ()) or ())
             )
             _has_kb_stage = any(
-                getattr(s, "stage_id", "") == "kb_research" for s in (_stage_specs or [])
+                getattr(s, "stage_id", "") in {"kb_research", "fetch_conditions"}
+                for s in (_stage_specs or [])
             )
             # 复合任务进入 browser_interact 后不再强制挂 KB，避免检索与操作交叉空转
             _browser_needs_kb = bool(
@@ -1747,16 +1852,24 @@ class AgentLoopStreamAPIView(View):
                 for mt in kept_meta:
                     if getattr(mt, "name", "") not in have:
                         tools.append(mt)
-            pb_hint = playbook_hint(active_playbook)
-            if pb_hint:
-                intent_hint = f"{intent_hint}\n\n{pb_hint}" if intent_hint else pb_hint
-            ch = commission_hint(task_commission)
-            intent_hint = f"{intent_hint}\n\n{ch}" if intent_hint else ch
-            stage_hint = format_stage_plan_hint(_stage_specs, _current_stage_id)
-            if stage_hint:
+            if _orch_mount is not None:
+                orch_hint = build_orchestrator_hint(_orch_mount)
                 intent_hint = (
-                    f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
+                    f"{intent_hint}\n\n{orch_hint}" if intent_hint else orch_hint
                 )
+            else:
+                pb_hint = playbook_hint(active_playbook)
+                if pb_hint:
+                    intent_hint = (
+                        f"{intent_hint}\n\n{pb_hint}" if intent_hint else pb_hint
+                    )
+                ch = commission_hint(task_commission)
+                intent_hint = f"{intent_hint}\n\n{ch}" if intent_hint else ch
+                stage_hint = format_stage_plan_hint(_stage_specs, _current_stage_id)
+                if stage_hint:
+                    intent_hint = (
+                        f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
+                    )
             # FR04.5：探测经 finalize 模块统一构造
             try:
                 from orchestrator_integration.agent_loop_finalize import (
@@ -1782,7 +1895,11 @@ class AgentLoopStreamAPIView(View):
             set_telemetry_context(
                 TelemetryContext(
                     zone=skill_zone.zone_id,
-                    playbook=active_playbook.playbook_id if active_playbook else "",
+                    playbook=(
+                        "task_orchestrator"
+                        if _orch_mount is not None
+                        else (active_playbook.playbook_id if active_playbook else "")
+                    ),
                     tools_mounted=mounted_names,
                     session_id=session_id or "",
                     user_id=request.user.id,
@@ -1796,6 +1913,7 @@ class AgentLoopStreamAPIView(View):
                     short_circuit=task_commission.short_circuit,
                     draft_writes=task_commission.draft_writes,
                     current_stage=_current_stage_id,
+                    orchestrator_mount=_orch_mount,
                 )
             )
             try:
@@ -1888,6 +2006,10 @@ class AgentLoopStreamAPIView(View):
                     allow -= deny
                     auth_scope["allow_actions"] = sorted(allow)
                     auth_scope["deny_actions"] = sorted(deny)
+                if _orch_mount is not None:
+                    auth_scope.update(_orch_mount.to_auth_scope_patch())
+                    # 预计业务节点写入 budget 友好字段（与工具调用次数分离）
+                    auth_scope["estimated_nodes"] = _orch_plan.estimated_nodes
                 agent_runtime = AgentRuntime()
                 runtime_task = await sync_to_async(agent_runtime.start)(
                     session=chat_session,
@@ -1903,6 +2025,33 @@ class AgentLoopStreamAPIView(View):
                     config_overrides=config_overrides,
                     resume_task_id=resume_task_id,
                 )
+                # 持久化编排计划与策略版本（在途任务回退依据）
+                if runtime_task is not None and _orch_plan is not None:
+                    try:
+
+                        def _persist_orch_plan():
+                            facts = merge_strategy_into_facts(
+                                dict(runtime_task.facts or {}),
+                                enabled=True,
+                            )
+                            facts["task_plan"] = _orch_plan.to_dict()
+                            facts["activated_fallbacks"] = sorted(
+                                _orch_mount.activated_fallbacks
+                                if _orch_mount
+                                else []
+                            )
+                            runtime_task.facts = facts
+                            if _orch_plan.current_node:
+                                runtime_task.current_stage = _orch_plan.current_node
+                            runtime_task.save(
+                                update_fields=["facts", "current_stage", "updated_at"]
+                            )
+
+                        await sync_to_async(_persist_orch_plan)()
+                    except Exception as orch_persist_err:
+                        logger.warning(
+                            "persist orchestrator plan failed: %s", orch_persist_err
+                        )
                 # R15：未获租约不得构造执行器/派发动作
                 if (
                     runtime_task is not None

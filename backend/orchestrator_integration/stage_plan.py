@@ -337,7 +337,18 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
     text = message or ""
     allow = []
     deny = []
-    if any(k in text for k in ("加购", "加入购物车", "Add To Cart", "add to cart")):
+    if any(
+        k in text
+        for k in (
+            "加购",
+            "加入购物车",
+            "放进购物车",
+            "加入购车",
+            "Add To Cart",
+            "add to cart",
+            "add_to_cart",
+        )
+    ):
         allow.append("add_to_cart")
     if any(k in text for k in ("上传", "传图", "Upload Photo", "upload")):
         allow.append("upload")
@@ -387,8 +398,19 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
 
     if (
         not deny_order
-        and any(k in text for k in ("提交订单", "下单", "结算", "拿 order_sn", "order_sn"))
-        and not _action_locally_denied(("提交订单", "下单", "结算"))
+        and any(
+            k in text
+            for k in (
+                "提交订单",
+                "提交测试订单",
+                "下单",
+                "结算",
+                "拿 order_sn",
+                "order_sn",
+                "给我订单号",
+            )
+        )
+        and not _action_locally_denied(("提交订单", "提交测试订单", "下单", "结算"))
     ):
         allow.append("submit_order")
     if (

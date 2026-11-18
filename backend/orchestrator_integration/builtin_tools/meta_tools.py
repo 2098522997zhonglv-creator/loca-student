@@ -16,20 +16,88 @@ def get_meta_tools() -> list:
 
     @langchain_tool
     def request_tool_expansion(skill_name: str, reason: str = "") -> str:
-        """申请扩展本轮辅类 Skill（Escape Hatch，每任务最多 1 次）。
+        """启用备用能力或（旧路径）申请辅类扩展。
 
-        仅当主类工具确实无法完成任务时调用。skill_name 必须落在任务立项的辅类清单内。
-        扩权用尽或 skill 不在辅类 → 应改为向用户说明并生成人工/草稿方案，禁止继续乱试。
+        新编排路径（task-orchestrator）：在已有授权内自动启用二层备用，不向用户扩权。
+        旧路径：Escape Hatch，每任务最多 1 次，skill 须在辅类清单内。
 
         Args:
-            skill_name: 要申请的辅类 Skill 名
-            reason: 简短原因（为何主类不够）
+            skill_name: 要启用的备用 / 辅类 Skill 名
+            reason: 简短原因（主工具失败、缺条件、核验等）
         """
         from orchestrator_integration.telemetry_context import get_telemetry_context
         from orchestrator_integration.tool_telemetry import record_tool_telemetry
 
         ctx = get_telemetry_context()
         commission = ctx.commission
+
+        # 新编排路径：request_tool_expansion 适配为二层自动启用（不另维护 Escape 授权）
+        orch = getattr(ctx, "orchestrator_mount", None)
+        if orch is not None:
+            from orchestrator_integration.task_orchestrator.runtime_bridge import (
+                try_activate_fallback_from_expansion,
+            )
+
+            ok, detail, new_mount = try_activate_fallback_from_expansion(
+                orch, skill_name, reason=reason or ""
+            )
+            record_tool_telemetry(
+                zone=ctx.zone,
+                playbook=ctx.playbook,
+                tool_name="request_tool_expansion",
+                skill_name=skill_name,
+                success=ok,
+                error_kind="" if ok else "fallback_denied",
+                attribution="planning",
+                tools_mounted=ctx.tools_mounted,
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+            )
+            if ok:
+                ctx.orchestrator_mount = new_mount
+                allow = set(new_mount.skill_allowlist)
+                ctx.granted_skills = set(allow)
+                if commission is not None:
+                    try:
+                        commission.granted_auxiliary = set(
+                            commission.granted_auxiliary or []
+                        ) | {skill_name}
+                        commission.primary_skills = frozenset(
+                            set(commission.primary_skills or []) | allow
+                        )
+                    except Exception:
+                        pass
+                logger.info(
+                    "[request_tool_expansion] orch L2 skill=%s reason=%s",
+                    skill_name,
+                    (reason or "")[:120],
+                )
+                return json.dumps(
+                    {
+                        "status": "granted",
+                        "layer": 2,
+                        "message": detail,
+                        "skill_name": skill_name,
+                        "effective_allowlist": sorted(allow),
+                        "note": "二层自动备用（已有授权内），非 Escape Hatch 扩权",
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "status": "denied",
+                    "layer": 2,
+                    "message": detail,
+                    "degrade": (
+                        "备用能力无法在已有授权内启用。"
+                        "若确需超授权动作，请说明对象与影响并等待三层批准；"
+                        "禁止换工具绕过拒绝。"
+                    ),
+                    "skill_name": skill_name,
+                },
+                ensure_ascii=False,
+            )
+
         if commission is None:
             msg = "当前无任务立项上下文，无法扩权。请在明确任务下重试。"
             record_tool_telemetry(

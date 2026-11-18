@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, List, Optional, Set
+from typing import TYPE_CHECKING, Any, List, Optional, Set
 
 if TYPE_CHECKING:
     from orchestrator_integration.task_commission import TaskCommission
@@ -24,6 +24,8 @@ class TelemetryContext:
     draft_writes: bool = False
     runtime_task_id: Optional[int] = None
     current_stage: str = ""
+    # task-orchestrator 挂载结果（三层选择）；旧路径为 None
+    orchestrator_mount: Any = None
 
 
 _CTX: ContextVar[Optional[TelemetryContext]] = ContextVar(

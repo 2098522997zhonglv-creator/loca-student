@@ -203,6 +203,12 @@ LANGGRAPH_CHECKPOINT_SQLITE_PATH = os.environ.get(
 )
 DJANGO_BASE_URL = os.environ.get("DJANGO_BASE_URL", "http://127.0.0.1:8000")
 
+# 任务编排三层工具选择（20261118）。关闭后新任务回退 zone/commission；
+# 在途任务以 facts.strategy_version 为准，不因开关切换重放写操作。
+TASK_ORCHESTRATOR_ENABLED = os.environ.get(
+    "TASK_ORCHESTRATOR_ENABLED", "true"
+).strip().lower() in ("1", "true", "yes", "on")
+
 # 知识库从 URL 拉文档时的 SSRF 策略。
 # 本产品多为局域网部署，默认允许私网；生产可设 KB_URL_ALLOW_PRIVATE=false，
 # 并用 KB_URL_HOST_ALLOWLIST=prototypes.netflying.net 按域名放行。
