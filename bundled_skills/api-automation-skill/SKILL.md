@@ -7,11 +7,14 @@ description: loca_stude 接口自动化管理工具。用于按真实后端接�
 
 ## 先遵守这些
 
-- **以当前代码为准**：动作清单以 `api_automation_tools.py` 的 `ACTIONS` 为准；字段语义以 Django 的 models/serializers/views 为准。不要按旧 skill 或记忆猜字段。
+- **以当前代码为准**：动作清单以 `api_automation_tools.py` 的 `ACTIONS` 为准（约 120 个，含 `run_interface` / `run_testcase` / `execute_task_suite`）；Skill Catalog 须与此同步。禁止再用旧名 `list_apis` / `run_api`（仅兼容别名）。
+- **服务可达性**：知识中心与接口自动化后端可能不是同一服务；endpoint 404 / 无执行器时标记该候选不可用并换路径，不得概括成「请再说执行」。
 - **先查后建**：创建模块、环境、接口、用例、套件前，先 `list_*` / `get_*`，避免重复。
 - **不要混用两个用例概念**：
   - **单接口用例**是 `ApiInterfaceCase`，接口路径是 `api-interface-cases`，CLI 动作用 `*_interface_case`。
   - **场景用例**是 `ApiTestCase`，接口路径是 `api-testcases`，CLI 动作用 `*_testcase`。
+- **本次执行标识**：`execute_task_suite` / `run_testcase` 等须保存返回的 `task_execution_id`／报告 ID；长时套件由 Runtime 等待同一 ID，查询仍为 running 时不得提前交付测试通过。
+- **调用成功 ≠ 测试通过**：HTTP 200、外层 `status=success` 或工具 succeeded，均不能直接当 `passed`；须看 validators / case-results。
 - **同步只支持场景步骤**：`ApiSyncConfig.step` 绑定的是 `ApiTestCaseStep`，不是 `ApiInterfaceCaseStep`。
 - **复杂 JSON 用文件**：`--payload "@payload.json"` 和 `--params "@params.json"` 都支持从文件读取 JSON。PowerShell 下必须给 `@文件` 加引号，否则会被当作 splatting 语法。
 - **所有动作返回 JSON**：成功通常是 `{"status":"success","data":...}`；失败是 `{"status":"error",...}`。

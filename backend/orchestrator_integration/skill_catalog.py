@@ -128,6 +128,15 @@ def action_looks_mutating(action: str) -> bool:
     return not bool(_READONLY_ACTION_PREFIX_RE.match((action or "").strip()))
 
 
+def _canonical_action(skill_name: Optional[str], action: str) -> str:
+    try:
+        from orchestrator_integration.skill_action_sync import resolve_action_alias
+
+        return resolve_action_alias(skill_name or "", action)
+    except Exception:
+        return (action or "").strip()
+
+
 def resolve_action_side_effect(
     skill_name: Optional[str], command: Optional[str]
 ) -> Optional[SideEffect]:
@@ -138,7 +147,10 @@ def resolve_action_side_effect(
     if entry and actions and entry.actions:
         levels = []
         for a in actions:
-            if a in entry.actions:
+            canon = _canonical_action(skill_name, a)
+            if canon in entry.actions:
+                levels.append(entry.actions[canon])
+            elif a in entry.actions:
                 levels.append(entry.actions[a])
             elif action_looks_mutating(a):
                 levels.append("write")
@@ -169,9 +181,13 @@ def catalog_reject_unregistered_write(
     actions = extract_command_actions(command)
     if not actions:
         return None
-    unknown_writes = [
-        a for a in actions if a not in entry.actions and action_looks_mutating(a)
-    ]
+    unknown_writes = []
+    for a in actions:
+        canon = _canonical_action(skill_name, a)
+        if canon in entry.actions or a in entry.actions:
+            continue
+        if action_looks_mutating(a):
+            unknown_writes.append(a)
     if not unknown_writes:
         return None
     registered = ", ".join(sorted(entry.actions))

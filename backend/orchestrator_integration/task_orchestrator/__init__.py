@@ -12,6 +12,11 @@ from orchestrator_integration.task_orchestrator.budget_presets import (
     count_testcase_refs,
     infer_plan_kind,
 )
+from orchestrator_integration.task_orchestrator.execution_refs import (
+    assert_same_execution,
+    bind_execution_ref,
+    make_case_ref,
+)
 from orchestrator_integration.task_orchestrator.capability_catalog import (
     CapabilitySummary,
     get_capability,
@@ -54,6 +59,9 @@ __all__ = [
     "build_layer_budget_preset",
     "count_testcase_refs",
     "infer_plan_kind",
+    "assert_same_execution",
+    "bind_execution_ref",
+    "make_case_ref",
     "CapabilitySummary",
     "get_capability",
     "list_capability_summaries",

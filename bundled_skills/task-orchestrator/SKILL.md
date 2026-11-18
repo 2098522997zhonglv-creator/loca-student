@@ -10,6 +10,16 @@ description: 任务编排：依据用户目标、持续有效授权与能力目�
 - 本轮指令、关联任务目标、已有授权与禁止项
 - 已确认事实、执行节点、已有产物、工具可用状态
 - 统一能力目录摘要（选中后再读完整参数 / Skill 正文）
+- 用例来源类型：`platform_testcase` / `ui_testcase` / `api_scenario` / `api_interface_case` / `temp_browser_script`（标识命名空间不混用）
+
+## 复杂测试编排要点
+
+1. **能力目录**：以 Skill 脚本真实 `--action` 为源（UI≈47、API≈120）；旧 Catalog 名经别名映射，失效名不得推荐。
+2. **服务探测**：UI / API / 浏览器 CLI 按实际 endpoint 与执行器可用性选择路径；缺失时交付具体缺口。
+3. **执行标识**：发起执行即绑定 `execution_id`／`record_id`／`task_execution_id`，等待与报告全程关联本次。
+4. **跨工具事实**：API 提取的对象 ID 原样写入 facts，浏览器节点引用同一值；禁止模型改写 token/订单号后再传递。
+5. **断言**：每项预期绑定节点与执行 ID；弱断言（URL 含 order、外层 success）不得判通过。
+6. **步数预设**：执行长链路使用一层预设 / 二层备用 / 三层批准预留（见 budget_presets）；预计业务节点 ≠ 工具调用上限。
 
 ## 三层规则
 

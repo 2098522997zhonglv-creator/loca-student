@@ -371,21 +371,65 @@ def _build_nodes(
     )
     platform_write = INTENT_WRITE in decision.intents and INTENT_PLATFORM in decision.intents
 
+    apiish = any(
+        k in text
+        for k in (
+            "接口",
+            "api",
+            "API",
+            "场景用例",
+            "task_suite",
+            "套件",
+            "run_interface",
+        )
+    )
+
     # 用例执行路径优先：即使话术带「浏览器实测」，也走执行计划（浏览器在二层备用）
-    if executeish:
-        return [
+    if executeish or (apiish and any(k in text for k in ("执行", "跑", "断言", "回归"))):
+        nodes: List[PlanNode] = [
             PlanNode(
                 node_id="query_cases",
-                goal="查询可执行 UI/功能用例与环境配置",
-                primary_candidates=["ui-automation", "loca-stude", "execute_skill_script"],
+                goal="区分来源类型并查询可执行用例/环境（平台/UI/API 标识不混用）",
+                primary_candidates=[
+                    "ui-automation",
+                    "loca-stude",
+                    "api-automation",
+                    "execute_skill_script",
+                ],
                 fallback_candidates=["knowledge_search", "read_skill_content"],
-                output_keys=["testcase_id", "env_base_url"],
-                completion_checks=["已确认有无 UiTestCase 或功能用例步骤"],
+                output_keys=["case_ref", "testcase_id", "env_base_url", "source_type"],
+                completion_checks=[
+                    "已确认来源类型与可执行方式；无 UiTestCase 时记录可转临时浏览器脚本"
+                ],
             ),
+        ]
+        if apiish:
+            nodes.append(
+                PlanNode(
+                    node_id="api_prepare_or_run",
+                    goal="接口准备数据或执行场景/单接口；绑定本次 task_execution_id",
+                    depends_on=["query_cases"],
+                    primary_candidates=["api-automation", "execute_skill_script"],
+                    fallback_candidates=["loca-stude", "request_executor_heal"],
+                    output_keys=[
+                        "execution_id",
+                        "task_execution_id",
+                        "object_id",
+                        "extracted_vars",
+                    ],
+                    completion_checks=[
+                        "返回本次执行标识；外层 success 不等于测试 passed；断言结果可核验"
+                    ],
+                )
+            )
+            run_dep = ["api_prepare_or_run"]
+        else:
+            run_dep = ["query_cases"]
+        nodes.append(
             PlanNode(
                 node_id="run_or_browser",
-                goal="有 UI 用例则执行；否则浏览器按步骤实测（二层备用）",
-                depends_on=["query_cases"],
+                goal="有 UI 用例则 execute_testcase（关联本次 record_id）；否则浏览器按步骤实测",
+                depends_on=list(run_dep),
                 primary_candidates=[
                     "ui-automation",
                     "playwright-skill",
@@ -396,19 +440,32 @@ def _build_nodes(
                     "request_executor_heal",
                     "knowledge_search",
                 ],
-                output_keys=["execution_result", "screenshots"],
-                completion_checks=["返回真实执行结果或页面观察证据"],
-            ),
+                input_refs=["case_ref", "object_id", "extracted_vars"],
+                output_keys=["execution_id", "record_id", "screenshots", "page_facts"],
+                completion_checks=[
+                    "查询/报告只含本次 execution_id／record_id；有真实断言与证据"
+                ],
+            )
+        )
+        nodes.append(
             PlanNode(
-                node_id="deliver",
-                goal="汇总通过/失败与证据",
+                node_id="assert_and_deliver",
+                goal="逐项业务断言并交付；区分产品缺陷/环境/工具问题",
                 depends_on=["run_or_browser"],
-                primary_candidates=["assert_task_postcondition"],
-                fallback_candidates=["report_task_blocked"],
-                output_keys=["summary"],
-                completion_checks=["交付状态与证据，无伪造成功"],
-            ),
-        ]
+                primary_candidates=[
+                    "playwright-skill",
+                    "api-automation",
+                    "assert_task_postcondition",
+                ],
+                fallback_candidates=["ui-automation", "report_task_blocked"],
+                input_refs=["execution_id", "record_id", "order_sn", "cart_id"],
+                output_keys=["assertions", "summary"],
+                completion_checks=[
+                    "每项预期有实际值与比较结果；禁止弱断言假通过；未取得字段标明原因"
+                ],
+            )
+        )
+        return nodes
 
     # 浏览器下单参考路径（需求 §5）
     if browserish:

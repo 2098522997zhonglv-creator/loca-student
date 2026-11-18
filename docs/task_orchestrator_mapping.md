@@ -28,3 +28,14 @@
 | task_commission 主辅 + Escape | 新路径由三层选择替代；`request_tool_expansion` 适配为二层自动启用 |
 | stage_plan | 由 TaskPlan 节点同步生成，节点完成后真实刷新工具集合 |
 | domain_specialists | 新路径跳过求交 |
+| skill_catalog UI/API 动作 | 以 `skill_action_sync` 从脚本同步（D01/D02）；旧名经别名映射 |
+| 执行结果关联 | `execution_refs` 绑定本次 execution_id/record_id，禁止最新记录串用 |
+
+## 复杂用例 Skill 能力清单（20261118）
+
+| Skill | 优化要点 |
+|---|---|
+| task-orchestrator | 来源类型、执行标识、跨工具事实、断言节点、三层步数 |
+| ui-automation | 真实 47 动作入 Catalog；playwright 主浏览器；本次 record_id |
+| api-automation | 真实 120 动作入 Catalog；task_execution_id；success≠passed |
+| playwright-skill | 业务断言/证据表；主浏览器；禁止弱断言 |

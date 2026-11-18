@@ -115,10 +115,19 @@ def load_capability_catalog(version_token: str = "v1") -> Dict[str, CapabilityDe
     skill_cat = load_skill_catalog()
     for name, entry in (skill_cat.skills or {}).items():
         actions = tuple(sorted((entry.actions or {}).keys()))
+        purpose = f"Skill「{name}」域能力"
+        if name == "ui-automation":
+            purpose = "结构化 UI 用例构建与在线执行（动作以 ui_automation_tools 为准）"
+        elif name == "api-automation":
+            purpose = "接口定义/场景/套件执行（动作以 api_automation_tools ACTIONS 为准）"
+        elif name == "playwright-skill":
+            purpose = "主浏览器交互、上传、截图与业务断言取证"
+        elif name == "task-orchestrator":
+            purpose = "任务编排：计划、三层选工具、连续调度与交付"
         catalog[name] = CapabilityDetail(
             capability_id=name,
             source="skill",
-            purpose=f"Skill「{name}」域能力",
+            purpose=purpose,
             when=f"zones={','.join(entry.zones or ())}",
             side_effect=str(entry.side_effect or "unknown"),
             available=True,
@@ -127,11 +136,12 @@ def load_capability_catalog(version_token: str = "v1") -> Dict[str, CapabilityDe
             zones=tuple(entry.zones or ()),
             actions=actions,
             inputs=["command", "action"],
-            outputs="Skill 脚本结果",
+            outputs="Skill 脚本结果；执行类须含本次 execution_id/record_id",
             retry_policy=str(getattr(entry, "retry_policy", "") or ""),
             raw={
                 "timeout_sec": getattr(entry, "timeout_sec", None),
                 "depends_on": list(getattr(entry, "depends_on", None) or []),
+                "action_count": len(actions),
             },
         )
 

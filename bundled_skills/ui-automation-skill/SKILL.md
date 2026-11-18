@@ -1,9 +1,18 @@
 ---
 name: ui-automation
-description: loca_stude UI 自动化管理工具。用于创建、编辑、删除 UI 测试模块、页面、元素、页面步骤和测试用例。支持执行记录查询和错误分析。当需要将浏览器技能获取到的页面元素保存到平台、创建 UI 自动化用例、执行测试或分析执行结果时使用。元素采集默认优先 browser-use，无法覆盖时再用 playwright-skill 兜底。
+description: loca_stude UI 自动化管理工具。用于创建、编辑、删除 UI 测试模块、页面、元素、页面步骤和测试用例。支持执行记录查询和错误分析。当需要将浏览器技能获取到的页面元素保存到平台、创建 UI 自动化用例、执行测试或分析执行结果时使用。浏览器主执行优先 playwright-skill；browser-use / playwright-cli 仅作已授权等价备用。
 ---
 
 # loca_stude UI 自动化管理
+
+## 复杂执行强制规则（与 task-orchestrator 对齐）
+
+1. **来源类型**：`UiTestCase` ≠ loca-stude 功能用例 ≠ API 场景用例；`testcase_id` 不可跨类型混用。
+2. **动作以脚本为准**：`--action` 必须以 `ui_automation_tools.py` 内 `actions` 字典为准（含 `create_page_step` / `set_step_details` / `execute_testcase` 等）。Catalog 已同步真实动作；旧名 `get_ui_cases` 等仅作别名。
+3. **本次执行标识**：`execute_testcase` 受理后立即记录 `record_id` / `execution_id`；后续 `get_execution_record` / Trace / 报告必须带本次 ID，禁止「超时后取该用例最新记录」交差（防并发串用）。
+4. **调用成功 ≠ 测试通过**：CLI 退出 0 或工具 `succeeded` 只表示受理；须等本次记录终态与断言后再判 `passed/failed/error/skipped`。
+5. **临时实测**：无结构化 UI 用例时，用 playwright 按功能步骤实测并交证据；需要回归时再沉淀页面/元素/步骤，勿每次先全量 create。
+6. **未支持步骤类型**：条件/动态变量/Python 步骤若执行器未打通，执行前明确报不支持，禁止静默跳过或伪装成定位失败。
 
 ## 生命周期概览
 
@@ -62,9 +71,9 @@ python ui_automation_tools.py --action <action_name> [--参数名 参数值]
 
 ### 技术路线优先级
 
-1. 默认使用 `browser-use` 进行页面访问、元素抓取与识别（CDP / 可访问性树）。
-2. 仅当 `browser-use` 无法稳定获取目标元素时，才使用 `playwright-skill` 兜底。
-3. `ui-automation-skill` 负责将已确认的元素表达式入库并组装步骤/用例。
+1. 默认使用 `playwright-skill` 进行页面访问、元素抓取、交互与截图（与 Runtime 主浏览器一致）。
+2. 主工具失败且任务已授权时，二层自动备用 `playwright-cli` / `browser-use`（须探测可用，不能只读说明）。
+3. `ui-automation-skill` 负责将已确认的元素表达式入库并组装步骤/用例；执行走在线执行器。
 
 ### 元素表达式质量标准（必须满足）
 
