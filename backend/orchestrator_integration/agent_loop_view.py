@@ -4379,6 +4379,37 @@ class AgentLoopResumeAPIView(View):
                     server_executed.get("ok"),
                     server_executed.get("error_code"),
                 )
+                # L3：写确认批准同步到 task_plan.pending_auth
+                try:
+                    if runtime_task is not None:
+                        from orchestrator_integration.task_orchestrator.gates import (
+                            apply_l3_approval_to_task,
+                        )
+                        from orchestrator_integration.task_orchestrator.node_runtime import (
+                            apply_remount_to_context,
+                        )
+
+                        pending_cmds = pending_body.get("commands") or []
+                        targets = []
+                        for c in pending_cmds if isinstance(pending_cmds, list) else []:
+                            if isinstance(c, dict):
+                                t = c.get("action") or c.get("target") or ""
+                                if t:
+                                    targets.append(str(t))
+                        # 常见：提交订单等写动作
+                        if not targets and isinstance(
+                            pending_body.get("action"), str
+                        ):
+                            targets = [pending_body["action"]]
+                        l3 = await sync_to_async(apply_l3_approval_to_task)(
+                            runtime_task,
+                            approve=True,
+                            targets=targets or None,
+                        )
+                        if l3.get("remount_skills"):
+                            apply_remount_to_context(l3.get("remount_skills") or [])
+                except Exception as l3_err:
+                    logger.debug("L3 approval sync skipped: %s", l3_err)
                 # 落库完成后即可向用户收口；后续 LLM 摘要失败也不应回滚已写入
                 if server_executed.get("ok"):
                     try:

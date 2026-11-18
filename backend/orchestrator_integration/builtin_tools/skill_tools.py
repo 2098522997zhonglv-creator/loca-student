@@ -819,6 +819,20 @@ def _finalize_skill_result(
                                     tool_succeeded=tr.status
                                     in {"succeeded", "success", "ok"},
                                 )
+                                # 跨工具对象 ID 原样核对
+                                try:
+                                    from orchestrator_integration.task_orchestrator.gates import (
+                                        assert_cross_tool_object_ids,
+                                    )
+
+                                    cross_err = assert_cross_tool_object_ids(
+                                        dict(task.facts or {}), raw_text
+                                    )
+                                    if cross_err:
+                                        note = (note + "；" if note else "") + cross_err
+                                        setattr(tr, "_cross_tool_error", cross_err)
+                                except Exception:
+                                    pass
                                 task.facts = facts
                                 task.save(update_fields=["facts", "updated_at"])
                                 if note:
@@ -922,6 +936,9 @@ def _finalize_skill_result(
             note = getattr(tr, "_execution_note", None)
             if note:
                 out_text = f"{out_text}\n\n[execution_ref] {note}"
+            cross_err = getattr(tr, "_cross_tool_error", None)
+            if cross_err:
+                out_text = f"{out_text}\n\n[cross_tool_id] {cross_err}"
             adv = getattr(tr, "_stage_advanced", None)
             if isinstance(adv, dict) and adv.get("advanced"):
                 out_text = (
@@ -2284,6 +2301,57 @@ def get_skill_tools(
                 result_text=catalog_block,
             )
             return catalog_block
+
+        # 编排硬门禁：当前节点 input_refs / 跨工具 ID
+        try:
+            from orchestrator_integration.telemetry_context import (
+                get_telemetry_context as _gctx,
+            )
+            from orchestrator_integration.task_orchestrator.gates import (
+                check_input_refs,
+            )
+            from orchestrator_integration.task_orchestrator.plan import (
+                plan_from_dict as _pfd,
+            )
+
+            _ctxg = _gctx()
+            _task = None
+            if getattr(_ctxg, "runtime_task_id", None):
+                try:
+                    from orchestrator_integration.models import AgentTask as _AT
+
+                    _task = _AT.objects.filter(pk=_ctxg.runtime_task_id).first()
+                except Exception:
+                    _task = None
+            if _task is not None:
+                _facts = dict(_task.facts or {})
+                if isinstance(_facts.get("task_plan"), dict):
+                    _plan = _pfd(_facts["task_plan"])
+                    _node = _plan.current()
+                    _gate = check_input_refs(_plan, _node, _facts)
+                    if _gate and any(
+                        k in (command or "").lower()
+                        for k in (
+                            "execute_testcase",
+                            "run_interface",
+                            "run_scenario",
+                            "execute",
+                        )
+                    ):
+                        logger.info("[execute_skill_script] input_refs 门禁: %s", _gate)
+                        _emit_telemetry(
+                            tool_name="execute_skill_script",
+                            skill_name=skill_name,
+                            success=False,
+                            error_kind="input_refs_blocked",
+                            result_text=_gate,
+                        )
+                        return json.dumps(
+                            {"status": "error", "message": _gate, "gate": "input_refs"},
+                            ensure_ascii=False,
+                        )
+        except Exception as _gate_err:
+            logger.debug("orch input_refs gate skipped: %s", _gate_err)
 
         priv = reject_zone_privilege_escalation(
             zone_id=_zone_id(),

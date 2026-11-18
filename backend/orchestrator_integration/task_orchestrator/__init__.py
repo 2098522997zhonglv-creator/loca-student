@@ -49,6 +49,7 @@ from orchestrator_integration.task_orchestrator.runtime_bridge import (
     advance_plan_node,
     apply_orchestrator_mount,
     build_orchestrator_hint,
+    mark_pending_approval,
     sync_plan_to_stage_specs,
 )
 from orchestrator_integration.task_orchestrator.node_runtime import (
@@ -57,6 +58,12 @@ from orchestrator_integration.task_orchestrator.node_runtime import (
     extract_execution_ids,
     merge_ids_into_facts,
     orch_node_acceptance,
+)
+from orchestrator_integration.task_orchestrator.gates import (
+    apply_l3_approval_to_task,
+    assert_cross_tool_object_ids,
+    check_input_refs,
+    reject_weak_assertions,
 )
 
 __all__ = [
@@ -96,4 +103,9 @@ __all__ = [
     "extract_execution_ids",
     "merge_ids_into_facts",
     "orch_node_acceptance",
+    "mark_pending_approval",
+    "apply_l3_approval_to_task",
+    "assert_cross_tool_object_ids",
+    "check_input_refs",
+    "reject_weak_assertions",
 ]

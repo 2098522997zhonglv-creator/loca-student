@@ -29,12 +29,33 @@ from orchestrator_integration.task_orchestrator.runtime_bridge import (
 
 
 _ID_PATTERNS = (
-    ("record_id", re.compile(r'"record_id"\s*:\s*(\d+)', re.I)),
-    ("execution_id", re.compile(r'"execution_id"\s*:\s*"([^"]+)"', re.I)),
-    ("task_execution_id", re.compile(r'"task_execution_id"\s*:\s*"?([^",}\s]+)"?', re.I)),
-    ("testcase_id", re.compile(r'"testcase_id"\s*:\s*(\d+)', re.I)),
-    ("case_id", re.compile(r'"case_id"\s*:\s*(\d+)', re.I)),
-    ("object_id", re.compile(r'"object_id"\s*:\s*"?([^",}\s]+)"?', re.I)),
+    ("record_id", re.compile(r'"record_id"\s*:\s*(\d+)|record_id\s*[:=]\s*(\d+)', re.I)),
+    (
+        "execution_id",
+        re.compile(
+            r'"execution_id"\s*:\s*"([^"]+)"|execution_id\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
+    (
+        "task_execution_id",
+        re.compile(
+            r'"task_execution_id"\s*:\s*"?([^",}\s]+)"?|task_execution_id\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
+    (
+        "testcase_id",
+        re.compile(r'"testcase_id"\s*:\s*(\d+)|testcase_id\s*[:=]\s*(\d+)', re.I),
+    ),
+    ("case_id", re.compile(r'"case_id"\s*:\s*(\d+)|case_id\s*[:=]\s*(\d+)', re.I)),
+    (
+        "object_id",
+        re.compile(
+            r'"object_id"\s*:\s*"?([^",}\s]+)"?|object_id\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
 )
 
 
@@ -95,7 +116,9 @@ def extract_execution_ids(text: str) -> Dict[str, Any]:
         if key not in out:
             m = pat.search(text or "")
             if m:
-                out[key] = m.group(1)
+                val = next((g for g in m.groups() if g is not None), None)
+                if val is not None:
+                    out[key] = int(val) if key.endswith("_id") and str(val).isdigit() else val
     return out
 
 
@@ -356,6 +379,37 @@ def advance_orchestrator_on_task(
         }
 
     from_id = cur.node_id
+    # 推进前：若下一节点缺少 input_refs，硬拦（force 可越过）
+    if verdict.get("ok") and not failed and not force:
+        try:
+            from orchestrator_integration.task_orchestrator.gates import (
+                check_input_refs,
+            )
+
+            probe = advance_plan_node(
+                plan_from_dict(plan.to_dict()),
+                accepted=True,
+                failed=False,
+            )
+            nxt_probe = probe.current()
+            if nxt_probe and nxt_probe.node_id != from_id:
+                gate_err = check_input_refs(probe, nxt_probe, facts)
+                if gate_err:
+                    AgentTask.objects.filter(pk=task.pk).update(
+                        facts=facts, updated_at=timezone.now()
+                    )
+                    task.facts = facts
+                    return {
+                        "advanced": False,
+                        "current_stage": from_id,
+                        "reason": "input_refs_blocked",
+                        "verdict": verdict,
+                        "gate_error": gate_err,
+                        "note": note,
+                    }
+        except Exception:
+            pass
+
     plan = advance_plan_node(
         plan, accepted=bool(verdict.get("ok") or force), failed=failed
     )
