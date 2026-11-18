@@ -1555,6 +1555,15 @@ class AgentLoopStreamAPIView(View):
                         _auth_scope0["requires_wysiwyg_upload"] = True
                 if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
                     _orch_plan = plan_from_dict(_prior_facts.get("task_plan"))
+                    # 与 DB current_stage 对齐，避免 facts 滞后导致挂载停在首节点
+                    _db_stage = str(
+                        getattr(_prior_task, "current_stage", "") or ""
+                    )
+                    if _orch_plan is not None and _db_stage:
+                        for _n in _orch_plan.nodes:
+                            if _n.node_id == _db_stage:
+                                _orch_plan.current_node = _db_stage
+                                break
                 if _orch_plan is None:
                     _orch_plan = build_task_plan(
                         _routing_message,
@@ -1575,12 +1584,17 @@ class AgentLoopStreamAPIView(View):
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
                 )
+                _cur_node = _orch_plan.current()
                 _stage_mount = {
                     "restrict": True,
                     "skill_names": set(_orch_mount.skill_allowlist),
                     "builtin_tools": set(_orch_mount.builtin_allow),
                     "stage_id": _current_stage_id,
-                    "acceptance": "",
+                    "acceptance": (
+                        "; ".join(_cur_node.completion_checks or [])
+                        if _cur_node
+                        else ""
+                    ),
                 }
                 specialist_spec, specialist_hint_text, specialist_allow = (
                     None,

@@ -26,10 +26,11 @@
 |---|---|
 | skill_zones / playbooks | 保留快速识别与权限约束；新路径不再用其结果二次裁剪挂载 |
 | task_commission 主辅 + Escape | 新路径由三层选择替代；`request_tool_expansion` 适配为二层自动启用 |
-| stage_plan | 由 TaskPlan 节点同步生成，节点完成后真实刷新工具集合 |
+| stage_plan | 由 TaskPlan 节点同步生成；节点完成后 `advance_orchestrator_on_task` 写回 `facts.task_plan` 并同轮扩权下一节点 Skill |
 | domain_specialists | 新路径跳过求交 |
 | skill_catalog UI/API 动作 | 以 `skill_action_sync` 从脚本同步（D01/D02）；旧名经别名映射 |
-| 执行结果关联 | `execution_refs` 绑定本次 execution_id/record_id，禁止最新记录串用 |
+| 执行结果关联 | Skill 返回后 `bind_execution_ref` 写入 facts；禁止最新记录串用 |
+| 主流程失败清理 | `advance_plan_node(failed=True)` 仍调度 `cleanup_data`（R12） |
 
 ## 复杂用例 Skill 能力清单（20261118）
 

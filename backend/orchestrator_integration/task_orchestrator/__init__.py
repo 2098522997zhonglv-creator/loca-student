@@ -51,6 +51,13 @@ from orchestrator_integration.task_orchestrator.runtime_bridge import (
     build_orchestrator_hint,
     sync_plan_to_stage_specs,
 )
+from orchestrator_integration.task_orchestrator.node_runtime import (
+    advance_orchestrator_on_task,
+    apply_remount_to_context,
+    extract_execution_ids,
+    merge_ids_into_facts,
+    orch_node_acceptance,
+)
 
 __all__ = [
     "STRATEGY_VERSION",
@@ -84,4 +91,9 @@ __all__ = [
     "apply_orchestrator_mount",
     "build_orchestrator_hint",
     "sync_plan_to_stage_specs",
+    "advance_orchestrator_on_task",
+    "apply_remount_to_context",
+    "extract_execution_ids",
+    "merge_ids_into_facts",
+    "orch_node_acceptance",
 ]

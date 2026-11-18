@@ -786,6 +786,10 @@ def _finalize_skill_result(
                             record_step_result,
                         )
                         from orchestrator_integration.models import AgentTask
+                        from orchestrator_integration.task_orchestrator.node_runtime import (
+                            extract_execution_ids,
+                            merge_ids_into_facts,
+                        )
 
                         task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
                         if task is not None:
@@ -802,6 +806,64 @@ def _finalize_skill_result(
                                 summary=step_summary,
                                 stage_id=ctx.current_stage or "",
                             )
+                            # 绑定本次 execution_id/record_id 到 facts（禁止后续串用最新记录）
+                            raw_text = (
+                                compact if isinstance(compact, str) else str(compact)
+                            )
+                            ids = extract_execution_ids(raw_text)
+                            if ids:
+                                facts, note = merge_ids_into_facts(
+                                    dict(task.facts or {}),
+                                    ids,
+                                    skill_name=skill_name or "",
+                                    tool_succeeded=tr.status
+                                    in {"succeeded", "success", "ok"},
+                                )
+                                task.facts = facts
+                                task.save(update_fields=["facts", "updated_at"])
+                                if note:
+                                    tr.data = dict(tr.data or {})
+                                    tr.data["execution_note"] = note
+                                    # 附加到工具文本，避免模型把 succeeded 当 passed
+                                    #（classify 后再拼；见下方 return 路径）
+                                    setattr(tr, "_execution_note", note)
+                            # 编排：工具返回后尝试推进节点并同轮扩权下一节点 Skill
+                            try:
+                                from orchestrator_integration.task_orchestrator.flag import (
+                                    STRATEGY_VERSION as _SV,
+                                )
+                                from orchestrator_integration.task_orchestrator.node_runtime import (
+                                    advance_orchestrator_on_task,
+                                    apply_remount_to_context,
+                                )
+
+                                task.refresh_from_db()
+                                _facts = dict(task.facts or {})
+                                if (
+                                    _facts.get("strategy_version") == _SV
+                                    and isinstance(_facts.get("task_plan"), dict)
+                                ):
+                                    _results = list(
+                                        getattr(commission, "last_tool_results", None)
+                                        or []
+                                    ) or [raw_text]
+                                    orch = advance_orchestrator_on_task(
+                                        task, tool_results=_results
+                                    )
+                                    if orch.get("remount_skills"):
+                                        apply_remount_to_context(
+                                            orch.get("remount_skills") or []
+                                        )
+                                    if orch.get("advanced"):
+                                        setattr(tr, "_stage_advanced", orch)
+                                        ctx.current_stage = (
+                                            orch.get("current_stage")
+                                            or ctx.current_stage
+                                        )
+                            except Exception as orch_adv_err:
+                                logger.debug(
+                                    "orch mid-turn advance skipped: %s", orch_adv_err
+                                )
                     except Exception as step_err:
                         logger.debug("record_step_result 失败: %s", step_err)
                 # FR06：失败/unknown 附加集中重试与核对提示
@@ -856,7 +918,18 @@ def _finalize_skill_result(
                         pass
             except Exception:
                 pass
-            return tr.to_tool_text()
+            out_text = tr.to_tool_text()
+            note = getattr(tr, "_execution_note", None)
+            if note:
+                out_text = f"{out_text}\n\n[execution_ref] {note}"
+            adv = getattr(tr, "_stage_advanced", None)
+            if isinstance(adv, dict) and adv.get("advanced"):
+                out_text = (
+                    f"{out_text}\n\n[stage_advanced] "
+                    f"{adv.get('from_stage')} → {adv.get('current_stage')}; "
+                    f"remount={','.join(adv.get('remount_skills') or []) or '(none)'}"
+                )
+            return out_text
         except Exception as exc:
             logger.debug("ToolResult 适配失败，回退原文: %s", exc)
 

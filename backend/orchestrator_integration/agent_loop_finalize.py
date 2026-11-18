@@ -76,6 +76,16 @@ def maybe_advance_and_events(
     if session.runtime.task is None:
         return events
     adv = session.runtime.maybe_advance(tool_results)
+    # 即便未推进，编排路径也可能已绑定 execution_ref / 写回 facts
+    try:
+        from orchestrator_integration.task_orchestrator.node_runtime import (
+            apply_remount_to_context,
+        )
+
+        if adv.get("remount_skills"):
+            apply_remount_to_context(adv.get("remount_skills") or [])
+    except Exception:
+        pass
     if not adv.get("advanced"):
         return events
     events.append(

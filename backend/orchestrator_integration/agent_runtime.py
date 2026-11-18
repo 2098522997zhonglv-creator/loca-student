@@ -1683,6 +1683,30 @@ def stage_acceptance_heuristic(
                         "stage_id": sid,
                     }
 
+    # 编排节点（prepare/run/cleanup 等）优先走专用启发
+    if sid in {
+        "query_cases",
+        "prepare_data",
+        "api_prepare_or_run",
+        "run_or_browser",
+        "assert_and_deliver",
+        "cleanup_data",
+        "fetch_conditions",
+        "check_executable",
+        "add_to_cart",
+        "submit_order",
+        "upload",
+        "deliver",
+    }:
+        try:
+            from orchestrator_integration.task_orchestrator.node_runtime import (
+                orch_node_acceptance,
+            )
+
+            return orch_node_acceptance(sid, tool_results)
+        except Exception:
+            pass
+
     ok = False
     reason = ""
     if sid in {"kb_research", "single"} and (
@@ -1769,6 +1793,42 @@ def advance_task_stage(
             "reason": "task_terminal",
             "status": task.status,
         }
+
+    # 编排路径：同步 TaskPlan.current_node + 同轮 Skill 扩权
+    facts0 = dict(getattr(task, "facts", None) or {})
+    auth0 = dict(getattr(task, "auth_scope", None) or {})
+    strategy = (
+        str(facts0.get("strategy_version") or auth0.get("strategy_version") or "")
+    )
+    if strategy == "task_orchestrator_v1" and isinstance(facts0.get("task_plan"), dict):
+        try:
+            from orchestrator_integration.task_orchestrator.node_runtime import (
+                advance_orchestrator_on_task,
+                apply_remount_to_context,
+            )
+
+            joined = "\n".join(str(x) for x in (tool_results or []) if x)
+            hard_fail = any(
+                m in joined
+                for m in ("前置SQL失败", "不支持的步骤类型", "已阻止执行")
+            ) and not any(
+                k in joined for k in ("record_id", "execution_id", "终态")
+            )
+            orch = advance_orchestrator_on_task(
+                task,
+                tool_results=tool_results,
+                force=force,
+                failed=hard_fail,
+            )
+            if orch.get("remount_skills"):
+                apply_remount_to_context(orch.get("remount_skills") or [])
+            return orch
+        except Exception as orch_err:
+            import logging
+
+            logging.getLogger("orchestrator_integration").warning(
+                "orchestrator advance failed, fallback stage_plan: %s", orch_err
+            )
 
     stages_raw = list(task.stage_plan or [])
     if len(stages_raw) <= 1:

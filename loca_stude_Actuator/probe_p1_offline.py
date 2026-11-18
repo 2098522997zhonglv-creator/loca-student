@@ -266,6 +266,45 @@ def main() -> int:
         "UiExecutionRecord.objects.get(id=record_id)" in cons,
     )
 
+    # --- orch runtime bridge (import from backend) ---
+    print("\n[orch runtime bridge]")
+    try:
+        from orchestrator_integration.task_orchestrator.node_runtime import (
+            extract_execution_ids,
+            orch_node_acceptance,
+        )
+        from orchestrator_integration.task_orchestrator import (
+            advance_plan_node,
+            build_task_plan,
+        )
+        from orchestrator_integration.intent_router import IntentDecision
+
+        ids = extract_execution_ids(
+            '{"record_id":5,"execution_id":"ui-exec-5","status":"success"}'
+        )
+        check("extract ids", ids.get("record_id") == 5)
+        v = orch_node_acceptance(
+            "run_or_browser", ['{"record_id":5,"execution_id":"ui-exec-5"}']
+        )
+        check("run node accept with record_id", bool(v.get("ok")))
+        plan = build_task_plan(
+            "执行测试用例：复杂参数化，需要数据准备与清理",
+            IntentDecision(intents=set(), primary="qa", reason="p"),
+        )
+        plan.current_node = "run_or_browser"
+        for n in plan.nodes:
+            if n.node_id in {"query_cases", "prepare_data"}:
+                n.status = "done"
+            elif n.node_id == "run_or_browser":
+                n.status = "running"
+        plan = advance_plan_node(plan, accepted=False, failed=True)
+        check(
+            "fail→cleanup_data",
+            plan.current_node == "cleanup_data" and plan.status == "running",
+        )
+    except Exception as e:
+        check("orch runtime bridge", False, str(e))
+
     print(f"\n=== Result: {PASSED} passed, {FAILED} failed ===")
     return 1 if FAILED else 0
 

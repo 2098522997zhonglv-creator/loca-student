@@ -126,6 +126,20 @@ def advance_plan_node(
         return plan
     if failed:
         cur.status = NODE_FAILED
+        # R12：主流程失败仍调度 cleanup_data（若存在且未跑）
+        cleanup = next(
+            (n for n in plan.nodes if n.node_id == "cleanup_data"),
+            None,
+        )
+        if (
+            cleanup is not None
+            and cleanup.node_id != cur.node_id
+            and cleanup.status not in {NODE_DONE, NODE_FAILED, NODE_RUNNING}
+        ):
+            cleanup.status = NODE_RUNNING
+            plan.current_node = cleanup.node_id
+            plan.status = TASK_RUNNING
+            return plan
         plan.status = TASK_FAILED
         return plan
     if not accepted:
