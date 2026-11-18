@@ -20,6 +20,8 @@ description: 任务编排：依据用户目标、持续有效授权与能力目�
 4. **跨工具事实**：API 提取的对象 ID 原样写入 facts，浏览器节点引用同一值；禁止模型改写 token/订单号后再传递。
 5. **断言**：每项预期绑定节点与执行 ID；弱断言（URL 含 order、外层 success）不得判通过。
 6. **步数预设**：执行长链路使用一层预设 / 二层备用 / 三层批准预留（见 budget_presets）；预计业务节点 ≠ 工具调用上限。
+7. **数据生命周期（P1/R12）**：复杂/参数化/前后置话术插入 `prepare_data` → `run_or_browser` → `assert_and_deliver` → `cleanup_data`。仅引用准备成功对象；主流程失败仍清理；清理失败与测试失败分报。
+8. **结构化 UI（P1）**：变量/条件/参数化/前后置由执行器打通；条件假 = `skipped`；Python 类型提前报不支持；结果汇总含 `parametrize_results`。
 
 ## 三层规则
 

@@ -9,10 +9,12 @@ description: loca_stude UI 自动化管理工具。用于创建、编辑、删�
 
 1. **来源类型**：`UiTestCase` ≠ loca-stude 功能用例 ≠ API 场景用例；`testcase_id` 不可跨类型混用。
 2. **动作以脚本为准**：`--action` 必须以 `ui_automation_tools.py` 内 `actions` 字典为准（含 `create_page_step` / `set_step_details` / `execute_testcase` 等）。Catalog 已同步真实动作；旧名 `get_ui_cases` 等仅作别名。
-3. **本次执行标识**：`execute_testcase` 受理后立即记录 `record_id` / `execution_id`；后续 `get_execution_record` / Trace / 报告必须带本次 ID，禁止「超时后取该用例最新记录」交差（防并发串用）。
+3. **本次执行标识**：`execute_testcase` 受理后立即绑定 `record_id` / `execution_id`（`effective_runtime` 回传）；后续 `get_execution_record` / Trace / 报告必须带本次 ID，禁止「超时后取该用例最新记录」交差。
 4. **调用成功 ≠ 测试通过**：CLI 退出 0 或工具 `succeeded` 只表示受理；须等本次记录终态与断言后再判 `passed/failed/error/skipped`。
 5. **临时实测**：无结构化 UI 用例时，用 playwright 按功能步骤实测并交证据；需要回归时再沉淀页面/元素/步骤，勿每次先全量 create。
-6. **未支持步骤类型**：条件/动态变量/Python 步骤若执行器未打通，执行前明确报不支持，禁止静默跳过或伪装成定位失败。
+6. **步骤类型（P1）**：`0` 元素 / `1` 断言 / `2` SQL / `3` 自定义变量 / `4` 条件判断已打通；`5` Python **执行前明确拒绝**，禁止静默跳过或伪装成定位失败。条件为假 → 本页后续步骤记 `skipped`（不得记 `passed`）。
+7. **前后置 / 参数化（P1）**：`create_testcase` / `update_testcase` 可传 `--front_custom` / `--front_sql` / `--posterior_sql` / `--parametrize`（JSON）。前置失败阻断主流程；主流程失败仍跑后置清理；多数据行结果写入 `parametrize_results` 互不覆盖。
+8. **环境配置映射（P1）**：`browser` / `headless` / `viewport_*` / `timeout` 写入 `extra_config`（后端无同名字段）；真正浏览器策略以执行器配置为准。
 
 ## 生命周期概览
 
@@ -203,12 +205,17 @@ python ui_automation_tools.py --action update_element --element_id <id> --locato
 |--------|------|----------|----------|
 | `get_testcases` | 获取用例列表（精简版） | `--project_id` | `--module_id`, `--level`, `--limit` (默认50) |
 | `get_testcase` | 获取用例详情 | `--testcase_id` | - |
-| `create_testcase` | 创建测试用例 | `--project_id`, `--module_id`, `--name` | `--description`, `--level` |
-| `update_testcase` | 更新测试用例 | `--testcase_id` | `--name`, `--description`, `--level` |
+| `create_testcase` | 创建测试用例 | `--project_id`, `--module_id`, `--name` | `--description`, `--level`, `--front_custom`, `--front_sql`, `--posterior_sql`, `--parametrize` |
+| `update_testcase` | 更新测试用例 | `--testcase_id` | `--name`, `--description`, `--level`, 同上前后置/参数化 |
 | `delete_testcase` | 删除测试用例 | `--testcase_id` | - |
 | `set_case_steps` | 设置用例步骤（批量） | `--testcase_id`, `--page_step_ids` (逗号分隔) | - |
 
 **用例等级（level）可选值：** `P0`, `P1`, `P2`, `P3`
+
+**P1 用例字段（JSON 字符串）：**
+- `--front_custom`：前置变量，如 `{"token":"abc"}` 或 `[{"key":"token","value":"abc"}]`
+- `--front_sql` / `--posterior_sql`：前后置 SQL 列表（结构同步骤 SQL）
+- `--parametrize`：数据行，如 `[{"user":"a"},{"user":"b"}]` 或 `{"rows":[...]}`
 
 **注意：** `get_testcases` 返回精简数据（id, name, level, status 等），详情请使用 `get_testcase`
 
@@ -256,6 +263,8 @@ python ui_automation_tools.py --action update_element --element_id <id> --locato
 
 **浏览器类型（browser）可选值：** `chromium`, `firefox`, `webkit`
 
+**契约：** `browser` / `headless` / `viewport_*` / `timeout` 写入 `extra_config` 备查；运行以执行器配置为准，勿假设后端有同名字段。
+
 ### 执行器管理
 
 | Action | 描述 | 必填参数 | 可选参数 |
@@ -283,7 +292,21 @@ python ui_automation_tools.py --action update_element --element_id <id> --locato
 - `--wait_result` - 是否等待执行结果（默认否，传此参数则等待）
 - `--exec_timeout` - 等待超时时间（秒，默认 120）
 
+**执行结果字段：** `record_id` / `execution_id` / `test_result` / `skipped_steps` / `parametrize_results`。超时只回查本次 `record_id`，禁止改查最新记录。
+
 **注意：** 执行前需确保有执行器在线（通过 `get_actuators` 查询）
+
+### 条件 / 变量步骤示例（set_step_details）
+
+```bash
+python ui_automation_tools.py --action set_step_details \
+  --step_id 20 \
+  --steps '[
+    {"step_type": 3, "custom": {"flag": "1"}, "description": "设运行变量"},
+    {"step_type": 4, "condition_value": {"left": "${{flag}}", "op": "eq", "right": "1"}, "description": "条件"},
+    {"step_type": 0, "element": 101, "ope_key": "click", "ope_value": {}}
+  ]'
+```
 
 ---
 

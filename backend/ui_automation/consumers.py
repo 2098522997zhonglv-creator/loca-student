@@ -438,6 +438,11 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             case_id = args.get("case_id")
             if case_id:
                 await self.update_testcase_status(case_id, 1)
+            # P1/D06：发起即创建执行中记录，后续结果更新同一 record_id
+            record_id = await self.create_running_execution_record(args)
+            if record_id:
+                args["record_id"] = record_id
+                args["execution_id"] = f"ui-exec-{record_id}"
 
             await actuator.send_json(SocketDataModel(
                 code=ResponseCode.SUCCESS,
@@ -458,7 +463,12 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             msg=self._localize("任务已发送给执行器"),
             data=QueueModel(
                 func_name="effective_runtime",
-                func_args=self._public_effective(args.get("effective_runtime"))
+                func_args={
+                    **(self._public_effective(args.get("effective_runtime")) or {}),
+                    "record_id": args.get("record_id"),
+                    "execution_id": args.get("execution_id"),
+                    "case_id": args.get("case_id"),
+                },
             )
         ))
 
@@ -702,6 +712,46 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
             logger.error(f"更新页面步骤状态失败: {e}")
     
     @sync_to_async
+    def create_running_execution_record(self, args: dict) -> int:
+        """发起执行时创建 status=执行中 的记录，返回 record_id。"""
+        from .models import UiExecutionRecord
+        from django.contrib.auth.models import User
+        from django.utils import timezone
+
+        case_id = args.get("case_id")
+        if not case_id:
+            return 0
+        executor = None
+        executor_id = args.get("executor_id")
+        if executor_id:
+            try:
+                executor = User.objects.get(id=executor_id)
+            except User.DoesNotExist:
+                executor = None
+        try:
+            record = UiExecutionRecord.objects.create(
+                test_case_id=case_id,
+                batch_id=args.get("batch_id"),
+                executor=executor,
+                status=1,  # 执行中
+                trigger_type=args.get("trigger_type") or "manual",
+                step_results=[],
+                screenshots=[],
+                log="running",
+                start_time=timezone.now(),
+                environment=args.get("effective_runtime")
+                if isinstance(args.get("effective_runtime"), dict)
+                else None,
+            )
+            logger.info(
+                "执行中记录已创建: id=%s case_id=%s", record.id, case_id
+            )
+            return int(record.id)
+        except Exception as e:
+            logger.error("创建执行中记录失败: %s", e, exc_info=True)
+            return 0
+
+    @sync_to_async
     def save_execution_result(self, args: dict):
         """保存执行结果到数据库"""
         from .models import UiExecutionRecord, UiTestCase, UiBatchExecutionRecord
@@ -710,8 +760,8 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
 
         logger.info(f">>> save_execution_result 被调用, args: {args}")
 
-        # 状态映射: string -> int
-        status_map = {'success': 2, 'failed': 3, 'skipped': 4}
+        # 状态映射: string -> int（skipped 记为成功态下的步骤细节，用例级仍用 success/failed）
+        status_map = {'success': 2, 'failed': 3, 'skipped': 2, 'cancelled': 4}
         status_str = args.get('status', 'unknown')
         status = status_map.get(status_str, 3)  # 默认失败
 
@@ -743,35 +793,69 @@ class UiAutomationConsumer(AsyncWebsocketConsumer):
                 logger.warning(f"执行人不存在: id={executor_id}")
 
         case_id = args.get('case_id')
+        record_id = args.get('record_id')
         try:
             self._release_actuator_slots(args, 1)
             environment_snapshot = args.get('environment') or args.get('effective_runtime')
             if not (environment_snapshot and isinstance(environment_snapshot, dict)):
                 environment_snapshot = None
 
-            record = UiExecutionRecord.objects.create(
-                test_case_id=case_id,
-                batch_id=batch_id,
-                executor=executor,
-                status=status,
-                trigger_type=args.get('trigger_type') or 'manual',
-                step_results=steps,
-                screenshots=screenshots,
-                trace_path=trace_path,
-                log=args.get('message', ''),
-                error_message=args.get('message') if status == 3 else None,
-                start_time=start_time,
-                end_time=end_time,
-                duration=duration,
-                environment=environment_snapshot,
-            )
-            logger.info(f"执行记录已保存: id={record.id}, case_id={case_id}, batch_id={batch_id}, status={status}")
+            record = None
+            if record_id:
+                try:
+                    record = UiExecutionRecord.objects.get(id=record_id)
+                    record.status = status
+                    record.step_results = steps
+                    record.screenshots = screenshots
+                    record.trace_path = trace_path
+                    record.log = args.get("message", "")
+                    record.error_message = args.get("message") if status == 3 else None
+                    record.end_time = end_time
+                    record.duration = duration
+                    if environment_snapshot:
+                        record.environment = environment_snapshot
+                    if executor is not None:
+                        record.executor = executor
+                    if batch_id:
+                        record.batch_id = batch_id
+                    record.save()
+                    logger.info(
+                        "执行记录已更新: id=%s, case_id=%s, status=%s",
+                        record_id,
+                        case_id,
+                        status,
+                    )
+                except UiExecutionRecord.DoesNotExist:
+                    record = None
+            if record is None:
+                record = UiExecutionRecord.objects.create(
+                    test_case_id=case_id,
+                    batch_id=batch_id,
+                    executor=executor,
+                    status=status,
+                    trigger_type=args.get('trigger_type') or 'manual',
+                    step_results=steps,
+                    screenshots=screenshots,
+                    trace_path=trace_path,
+                    log=args.get('message', ''),
+                    error_message=args.get('message') if status == 3 else None,
+                    start_time=start_time,
+                    end_time=end_time,
+                    duration=duration,
+                    environment=environment_snapshot,
+                )
+                logger.info(f"执行记录已保存: id={record.id}, case_id={case_id}, batch_id={batch_id}, status={status}")
 
             # 同时更新测试用例的状态
             if case_id:
                 UiTestCase.objects.filter(id=case_id).update(
                     status=status,
-                    result_data={'last_execution': record.id, 'steps': steps},
+                    result_data={
+                        'last_execution': record.id,
+                        'steps': steps,
+                        'execution_id': args.get('execution_id') or f'ui-exec-{record.id}',
+                        'parametrize_results': args.get('parametrize_results') or [],
+                    },
                     error_message=args.get('message') if status == 3 else None
                 )
                 logger.info(f"测试用例状态已更新: case_id={case_id}, status={status}")

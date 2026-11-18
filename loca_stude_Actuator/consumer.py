@@ -635,7 +635,11 @@ class TaskConsumer:
         # 初始化数据处理器，加载项目公共变量
         data_processor = await self._init_data_processor(project_id)
 
-        # 构建配置（传入数据处理器进行变量替换）
+        # 构建配置（用例路径延迟变量替换，支持类型3运行时变量）
+        if args.get('record_id'):
+            case_data['_record_id'] = args.get('record_id')
+        if args.get('execution_id'):
+            case_data['_execution_id'] = args.get('execution_id')
         config = self._build_test_case_config(case_data, env_config, data_processor)
 
         # 执行
@@ -643,6 +647,25 @@ class TaskConsumer:
         result = None
         result_data = None
         try:
+            from step_advanced import preflight_case_config
+
+            preflight_err = preflight_case_config(config)
+            if preflight_err:
+                await self.ws_client.send_result(
+                    UiSocketEnum.CASE_RESULT,
+                    {
+                        'case_id': case_id,
+                        'status': 'failed',
+                        'message': preflight_err,
+                        'batch_id': batch_id,
+                        'executor_id': executor_id,
+                        'executor_name': executor_name,
+                        'record_id': args.get('record_id'),
+                        'execution_id': args.get('execution_id'),
+                    },
+                    self._current_user,
+                )
+                return
             try:
                 await self._materialize_test_case_uploads(config, project_id)
             except Exception as e:
@@ -656,6 +679,8 @@ class TaskConsumer:
                         'batch_id': batch_id,
                         'executor_id': executor_id,
                         'executor_name': executor_name,
+                        'record_id': args.get('record_id'),
+                        'execution_id': args.get('execution_id'),
                     },
                     self._current_user,
                 )
@@ -682,6 +707,11 @@ class TaskConsumer:
                 result_data['executor_id'] = executor_id
             if executor_name:
                 result_data['executor_name'] = executor_name
+            # 确保回传发起时绑定的 record_id / execution_id
+            if not result_data.get('record_id') and args.get('record_id'):
+                result_data['record_id'] = args.get('record_id')
+            if not result_data.get('execution_id') and args.get('execution_id'):
+                result_data['execution_id'] = args.get('execution_id')
                 
             await self.ws_client.send_result(
                 UiSocketEnum.CASE_RESULT,
@@ -1239,6 +1269,7 @@ class TaskConsumer:
         data_processor: Optional[DataProcessor] = None,
         case_data_override: Optional[dict] = None,
         env_config: Optional[dict] = None,
+        defer_var_replace: bool = False,
     ) -> PageStepConfig:
         """构建页面步骤配置
         
@@ -1248,6 +1279,7 @@ class TaskConsumer:
             data_processor: 变量处理器，用于替换 ${{变量名}} 语法
             case_data_override: 用例步骤的覆盖数据
             env_config: 执行环境配置，用于 SQL 步骤获取数据库连接
+            defer_var_replace: True 时保留 ${{}} 模板，供运行时（类型3之后）替换
         """
         steps = []
         
@@ -1312,7 +1344,7 @@ class TaskConsumer:
             locator_value_3 = detail.get('locator_value_3', '')
             
             # 变量替换：替换 input_value 和 locator_value 中的 ${{变量名}}
-            if data_processor:
+            if data_processor and not defer_var_replace:
                 sql_execute = data_processor.replace(sql_execute)
                 if not isinstance(sql_execute, (dict, str)):
                     sql_execute = {}
@@ -1348,8 +1380,10 @@ class TaskConsumer:
                     locator_value_2 = str(locator_value_2)
                 if locator_value_3 and not isinstance(locator_value_3, str):
                     locator_value_3 = str(locator_value_3)
-            else:
-                logger.warning(f"data_processor 为 None，跳过变量替换")
+            elif defer_var_replace:
+                logger.debug("defer_var_replace=True，保留 ${{}} 供运行时替换")
+            elif not data_processor:
+                logger.warning("data_processor 为 None，跳过变量替换")
             
             # iframe 定位器也可能包含变量
             is_iframe = detail.get('is_iframe', False)
@@ -1399,7 +1433,15 @@ class TaskConsumer:
                 locator_value=locator_value or '',  # 定位表达式
                 step_type=step_type,
                 input_value=input_value,  # 输入值
-                description=detail.get('description') or detail.get('element_name') or ('SQL操作' if step_type == 2 else ''),
+                description=detail.get('description') or detail.get('element_name') or (
+                    'SQL操作' if step_type == 2 else (
+                        '自定义变量' if step_type == 3 else (
+                            '条件判断' if step_type == 4 else (
+                                'Python步骤' if step_type == 5 else ''
+                            )
+                        )
+                    )
+                ),
                 wait_time=detail.get('wait_time', 0),
                 is_iframe=is_iframe,
                 iframe_locator=iframe_locator,
@@ -1411,6 +1453,9 @@ class TaskConsumer:
                 locator_value_3=locator_value_3 or None,
                 locator_index_3=_parse_index(detail.get('locator_index_3')),
                 sql_execute=sql_execute,
+                custom=detail.get('custom'),
+                condition_value=detail.get('condition_value'),
+                func=detail.get('func'),
                 upload_file_id=upload_file_id,
                 upload_file_name=upload_file_name,
                 upload_download_url=upload_download_url,
@@ -1466,13 +1511,29 @@ class TaskConsumer:
             page_step_data = case_step.get('page_step', {})
             case_data_override = case_step.get('case_data') or {}
             if page_step_data:
-                page_steps.append(self._build_page_step_config(page_step_data, base_url, data_processor, case_data_override, env_config))
+                page_steps.append(
+                    self._build_page_step_config(
+                        page_step_data,
+                        base_url,
+                        data_processor,
+                        case_data_override,
+                        env_config,
+                        defer_var_replace=True,
+                    )
+                )
         
         return TestCaseConfig(
             case_id=data.get('id', 0),
             case_name=data.get('name', ''),
             page_steps=page_steps,
             env_config=env_config,
+            front_custom=data.get('front_custom'),
+            front_sql=data.get('front_sql'),
+            posterior_sql=data.get('posterior_sql'),
+            parametrize=data.get('parametrize'),
+            data_processor=data_processor,
+            record_id=data.get('record_id') or data.get('_record_id'),
+            execution_id=data.get('execution_id') or data.get('_execution_id'),
         )
     
     def stop(self):

@@ -385,7 +385,24 @@ def _build_nodes(
     )
 
     # 用例执行路径优先：即使话术带「浏览器实测」，也走执行计划（浏览器在二层备用）
+    # P1/R12：prepare → 标识登记 → run → assert → cleanup（主流程失败仍清理）
     if executeish or (apiish and any(k in text for k in ("执行", "跑", "断言", "回归"))):
+        need_prepare = any(
+            k in text
+            for k in (
+                "准备数据",
+                "数据准备",
+                "前置",
+                "造数",
+                "清理",
+                "参数化",
+                "前后置",
+                "prepare",
+                "cleanup",
+                "复杂用例",
+                "复杂测试",
+            )
+        )
         nodes: List[PlanNode] = [
             PlanNode(
                 node_id="query_cases",
@@ -403,7 +420,37 @@ def _build_nodes(
                 ],
             ),
         ]
-        if apiish:
+        if need_prepare:
+            nodes.append(
+                PlanNode(
+                    node_id="prepare_data",
+                    goal=(
+                        "准备测试数据并登记对象标识到 facts"
+                        "（API 造数 / UI front_sql·front_custom / 参数化行）；"
+                        "仅引用准备成功的数据"
+                    ),
+                    depends_on=["query_cases"],
+                    primary_candidates=[
+                        "api-automation",
+                        "ui-automation",
+                        "execute_skill_script",
+                    ],
+                    fallback_candidates=["loca-stude", "request_executor_heal"],
+                    input_refs=["case_ref", "testcase_id", "source_type"],
+                    output_keys=[
+                        "prepared_object_ids",
+                        "object_id",
+                        "extracted_vars",
+                        "parametrize_rows",
+                    ],
+                    completion_checks=[
+                        "准备成功对象已写入 facts；失败对象不得传入主流程；"
+                        "区分环境失败与造数失败"
+                    ],
+                )
+            )
+            run_dep = ["prepare_data"]
+        elif apiish:
             nodes.append(
                 PlanNode(
                     node_id="api_prepare_or_run",
@@ -428,7 +475,10 @@ def _build_nodes(
         nodes.append(
             PlanNode(
                 node_id="run_or_browser",
-                goal="有 UI 用例则 execute_testcase（关联本次 record_id）；否则浏览器按步骤实测",
+                goal=(
+                    "有 UI 用例则 execute_testcase（关联本次 record_id；"
+                    "支持变量/条件/参数化/前后置）；否则浏览器按步骤实测"
+                ),
                 depends_on=list(run_dep),
                 primary_candidates=[
                     "ui-automation",
@@ -440,10 +490,22 @@ def _build_nodes(
                     "request_executor_heal",
                     "knowledge_search",
                 ],
-                input_refs=["case_ref", "object_id", "extracted_vars"],
-                output_keys=["execution_id", "record_id", "screenshots", "page_facts"],
+                input_refs=[
+                    "case_ref",
+                    "object_id",
+                    "extracted_vars",
+                    "prepared_object_ids",
+                ],
+                output_keys=[
+                    "execution_id",
+                    "record_id",
+                    "screenshots",
+                    "page_facts",
+                    "parametrize_results",
+                ],
                 completion_checks=[
-                    "查询/报告只含本次 execution_id／record_id；有真实断言与证据"
+                    "查询/报告只含本次 execution_id／record_id；"
+                    "条件假分支为 skipped 非 passed；参数化行结果隔离"
                 ],
             )
         )
@@ -465,6 +527,34 @@ def _build_nodes(
                 ],
             )
         )
+        if need_prepare:
+            nodes.append(
+                PlanNode(
+                    node_id="cleanup_data",
+                    goal=(
+                        "清理本次准备对象（保留用户要求保留的产物）；"
+                        "主流程失败仍须执行；清理失败与测试失败分报"
+                    ),
+                    depends_on=["assert_and_deliver"],
+                    primary_candidates=[
+                        "api-automation",
+                        "ui-automation",
+                        "execute_skill_script",
+                    ],
+                    fallback_candidates=["loca-stude", "report_task_blocked"],
+                    input_refs=[
+                        "prepared_object_ids",
+                        "object_id",
+                        "execution_id",
+                        "record_id",
+                    ],
+                    output_keys=["cleanup_status", "cleanup_errors"],
+                    completion_checks=[
+                        "仅清理本次登记对象；清理失败写入 cleanup_errors，"
+                        "不得掩盖测试失败结论"
+                    ],
+                )
+            )
         return nodes
 
     # 浏览器下单参考路径（需求 §5）

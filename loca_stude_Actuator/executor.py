@@ -13,7 +13,7 @@ import time
 import traceback
 from pathlib import Path
 from typing import Any, Optional, Union
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from contextlib import asynccontextmanager
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright, expect, FrameLocator
@@ -52,7 +52,7 @@ class StepConfig:
     operation_type: str      # click, fill, goto, wait, assert等
     locator_type: str        # xpath, css, id等
     locator_value: str
-    step_type: int = 0       # 0元素操作, 1断言操作, 2 SQL操作
+    step_type: int = 0       # 0元素 1断言 2SQL 3自定义变量 4条件 5Python
     input_value: str = ''
     description: str = ''
     wait_time: float = 0
@@ -66,6 +66,10 @@ class StepConfig:
     locator_value_3: Optional[str] = None
     locator_index_3: Optional[int] = None
     sql_execute: Any = None
+    # P1：结构化变量 / 条件 / 代码步骤
+    custom: Any = None
+    condition_value: Any = None
+    func: Any = None
     # Remote upload metadata used when shared storage path is unavailable
     upload_file_id: Optional[int] = None
     upload_file_name: Optional[str] = None
@@ -95,6 +99,16 @@ class TestCaseConfig:
     case_name: str
     page_steps: list[PageStepConfig] = field(default_factory=list)
     env_config: Optional[dict] = None
+    # P1：前后置 / 参数化 / 运行时变量
+    front_custom: Any = None
+    front_sql: Any = None
+    posterior_sql: Any = None
+    parametrize: Any = None
+    data_processor: Any = None
+    record_id: Optional[int] = None
+    execution_id: Optional[str] = None
+    parametrize_row: Optional[int] = None
+    parametrize_data: Optional[dict] = None
 
 
 class PlaywrightExecutor:
@@ -793,6 +807,43 @@ class PlaywrightExecutor:
         await file_chooser.set_files(file_path)
         logger.info(f"步骤 {step.step_id}: 已通过 file chooser 设置上传文件")
     
+    def _materialize_step_vars(self, step: StepConfig) -> StepConfig:
+        """用当前运行变量替换步骤中的 ${{var}}（支持类型3之后动态生效）。"""
+        proc = getattr(self, "_runtime_processor", None)
+        if not proc:
+            return step
+        try:
+            return replace(
+                step,
+                input_value=proc.replace(step.input_value) if step.input_value else step.input_value,
+                locator_value=proc.replace(step.locator_value) if step.locator_value else step.locator_value,
+                locator_value_2=proc.replace(step.locator_value_2) if step.locator_value_2 else step.locator_value_2,
+                locator_value_3=proc.replace(step.locator_value_3) if step.locator_value_3 else step.locator_value_3,
+                iframe_locator=proc.replace(step.iframe_locator) if step.iframe_locator else step.iframe_locator,
+                sql_execute=proc.replace(step.sql_execute) if step.sql_execute else step.sql_execute,
+                custom=proc.replace(step.custom) if step.custom else step.custom,
+                condition_value=proc.replace(step.condition_value)
+                if step.condition_value
+                else step.condition_value,
+            )
+        except Exception as exc:
+            logger.warning(f"步骤变量替换失败 step={step.step_id}: {exc}")
+            return step
+
+    async def _run_sql_hook(self, sql_spec: Any, env_config: Optional[dict], label: str) -> tuple[bool, str]:
+        if sql_spec in (None, "", [], {}):
+            return True, f"无{label}"
+        hook_step = StepConfig(
+            step_id=0,
+            operation_type="",
+            locator_type="xpath",
+            locator_value="",
+            step_type=2,
+            sql_execute=sql_spec,
+            description=label,
+        )
+        return await asyncio.to_thread(self._execute_sql_step, hook_step, env_config)
+
     async def _execute_step(
         self,
         page: Page,
@@ -807,6 +858,32 @@ class PlaywrightExecutor:
         if step.step_type == 2:
             success, message = await asyncio.to_thread(self._execute_sql_step, step, env_config)
             return success, message, None
+
+        # P1：自定义变量 / 条件 / 未支持 Python
+        if step.step_type == 5:
+            return (
+                False,
+                "不支持的步骤类型: Python(5)。本期未实现，请移除该步骤后重试（非定位失败）。",
+                None,
+            )
+        if step.step_type == 3:
+            from step_advanced import apply_custom_variables
+
+            proc = getattr(self, "_runtime_processor", None)
+            success, message = apply_custom_variables(proc, step.custom)
+            return success, message, None
+        if step.step_type == 4:
+            from step_advanced import evaluate_condition
+
+            proc = getattr(self, "_runtime_processor", None)
+            ok, message = evaluate_condition(proc, step.condition_value)
+            # 用特殊前缀让上层识别「条件为假 → 跳过后续」
+            if ok:
+                return True, f"条件成立: {message}", None
+            return True, f"CONDITION_FALSE: {message}", None
+
+        # 运行时变量替换（类型3之后的步骤依赖）
+        step = self._materialize_step_vars(step)
 
         operation = (step.operation_type or '').lower()
         screenshot_path: str | None = None
@@ -1102,14 +1179,98 @@ class PlaywrightExecutor:
     
     async def execute_test_case(self, config: TestCaseConfig) -> CaseResultModel:
         """执行测试用例（支持 Trace 记录）"""
+        from step_advanced import (
+            apply_front_custom,
+            parse_parametrize_rows,
+            preflight_case_config,
+        )
+
+        # 参数化：多数据行分别执行，结果互不覆盖
+        rows = parse_parametrize_rows(getattr(config, "parametrize", None))
+        if len(rows) > 1 and getattr(config, "parametrize_row", None) is None:
+            all_results = []
+            overall_failed = 0
+            for idx, row in enumerate(rows):
+                row_cfg = replace(
+                    config,
+                    parametrize_row=idx,
+                    parametrize_data=row,
+                    # 子行不再二次展开
+                    parametrize=None,
+                )
+                one = await self.execute_test_case(row_cfg)
+                all_results.append(one.model_dump())
+                if one.status == "failed":
+                    overall_failed += 1
+            status = "failed" if overall_failed else "success"
+            return CaseResultModel(
+                case_id=config.case_id,
+                status=status,
+                message=f"参数化完成: {len(rows) - overall_failed}/{len(rows)} 行通过",
+                total_steps=sum(r.get("total_steps", 0) for r in all_results),
+                passed_steps=sum(r.get("passed_steps", 0) for r in all_results),
+                failed_steps=sum(r.get("failed_steps", 0) for r in all_results),
+                skipped_steps=sum(r.get("skipped_steps", 0) for r in all_results),
+                duration=sum(r.get("duration", 0) for r in all_results),
+                steps=[],
+                record_id=config.record_id,
+                execution_id=config.execution_id,
+                parametrize_results=all_results,
+            )
+
+        preflight_err = preflight_case_config(config)
+        if preflight_err:
+            return CaseResultModel(
+                case_id=config.case_id,
+                status="failed",
+                message=preflight_err,
+                record_id=config.record_id,
+                execution_id=config.execution_id,
+                parametrize_row=config.parametrize_row,
+            )
+
         start_time = time.time()
         step_results = []
         passed_steps = 0
         failed_steps = 0
+        skipped_steps = 0
         total_steps = sum(len(ps.steps) for ps in config.page_steps)
         
         self._stop_requested = False
+        self._runtime_processor = getattr(config, "data_processor", None)
+        # 参数行变量注入（不写回项目公共变量）
+        if self._runtime_processor and config.parametrize_data:
+            for k, v in (config.parametrize_data or {}).items():
+                self._runtime_processor.set_cache(str(k), v)
+        if self._runtime_processor:
+            ok, msg = apply_front_custom(self._runtime_processor, config.front_custom)
+            if not ok:
+                return CaseResultModel(
+                    case_id=config.case_id,
+                    status="failed",
+                    message=f"前置变量失败: {msg}",
+                    record_id=config.record_id,
+                    execution_id=config.execution_id,
+                    parametrize_row=config.parametrize_row,
+                )
+
+        # 前置 SQL：失败则阻断依赖动作
+        ok, msg = await self._run_sql_hook(
+            config.front_sql, config.env_config, "前置SQL"
+        )
+        if not ok:
+            return CaseResultModel(
+                case_id=config.case_id,
+                status="failed",
+                message=f"前置SQL失败，已阻止执行: {msg}",
+                record_id=config.record_id,
+                execution_id=config.execution_id,
+                parametrize_row=config.parametrize_row,
+            )
+
         trace_name = f"case_{config.case_id}"
+        if config.parametrize_row is not None:
+            trace_name = f"{trace_name}_row{config.parametrize_row}"
         
         try:
             # 使用带 trace 的浏览器会话
@@ -1132,6 +1293,7 @@ class PlaywrightExecutor:
                         raise Exception("用例被手动停止")
 
                     logger.info(f"执行页面步骤: {page_step.page_name}")
+                    skip_rest_of_page = False
 
                     # 确保使用最新的页签引用进行环境跳转检测
                     page = self._page
@@ -1158,6 +1320,19 @@ class PlaywrightExecutor:
                     for step in page_step.steps:
                         if self._stop_requested:
                             raise Exception("用例被手动停止")
+
+                        if skip_rest_of_page:
+                            skipped_steps += 1
+                            step_results.append(
+                                StepResultModel(
+                                    step_id=step.step_id,
+                                    status="skipped",
+                                    message="条件为假，本页后续步骤已跳过",
+                                    description=step.description or step.operation_type,
+                                    element_found=False,
+                                )
+                            )
+                            continue
                         
                         # 确保总是使用最新的活跃页签进行操作
                         page = self._page
@@ -1174,9 +1349,20 @@ class PlaywrightExecutor:
                             page = self._page
                             step_duration = time.time() - step_start
 
+                            if (
+                                success
+                                and isinstance(message, str)
+                                and message.startswith("CONDITION_FALSE:")
+                            ):
+                                skip_rest_of_page = True
+                                status = "success"
+                                # 条件步骤本身记成功；后续 skipped
+                            else:
+                                status = "success" if success else "failed"
+
                             step_result = StepResultModel(
                                 step_id=step.step_id,
-                                status='success' if success else 'failed',
+                                status=status,
                                 message=message,
                                 description=step.description or step.operation_type,
                                 duration=step_duration,
@@ -1184,7 +1370,7 @@ class PlaywrightExecutor:
                                 screenshot=step_screenshot  # 保存截图操作的路径
                             )
 
-                            if success:
+                            if status == "success":
                                 passed_steps += 1
                                 logger.debug(f"  ✅ {step.description or step.operation_type}")
                             else:
@@ -1230,7 +1416,11 @@ class PlaywrightExecutor:
 
                 duration = time.time() - start_time
                 status = 'success' if failed_steps == 0 else 'failed'
-                message = f"用例执行{'成功' if status == 'success' else '失败'}: 通过 {passed_steps}/{total_steps}"
+                message = (
+                    f"用例执行{'成功' if status == 'success' else '失败'}: "
+                    f"通过 {passed_steps}/{total_steps}"
+                    + (f"，跳过 {skipped_steps}" if skipped_steps else "")
+                )
                 if hasattr(self, '_page_errors') and self._page_errors:
                     message += f" (捕获 {len(self._page_errors)} 个页面 JS 错误: {'; '.join(self._page_errors[:3])})"
                 logger.info(f"✅ {message}" if status == 'success' else f"❌ {message}")
@@ -1242,6 +1432,17 @@ class PlaywrightExecutor:
             trace_path = self.get_current_trace_path()
             if trace_path:
                 logger.info(f"用例执行 Trace 已记录: {trace_path}")
+
+            # 后置 SQL：主流程失败仍尝试清理
+            post_ok, post_msg = await self._run_sql_hook(
+                config.posterior_sql, config.env_config, "后置SQL"
+            )
+            if not post_ok:
+                message = f"{message}；后置清理失败: {post_msg}"
+                # 清理失败与测试失败分别体现在 message；不强制覆盖已成功状态为 failed
+                if status == "success":
+                    status = "failed"
+                    message = f"测试步骤通过但后置清理失败: {post_msg}"
             
             return CaseResultModel(
                 case_id=config.case_id,
@@ -1250,15 +1451,25 @@ class PlaywrightExecutor:
                 total_steps=total_steps,
                 passed_steps=passed_steps,
                 failed_steps=failed_steps,
+                skipped_steps=skipped_steps,
                 duration=duration,
                 steps=step_results,
-                trace_path=trace_path
+                trace_path=trace_path,
+                record_id=config.record_id,
+                execution_id=config.execution_id,
+                parametrize_row=config.parametrize_row,
             )
                 
         except Exception as e:
             duration = time.time() - start_time
             error_msg = str(e)
             logger.error(f"用例执行异常: {error_msg}\n{traceback.format_exc()}")
+
+            post_ok, post_msg = await self._run_sql_hook(
+                config.posterior_sql, config.env_config, "后置SQL"
+            )
+            if not post_ok:
+                error_msg = f"{error_msg}；后置清理失败: {post_msg}"
             
             # 尝试获取 trace 路径（可能已保存）
             trace_path = self.get_current_trace_path()
@@ -1269,11 +1480,17 @@ class PlaywrightExecutor:
                 message=error_msg,
                 total_steps=total_steps,
                 passed_steps=passed_steps,
-                failed_steps=failed_steps + (total_steps - passed_steps - failed_steps),
+                failed_steps=failed_steps + (total_steps - passed_steps - failed_steps - skipped_steps),
+                skipped_steps=skipped_steps,
                 duration=duration,
                 steps=step_results,
-                trace_path=trace_path
+                trace_path=trace_path,
+                record_id=config.record_id,
+                execution_id=config.execution_id,
+                parametrize_row=config.parametrize_row,
             )
+        finally:
+            self._runtime_processor = None
 
     async def execute_page_step(self, config: PageStepConfig) -> list[StepResultModel]:
         """执行单个页面步骤（包含多个操作）- 使用同一个浏览器会话"""

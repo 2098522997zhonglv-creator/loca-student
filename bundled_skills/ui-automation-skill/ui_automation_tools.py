@@ -454,24 +454,66 @@ def get_testcase(testcase_id: int):
     return _filter_images(data)
 
 
-def create_testcase(project_id: int, module_id: int, name: str, description: str = None, level: str = "P2"):
-    """创建测试用例"""
+def _parse_json_field(raw, field_name: str):
+    """允许传入 dict/list 或 JSON 字符串。"""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{field_name} 不是合法 JSON: {e}") from e
+    return raw
+
+
+def create_testcase(
+    project_id: int,
+    module_id: int,
+    name: str,
+    description: str = None,
+    level: str = "P2",
+    front_custom=None,
+    front_sql=None,
+    posterior_sql=None,
+    parametrize=None,
+):
+    """创建测试用例（支持 P1 前后置 / 参数化字段）。"""
     data = {
         "project": project_id,
         "module": module_id,
         "name": name,
-        "level": level
+        "level": level,
     }
     if description:
         data["description"] = description
+    for key, raw in (
+        ("front_custom", front_custom),
+        ("front_sql", front_sql),
+        ("posterior_sql", posterior_sql),
+        ("parametrize", parametrize),
+    ):
+        parsed = _parse_json_field(raw, key)
+        if parsed is not None:
+            data[key] = parsed
     result = _request("POST", "testcases/", data=data)
     if result.get("status") == "success" or result.get("data"):
         return {"status": "success", "message": "测试用例创建成功", "data": result.get("data", result)}
     return result
 
 
-def update_testcase(testcase_id: int, name: str = None, description: str = None, level: str = None):
-    """更新测试用例"""
+def update_testcase(
+    testcase_id: int,
+    name: str = None,
+    description: str = None,
+    level: str = None,
+    front_custom=None,
+    front_sql=None,
+    posterior_sql=None,
+    parametrize=None,
+):
+    """更新测试用例（支持 P1 前后置 / 参数化字段）。"""
     data = {}
     if name:
         data["name"] = name
@@ -479,6 +521,17 @@ def update_testcase(testcase_id: int, name: str = None, description: str = None,
         data["description"] = description
     if level:
         data["level"] = level
+    for key, raw in (
+        ("front_custom", front_custom),
+        ("front_sql", front_sql),
+        ("posterior_sql", posterior_sql),
+        ("parametrize", parametrize),
+    ):
+        parsed = _parse_json_field(raw, key)
+        if parsed is not None:
+            data[key] = parsed
+    if not data:
+        return {"status": "error", "message": "无有效更新字段"}
     result = _request("PATCH", f"testcases/{testcase_id}/", data=data)
     if result.get("status") == "success" or result.get("data"):
         return {"status": "success", "message": "测试用例更新成功", "data": result.get("data", result)}
@@ -615,31 +668,87 @@ def get_env_configs(project_id: int):
 def create_env_config(project_id: int, name: str, base_url: str = None, browser: str = "chromium",
                       headless: bool = True, viewport_width: int = 1280, viewport_height: int = 720,
                       timeout: int = 30000, is_default: bool = False):
-    """创建环境配置"""
+    """创建环境配置。
+
+    注意：后端 UiEnvironmentConfig 已无 browser/headless/viewport 同名字段；
+    这些运行参数写入 extra_config 备查，真正浏览器策略以执行器配置为准。
+    """
     data = {
         "project": project_id,
         "name": name,
-        "browser": browser,
-        "headless": headless,
-        "viewport_width": viewport_width,
-        "viewport_height": viewport_height,
-        "timeout": timeout,
-        "is_default": is_default
+        "is_default": is_default,
+        "extra_config": {
+            "browser": browser,
+            "headless": headless,
+            "viewport_width": viewport_width,
+            "viewport_height": viewport_height,
+            "timeout": timeout,
+            "note": "browser/headless/viewport 由执行器配置生效，此处仅作记录",
+        },
     }
     if base_url:
         data["base_url"] = base_url
     result = _request("POST", "env-configs/", data=data)
     if result.get("status") == "success" or result.get("data"):
-        return {"status": "success", "message": "环境配置创建成功", "data": result.get("data", result)}
+        return {
+            "status": "success",
+            "message": "环境配置创建成功（浏览器参数已写入 extra_config；运行以执行器为准）",
+            "data": result.get("data", result),
+        }
     return result
 
 
 def update_env_config(config_id: int, **kwargs):
-    """更新环境配置"""
-    data = {k: v for k, v in kwargs.items() if v is not None}
+    """更新环境配置。
+
+    browser/headless/viewport/timeout 无后端同名字段，合并写入 extra_config。
+    """
+    browser_keys = (
+        "browser",
+        "headless",
+        "viewport_width",
+        "viewport_height",
+        "timeout",
+    )
+    data = {}
+    extra_patch = {}
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        if k in browser_keys:
+            extra_patch[k] = v
+        else:
+            data[k] = v
+    if extra_patch:
+        # 与已有 extra_config 合并（读-改-写；失败则仅写本次补丁）
+        try:
+            current = _request("GET", f"env-configs/{config_id}/")
+            payload = current.get("data", current) if isinstance(current, dict) else {}
+            existing = {}
+            if isinstance(payload, dict):
+                existing = payload.get("extra_config") or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            data["extra_config"] = {
+                **existing,
+                **extra_patch,
+                "note": "browser/headless/viewport 由执行器配置生效，此处仅作记录",
+            }
+        except Exception:
+            data["extra_config"] = {
+                **extra_patch,
+                "note": "browser/headless/viewport 由执行器配置生效，此处仅作记录",
+            }
+    if not data:
+        return {"status": "error", "message": "无有效更新字段"}
     result = _request("PATCH", f"env-configs/{config_id}/", data=data)
     if result.get("status") == "success" or result.get("data"):
-        return {"status": "success", "message": "环境配置更新成功", "data": result.get("data", result)}
+        return {
+            "status": "success",
+            "message": "环境配置更新成功"
+            + ("（浏览器参数已写入 extra_config）" if extra_patch else ""),
+            "data": result.get("data", result),
+        }
     return result
 
 
@@ -713,24 +822,42 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
     ws_url = _base_url().replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/ui/web/'
     
     result = {"status": "pending", "message": "任务已发送"}
+    bound_record_id = None
+    bound_execution_id = None
     execution_done = threading.Event()
     
     def on_message(ws, message):
-        nonlocal result
+        nonlocal result, bound_record_id, bound_execution_id
         try:
             data = json.loads(message)
+            func_name = data.get("data", {}).get("func_name")
+            func_args = data.get("data", {}).get("func_args", {}) or {}
+            # 发起时服务端回传本次 record_id / execution_id
+            if func_name == "effective_runtime":
+                if func_args.get("case_id") in (None, testcase_id):
+                    if func_args.get("record_id"):
+                        bound_record_id = func_args.get("record_id")
+                    if func_args.get("execution_id"):
+                        bound_execution_id = func_args.get("execution_id")
             # 检查是否是执行结果
-            if data.get("data", {}).get("func_name") in ("u_case_result", "case_result"):
-                func_args = data.get("data", {}).get("func_args", {})
+            if func_name in ("u_case_result", "case_result"):
                 if func_args.get("case_id") == testcase_id:
+                    rid = func_args.get("record_id") or bound_record_id
+                    eid = func_args.get("execution_id") or bound_execution_id
                     result = {
                         "status": "success" if func_args.get("status") == "success" else "failed",
                         "case_id": testcase_id,
+                        "record_id": rid,
+                        "execution_id": eid,
                         "message": func_args.get("message", ""),
                         "total_steps": func_args.get("total_steps", 0),
                         "passed_steps": func_args.get("passed_steps", 0),
                         "failed_steps": func_args.get("failed_steps", 0),
+                        "skipped_steps": func_args.get("skipped_steps", 0),
                         "duration": func_args.get("duration", 0),
+                        "parametrize_results": func_args.get("parametrize_results") or [],
+                        "test_result": func_args.get("status"),
+                        "note": "工具受理成功不等于测试通过；以 test_result/断言为准",
                     }
                     execution_done.set()
             # 检查错误消息
@@ -798,21 +925,44 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
             return result
         else:
             ws.close()
-            # 超时后查询最新执行记录
-            records = get_execution_records(testcase_id=testcase_id, limit=1)
-            if records and len(records) > 0:
-                latest = records[0]
-                return _filter_images({
-                    "status": "timeout",
-                    "message": f"等待超时，最新记录状态: {latest.get('status')}",
-                    "latest_record": latest
-                })
-            return {"status": "timeout", "message": f"等待执行结果超时 ({timeout}s)"}
+            # 超时：只查本次绑定的 record_id，禁止「最新记录」串用
+            if bound_record_id:
+                try:
+                    rec = get_execution_record(int(bound_record_id))
+                    return _filter_images({
+                        "status": "timeout",
+                        "message": f"等待超时，已按本次 record_id={bound_record_id} 回查",
+                        "record_id": bound_record_id,
+                        "execution_id": bound_execution_id,
+                        "bound_record": rec,
+                    })
+                except Exception as e:
+                    return {
+                        "status": "timeout",
+                        "message": (
+                            f"等待超时且回查 record_id={bound_record_id} 失败: {e}。"
+                            "禁止改查该用例最新记录。"
+                        ),
+                        "record_id": bound_record_id,
+                        "execution_id": bound_execution_id,
+                    }
+            return {
+                "status": "timeout",
+                "message": (
+                    f"等待执行结果超时 ({timeout}s)，且未收到本次 record_id；"
+                    "请重试或按 execution_id 查询，禁止用最新记录交差。"
+                ),
+            }
     else:
         # 不等待，直接返回
         time.sleep(1)  # 等待命令发送
         ws.close()
-        return {"status": "sent", "message": "执行命令已发送，请稍后查询执行记录"}
+        return {
+            "status": "sent",
+            "message": "执行命令已发送，请使用返回的 record_id/execution_id 查询",
+            "record_id": bound_record_id,
+            "execution_id": bound_execution_id,
+        }
 
 
 def execute_page_steps(step_id: int, env_config_id: int = None, actuator_id: str = None):
@@ -895,6 +1045,10 @@ def main():
     
     # 用例参数
     parser.add_argument("--level", help="用例等级 (P0/P1/P2/P3)")
+    parser.add_argument("--front_custom", help="前置自定义变量 (JSON)")
+    parser.add_argument("--front_sql", help="前置 SQL (JSON)")
+    parser.add_argument("--posterior_sql", help="后置 SQL (JSON)")
+    parser.add_argument("--parametrize", help="参数化数据行 (JSON list/dict)")
     
     # 公共数据参数
     parser.add_argument("--key", help="数据键名")
@@ -967,8 +1121,27 @@ def main():
         # 测试用例
         "get_testcases": lambda: get_testcases(args.project_id, args.module_id, args.level, args.limit),
         "get_testcase": lambda: get_testcase(args.testcase_id),
-        "create_testcase": lambda: create_testcase(args.project_id, args.module_id, args.name, args.description, args.level or "P2"),
-        "update_testcase": lambda: update_testcase(args.testcase_id, args.name, args.description, args.level),
+        "create_testcase": lambda: create_testcase(
+            args.project_id,
+            args.module_id,
+            args.name,
+            args.description,
+            args.level or "P2",
+            front_custom=args.front_custom,
+            front_sql=args.front_sql,
+            posterior_sql=args.posterior_sql,
+            parametrize=args.parametrize,
+        ),
+        "update_testcase": lambda: update_testcase(
+            args.testcase_id,
+            args.name,
+            args.description,
+            args.level,
+            front_custom=args.front_custom,
+            front_sql=args.front_sql,
+            posterior_sql=args.posterior_sql,
+            parametrize=args.parametrize,
+        ),
         "delete_testcase": lambda: delete_testcase(args.testcase_id),
         "set_case_steps": lambda: set_case_steps(args.testcase_id, [int(x) for x in args.page_step_ids.split(",")]),
         # 公共数据

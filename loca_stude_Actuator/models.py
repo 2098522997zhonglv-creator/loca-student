@@ -4,8 +4,8 @@ UI自动化执行器 - 消息模型
 """
 
 from enum import IntEnum
-from typing import Any, Optional
-from pydantic import BaseModel
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field
 
 
 class NoticeType(IntEnum):
@@ -68,6 +68,11 @@ class CaseResultModel(BaseModel):
     total_steps: int = 0
     passed_steps: int = 0
     failed_steps: int = 0
+    skipped_steps: int = 0
     duration: float = 0
     steps: list[StepResultModel] = []
     trace_path: Optional[str] = None  # Playwright Trace 文件路径
+    record_id: Optional[int] = None
+    execution_id: Optional[str] = None
+    parametrize_row: Optional[int] = None
+    parametrize_results: List[Any] = Field(default_factory=list)

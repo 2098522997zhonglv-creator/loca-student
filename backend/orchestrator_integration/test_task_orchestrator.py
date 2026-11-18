@@ -149,6 +149,32 @@ class PlanAndLayerTests(unittest.TestCase):
         reload_skill_catalog()
         reload_capability_catalog()
 
+    def test_p1_prepare_cleanup_nodes_for_complex_execute(self):
+        plan = build_task_plan(
+            "执行测试用例：复杂参数化，需要数据准备与清理",
+            _dec(),
+        )
+        ids = [n.node_id for n in plan.nodes]
+        self.assertEqual(ids[0], "query_cases")
+        self.assertIn("prepare_data", ids)
+        self.assertIn("run_or_browser", ids)
+        self.assertIn("assert_and_deliver", ids)
+        self.assertIn("cleanup_data", ids)
+        prep = next(n for n in plan.nodes if n.node_id == "prepare_data")
+        self.assertIn("prepared_object_ids", prep.output_keys)
+        clean = next(n for n in plan.nodes if n.node_id == "cleanup_data")
+        self.assertEqual(clean.depends_on, ["assert_and_deliver"])
+        run = next(n for n in plan.nodes if n.node_id == "run_or_browser")
+        self.assertEqual(run.depends_on, ["prepare_data"])
+
+    def test_simple_execute_skips_prepare_cleanup(self):
+        plan = build_task_plan("执行测试用例 42", _dec())
+        ids = [n.node_id for n in plan.nodes]
+        self.assertIn("query_cases", ids)
+        self.assertIn("run_or_browser", ids)
+        self.assertNotIn("prepare_data", ids)
+        self.assertNotIn("cleanup_data", ids)
+
     def test_ac01_cart_phrase_builds_browser_plan(self):
         # AC01：同义表达识别
         msg = "把这个商品放进购物车，入口 https://example.com/p/1"

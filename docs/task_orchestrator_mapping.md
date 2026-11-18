@@ -35,7 +35,17 @@
 
 | Skill | 优化要点 |
 |---|---|
-| task-orchestrator | 来源类型、执行标识、跨工具事实、断言节点、三层步数 |
-| ui-automation | 真实 47 动作入 Catalog；playwright 主浏览器；本次 record_id |
+| task-orchestrator | 来源类型、执行标识、跨工具事实、断言节点、三层步数；P1 `prepare_data`/`cleanup_data` |
+| ui-automation | 真实 47 动作入 Catalog；playwright 主浏览器；本次 record_id；P1 变量/条件/参数化/前后置；env→extra_config |
 | api-automation | 真实 120 动作入 Catalog；task_execution_id；success≠passed |
 | playwright-skill | 业务断言/证据表；主浏览器；禁止弱断言 |
+
+## P1 执行契约摘要
+
+| 项 | 约定 |
+|---|---|
+| 步骤类型 3/4 | 运行时变量 / 条件；条件假 → skipped |
+| 步骤类型 5 | 执行前拒绝（非定位失败） |
+| front_* / posterior_sql / parametrize | 模型→序列化→执行器全链路；多行结果隔离 |
+| record_id | 受理即建 running 记录；结果更新同一 id |
+| env browser 字段 | 写入 `extra_config`，不以同名字段落库 |
