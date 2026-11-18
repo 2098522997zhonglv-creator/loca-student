@@ -6,6 +6,12 @@ LLM 分层结论是候选，不产生权限。功能开关关闭时回退旧 zon
 
 from __future__ import annotations
 
+from orchestrator_integration.task_orchestrator.budget_presets import (
+    LayerBudgetPreset,
+    build_layer_budget_preset,
+    count_testcase_refs,
+    infer_plan_kind,
+)
 from orchestrator_integration.task_orchestrator.capability_catalog import (
     CapabilitySummary,
     get_capability,
@@ -44,6 +50,10 @@ from orchestrator_integration.task_orchestrator.runtime_bridge import (
 __all__ = [
     "STRATEGY_VERSION",
     "is_task_orchestrator_enabled",
+    "LayerBudgetPreset",
+    "build_layer_budget_preset",
+    "count_testcase_refs",
+    "infer_plan_kind",
     "CapabilitySummary",
     "get_capability",
     "list_capability_summaries",

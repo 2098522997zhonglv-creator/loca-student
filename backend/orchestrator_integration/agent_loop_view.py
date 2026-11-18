@@ -2010,6 +2010,29 @@ class AgentLoopStreamAPIView(View):
                     auth_scope.update(_orch_mount.to_auth_scope_patch())
                     # 预计业务节点写入 budget 友好字段（与工具调用次数分离）
                     auth_scope["estimated_nodes"] = _orch_plan.estimated_nodes
+                    # 三层步数预设写入 Runtime 配置（抬高执行用例等长路径预算）
+                    orch_cfg = _orch_mount.config_overrides()
+                    if orch_cfg:
+                        merged_ov = dict(config_overrides or {})
+                        for k, v in orch_cfg.items():
+                            prev = merged_ov.get(k)
+                            try:
+                                if prev is None:
+                                    merged_ov[k] = v
+                                else:
+                                    merged_ov[k] = max(int(prev), int(v))
+                            except (TypeError, ValueError):
+                                merged_ov[k] = v
+                        config_overrides = merged_ov
+                    try:
+                        lb = _orch_plan.layer_budget()
+                        if lb is not None:
+                            task_commission.max_tool_steps = max(
+                                int(task_commission.max_tool_steps or 0),
+                                int(lb.total_tool_actions()),
+                            )
+                    except Exception:
+                        pass
                 agent_runtime = AgentRuntime()
                 runtime_task = await sync_to_async(agent_runtime.start)(
                     session=chat_session,

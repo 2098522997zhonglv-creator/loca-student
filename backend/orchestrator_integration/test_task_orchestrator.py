@@ -43,6 +43,66 @@ def _dec(*intents: str) -> IntentDecision:
     return IntentDecision(intents=s, primary=primary, reason="test")
 
 
+class BudgetPresetTests(unittest.TestCase):
+    def test_testcase_preset_much_larger_than_legacy_short_circuit(self):
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_TESTCASE,
+            build_layer_budget_preset,
+            count_testcase_refs,
+        )
+
+        self.assertGreaterEqual(count_testcase_refs("执行用例 451-486"), 30)
+        bp = build_layer_budget_preset(
+            plan_kind=PLAN_KIND_TESTCASE,
+            message="执行分支用例 451-486",
+            estimated_nodes=3,
+        )
+        self.assertGreaterEqual(bp.layer1_preset, 48)
+        self.assertGreaterEqual(bp.layer2_reserve, 32)
+        self.assertGreaterEqual(bp.layer3_reserve, 16)
+        self.assertGreaterEqual(bp.total_tool_actions(), 90)
+        layers = bp.to_dict()["layers"]
+        self.assertEqual(layers["1_current"], bp.layer1_preset)
+        self.assertEqual(layers["2_fallback"], bp.layer2_reserve)
+        self.assertEqual(layers["3_pending_auth"], bp.layer3_reserve)
+
+    def test_execute_plan_attaches_budget_and_commission(self):
+        from orchestrator_integration.playbooks import PLAYBOOK_TESTCASE_EXECUTE, Playbook
+        from orchestrator_integration.skill_zones import ZONE_EXECUTE, SkillZone
+        from orchestrator_integration.task_commission import commission_task
+
+        text2 = "执行测试用例 451-460"
+        plan = build_task_plan(text2, _dec())
+        self.assertEqual(plan.plan_kind, "testcase_execute")
+        self.assertIsNotNone(plan.budget_preset)
+        self.assertGreaterEqual(plan.budget_preset["max_tool_actions"], 48)
+        mount = apply_orchestrator_mount(plan)
+        patch = mount.to_auth_scope_patch()
+        self.assertIn("layer_step_presets", patch)
+        self.assertEqual(
+            patch["layer_step_presets"]["1_current"],
+            plan.budget_preset["layer1_preset"],
+        )
+        ov = mount.config_overrides()
+        self.assertGreaterEqual(ov["max_tool_actions"], 48)
+
+        z = SkillZone(
+            ZONE_EXECUTE,
+            frozenset({"ui-automation", "loca-stude", "playwright-skill"}),
+            True,
+            "test",
+        )
+        pb = Playbook(
+            PLAYBOOK_TESTCASE_EXECUTE,
+            "执行",
+            steps=(),
+            skip=(),
+            preferred_skills=("ui-automation", "playwright-skill"),
+        )
+        c = commission_task(message=text2, zone=z, playbook=pb, decision=_dec())
+        self.assertGreaterEqual(c.max_tool_steps, 48)
+
+
 class TaskOrchestratorFlagTests(unittest.TestCase):
     def test_flag_default_and_override(self):
         with mock.patch.dict(os.environ, {"TASK_ORCHESTRATOR_ENABLED": "true"}):

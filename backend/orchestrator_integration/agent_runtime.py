@@ -383,6 +383,13 @@ def topup_budget_for_user_continuation(
             add = int(tool_add)
         elif pb == "browser_act" or "browser" in pb:
             add = 28
+        elif pb in {"testcase_execute", "task_orchestrator"} or "execute" in pb:
+            from orchestrator_integration.task_orchestrator.budget_presets import (
+                PLAN_KIND_TESTCASE,
+                topup_add_for_plan_kind,
+            )
+
+            add = topup_add_for_plan_kind(PLAN_KIND_TESTCASE)
         else:
             add = 8
         expanded = expand_budget_only(

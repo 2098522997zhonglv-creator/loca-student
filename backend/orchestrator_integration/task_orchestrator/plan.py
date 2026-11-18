@@ -16,6 +16,11 @@ from orchestrator_integration.intent_router import (
     IntentDecision,
 )
 from orchestrator_integration.stage_plan import infer_auth_scope
+from orchestrator_integration.task_orchestrator.budget_presets import (
+    LayerBudgetPreset,
+    build_layer_budget_preset,
+    infer_plan_kind,
+)
 from orchestrator_integration.task_orchestrator.capability_catalog import (
     capability_exists,
 )
@@ -95,6 +100,8 @@ class TaskPlan:
     current_node: str = ""
     status: str = TASK_RUNNING
     strategy_version: str = STRATEGY_VERSION
+    plan_kind: str = ""
+    budget_preset: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -110,7 +117,29 @@ class TaskPlan:
             "current_node": self.current_node,
             "status": self.status,
             "strategy_version": self.strategy_version,
+            "plan_kind": self.plan_kind,
+            "budget_preset": dict(self.budget_preset or {}),
         }
+
+    def layer_budget(self) -> Optional[LayerBudgetPreset]:
+        raw = self.budget_preset or {}
+        if not raw:
+            return None
+        try:
+            return LayerBudgetPreset(
+                plan_kind=str(raw.get("plan_kind") or self.plan_kind or ""),
+                layer1_preset=int(raw.get("layer1_preset") or 0),
+                layer2_reserve=int(raw.get("layer2_reserve") or 0),
+                layer3_reserve=int(raw.get("layer3_reserve") or 0),
+                estimated_nodes=int(raw.get("estimated_nodes") or self.estimated_nodes),
+                case_count=int(raw.get("case_count") or 0),
+                max_tool_actions=int(raw.get("max_tool_actions") or 0),
+                max_tokens=int(raw.get("max_tokens") or 50_000),
+                max_duration_seconds=int(raw.get("max_duration_seconds") or 900),
+                max_model_calls=int(raw.get("max_model_calls") or 30),
+            )
+        except (TypeError, ValueError):
+            return None
 
     def node_by_id(self, node_id: str) -> Optional[PlanNode]:
         for n in self.nodes:
@@ -183,6 +212,8 @@ def plan_from_dict(data: Optional[Dict[str, Any]]) -> Optional[TaskPlan]:
         current_node=str(data.get("current_node") or (nodes[0].node_id if nodes else "")),
         status=str(data.get("status") or TASK_RUNNING),
         strategy_version=str(data.get("strategy_version") or STRATEGY_VERSION),
+        plan_kind=str(data.get("plan_kind") or ""),
+        budget_preset=dict(data.get("budget_preset") or {}) or None,
     )
 
 
@@ -269,6 +300,15 @@ def build_task_plan(
         nodes[0].status = NODE_DONE
         current = nodes[1].node_id if len(nodes) > 1 else nodes[0].node_id
 
+    plan_kind = infer_plan_kind(
+        node_ids=[n.node_id for n in nodes],
+        message=text,
+    )
+    budget = build_layer_budget_preset(
+        plan_kind=plan_kind,
+        estimated_nodes=len(nodes),
+        message=text,
+    )
     return TaskPlan(
         task_id=tid,
         goal=text[:2000] or "完成本轮用户目标",
@@ -287,6 +327,8 @@ def build_task_plan(
         current_node=current,
         status=TASK_RUNNING,
         strategy_version=STRATEGY_VERSION,
+        plan_kind=plan_kind,
+        budget_preset=budget.to_dict(),
     )
 
 
@@ -313,15 +355,24 @@ def _build_nodes(
         )
     )
     executeish = any(
-        k in text for k in ("执行用例", "执行测试", "跑用例", "testcase", "自动化执行")
+        k in text
+        for k in (
+            "执行用例",
+            "执行测试",
+            "执行分支",
+            "跑用例",
+            "testcase",
+            "自动化执行",
+            "用例执行",
+        )
     )
     searchish = INTENT_SEARCH in decision.intents or any(
         k in text for k in ("知识库", "查规则", "入口", "分支", "tip-")
     )
     platform_write = INTENT_WRITE in decision.intents and INTENT_PLATFORM in decision.intents
 
-    # 用例执行路径：查询 → 执行/浏览器兜底 → 交付
-    if executeish and not browserish:
+    # 用例执行路径优先：即使话术带「浏览器实测」，也走执行计划（浏览器在二层备用）
+    if executeish:
         return [
             PlanNode(
                 node_id="query_cases",
@@ -333,14 +384,18 @@ def _build_nodes(
             ),
             PlanNode(
                 node_id="run_or_browser",
-                goal="有 UI 用例则执行；否则浏览器按步骤实测",
+                goal="有 UI 用例则执行；否则浏览器按步骤实测（二层备用）",
                 depends_on=["query_cases"],
                 primary_candidates=[
                     "ui-automation",
                     "playwright-skill",
                     "execute_skill_script",
                 ],
-                fallback_candidates=["playwright-cli", "request_executor_heal"],
+                fallback_candidates=[
+                    "playwright-cli",
+                    "request_executor_heal",
+                    "knowledge_search",
+                ],
                 output_keys=["execution_result", "screenshots"],
                 completion_checks=["返回真实执行结果或页面观察证据"],
             ),

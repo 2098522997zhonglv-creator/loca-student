@@ -8,6 +8,7 @@
 | deliverables / authorization_scope / forbidden_actions | `AgentTask.auth_scope`（含 allow/deny/deliver） |
 | facts | `AgentTask.facts`（值/来源/确认时间） |
 | estimated_nodes / current_node | `auth_scope.estimated_nodes`；`AgentTask.current_stage` |
+| 三层步数预设 | `auth_scope.budget_preset` / `layer_step_presets` → `budget.max_tool_actions`（一层预设+二层备用+三层批准预留） |
 | nodes[] | `AgentTask.stage_plan`（StageSpec 映射）+ `facts.task_plan` |
 | pending_auth | `facts.task_plan.pending_auth`；批准复用写确认/中断 |
 | strategy_version | `facts.strategy_version`（`task_orchestrator_v1` / `zone_commission_v1`） |

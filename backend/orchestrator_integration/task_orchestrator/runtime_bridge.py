@@ -41,7 +41,7 @@ class OrchestratorMount:
     skip_legacy_intersect: bool = True  # FR11：禁止旧规则二次裁剪
 
     def to_auth_scope_patch(self) -> Dict[str, Any]:
-        return {
+        patch: Dict[str, Any] = {
             "strategy_version": self.strategy_version,
             "allowed_skills": sorted(self.skill_allowlist),
             "layer1": list(self.decision.layer1_mount),
@@ -50,7 +50,25 @@ class OrchestratorMount:
             "activated_fallbacks": sorted(self.activated_fallbacks),
             "current_node": self.plan.current_node,
             "estimated_nodes": self.plan.estimated_nodes,
+            "plan_kind": self.plan.plan_kind,
         }
+        if self.plan.budget_preset:
+            patch["budget_preset"] = dict(self.plan.budget_preset)
+            layers = (self.plan.budget_preset or {}).get("layers") or {}
+            patch["layer_step_presets"] = {
+                "1_current": layers.get("1_current")
+                or self.plan.budget_preset.get("layer1_preset"),
+                "2_fallback": layers.get("2_fallback")
+                or self.plan.budget_preset.get("layer2_reserve"),
+                "3_pending_auth": layers.get("3_pending_auth")
+                or self.plan.budget_preset.get("layer3_reserve"),
+                "max_tool_actions": self.plan.budget_preset.get("max_tool_actions"),
+            }
+        return patch
+
+    def config_overrides(self) -> Dict[str, Any]:
+        lb = self.plan.layer_budget()
+        return lb.as_config_overrides() if lb else {}
 
 
 def apply_orchestrator_mount(
@@ -174,7 +192,22 @@ def build_orchestrator_hint(mount: OrchestratorMount) -> str:
         f"- 任务目标: {plan.goal[:200]}",
         f"- 预计业务节点: {plan.estimated_nodes}（与工具调用次数分开）",
         f"- 当前节点: {plan.current_node}｜任务状态: {plan.status}",
+        f"- 计划类型: {plan.plan_kind or '(未标)'}",
     ]
+    bp = plan.budget_preset or {}
+    if bp:
+        lines.append(
+            "- 三层步数预设（工具调用上限分量，非业务节点数）: "
+            f"一层预设={bp.get('layer1_preset')}｜"
+            f"二层备用={bp.get('layer2_reserve')}｜"
+            f"三层批准预留={bp.get('layer3_reserve')}｜"
+            f"合计上限={bp.get('max_tool_actions')}"
+            + (
+                f"｜用例约 {bp.get('case_count')} 条"
+                if bp.get("case_count")
+                else ""
+            )
+        )
     if node:
         lines.append(f"- 节点目标: {node.goal}")
         lines.append(

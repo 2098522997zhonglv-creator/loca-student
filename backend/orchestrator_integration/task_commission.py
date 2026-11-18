@@ -195,9 +195,20 @@ def commission_task(
             PLAYBOOK_TICKET_KB,
         }
     )
-    # 浏览器交互步数更多（导航+传图+加购+重试），轻量通道放宽预算
+    # 浏览器 / 用例执行路径工具步数远高于普通短路（实测+重试+二层备用）
     if pb_id == PLAYBOOK_BROWSER_ACT:
         step_cap_override = 28
+    elif pb_id == PLAYBOOK_TESTCASE_EXECUTE or zone.zone_id == ZONE_EXECUTE:
+        # 与 task_orchestrator budget_presets 基线对齐；编排开启时还会再抬到三层合计
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_TESTCASE,
+            build_layer_budget_preset,
+        )
+
+        _bp = build_layer_budget_preset(
+            plan_kind=PLAN_KIND_TESTCASE, message=message or ""
+        )
+        step_cap_override = _bp.total_tool_actions()
     else:
         step_cap_override = None
     # 工单沉淀入库 / 平台写入：短路提示仍开，但走重量通道 + 草稿写
@@ -243,9 +254,19 @@ def commission_hint(commission: TaskCommission) -> str:
         f"- Escape Hatch 剩余: {commission.max_escape_hatches - commission.escape_used}",
         f"- 步数预算: {commission.tool_steps_used}/{commission.max_tool_steps}；"
         f"扩权最多 {commission.max_escape_hatches} 次；轻量失败重试≤{commission.max_light_retries}",
-        "- Fork-Join：只读可 parallel；写入/不可逆强制串行且 irreversible 置末",
-        "- 禁止要求用户点名 Skill、说「执行」、或重写逐步剧本；不够就 request_tool_expansion 或换主类 skill 自愈。",
     ]
+    if commission.playbook_id == PLAYBOOK_TESTCASE_EXECUTE or commission.zone_id == ZONE_EXECUTE:
+        lines.append(
+            "- 用例执行路径已按三层步数预设抬高工具预算："
+            "一层直接执行 / 二层浏览器或等价备用 / 三层批准后续跑；"
+            "预计业务节点与工具调用次数分开统计。"
+        )
+    lines.append(
+        "- Fork-Join：只读可 parallel；写入/不可逆强制串行且 irreversible 置末"
+    )
+    lines.append(
+        "- 禁止要求用户点名 Skill、说「执行」、或重写逐步剧本；不够就 request_tool_expansion 或换主类 skill 自愈。"
+    )
     if commission.post_condition:
         lines.append(f"- 退出断言: {commission.post_condition}")
     if commission.short_circuit:
