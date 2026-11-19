@@ -1619,6 +1619,33 @@ class AgentLoopStreamAPIView(View):
                     ) | set(_activated_fb)
                 except Exception:
                     pass
+                # 执行用例话术：禁止主类为空 / 卸掉 execute（防标题过长未命中旧正则）
+                try:
+                    from orchestrator_integration.intent_router import (
+                        is_testcase_execute_intent as _is_tc_exec,
+                    )
+
+                    if _is_tc_exec(_routing_message, _early_decision):
+                        from orchestrator_integration.skill_zones import (
+                            ZONE_EXECUTE as _ZX,
+                        )
+                        from orchestrator_integration.skill_zones import zone_skills
+
+                        _exec_skills = set(zone_skills(_ZX)) | {
+                            "ui-automation",
+                            "loca-stude",
+                            "playwright-skill",
+                            "api-automation",
+                        }
+                        skill_allowlist = set(skill_allowlist or []) | _exec_skills
+                        mount_execute = True
+                        task_commission.primary_skills = frozenset(
+                            set(task_commission.primary_skills or []) | _exec_skills
+                        )
+                        if not task_commission.playbook_id:
+                            task_commission.playbook_id = "testcase_execute"
+                except Exception as _tc_guard_err:
+                    logger.debug("testcase execute mount guard skipped: %s", _tc_guard_err)
             else:
                 _stage_specs = build_stage_plan(
                     _routing_message,
@@ -1674,6 +1701,31 @@ class AgentLoopStreamAPIView(View):
                         skill_allowlist = (
                             skill_allowlist & stage_skills or skill_allowlist
                         )
+                # 执行用例话术兜底（非编排路径）
+                try:
+                    from orchestrator_integration.intent_router import (
+                        is_testcase_execute_intent as _is_tc_exec2,
+                    )
+
+                    if _is_tc_exec2(_routing_message, _early_decision):
+                        from orchestrator_integration.skill_zones import (
+                            ZONE_EXECUTE as _ZX2,
+                        )
+                        from orchestrator_integration.skill_zones import zone_skills
+
+                        _exec_skills2 = set(zone_skills(_ZX2)) | {
+                            "ui-automation",
+                            "loca-stude",
+                            "playwright-skill",
+                            "api-automation",
+                        }
+                        skill_allowlist = set(skill_allowlist or []) | _exec_skills2
+                        mount_execute = True
+                        task_commission.primary_skills = frozenset(
+                            set(task_commission.primary_skills or []) | _exec_skills2
+                        )
+                except Exception:
+                    pass
 
             # 短路 ≠ 禁知识库。仅当剧本/策略显式禁止，或阶段能力未声明 KB 且非浏览器主链时才裁掉。
             stage_needs_kb = False

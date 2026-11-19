@@ -354,18 +354,37 @@ def _build_nodes(
             "购物车",
         )
     )
-    executeish = any(
-        k in text
-        for k in (
-            "执行用例",
-            "执行测试",
-            "执行分支",
-            "跑用例",
-            "testcase",
-            "自动化执行",
-            "用例执行",
+    # 与 intent_router 对齐：允许「执行…模块N…全部用例」中间夹需求标题
+    try:
+        from orchestrator_integration.intent_router import (
+            looks_like_testcase_execute_keywords,
         )
-    )
+
+        executeish = looks_like_testcase_execute_keywords(text) or any(
+            k in text
+            for k in (
+                "执行用例",
+                "执行测试",
+                "执行分支",
+                "跑用例",
+                "testcase",
+                "自动化执行",
+                "用例执行",
+            )
+        )
+    except Exception:
+        executeish = any(
+            k in text
+            for k in (
+                "执行用例",
+                "执行测试",
+                "执行分支",
+                "跑用例",
+                "testcase",
+                "自动化执行",
+                "用例执行",
+            )
+        )
     searchish = INTENT_SEARCH in decision.intents or any(
         k in text for k in ("知识库", "查规则", "入口", "分支", "tip-")
     )
