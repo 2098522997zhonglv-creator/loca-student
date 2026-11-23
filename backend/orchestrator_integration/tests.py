@@ -733,7 +733,7 @@ class AgentSmartnessTests(SimpleTestCase):
                 text,
             )
 
-        # 执行用例：跳过 KB、裁掉 knowledge_search，并注入执行剧本
+        # 执行用例：跳过预检索，但保留 knowledge_search 供 UI 空时查入口
         tools_kb = [
             _T("knowledge_search"),
             _T("read_skill_content"),
@@ -744,11 +744,11 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertEqual(policy.reason, "testcase_execute")
         self.assertTrue(policy.skip_prefetch)
-        self.assertFalse(policy.allow_knowledge_search)
-        self.assertNotIn("knowledge_search", [t.name for t in kept])
+        self.assertTrue(policy.allow_knowledge_search)
+        self.assertIn("knowledge_search", [t.name for t in kept])
         self.assertIn("execute_skill_script", [t.name for t in kept])
         self.assertIn("execute_testcase", hint)
-        self.assertIn("禁止调用 knowledge_search", hint)
+        self.assertIn("禁止 report_task_blocked", hint)
 
         # 未挂知识库时，纯问答也不裁执行工具
         _, kept, hint, _policy = apply_intent_routing(
@@ -834,13 +834,14 @@ class AgentSmartnessTests(SimpleTestCase):
             policy = decide_kb_access_policy(text)
             self.assertEqual(policy.reason, "testcase_execute", text)
             self.assertTrue(policy.skip_prefetch, text)
-            self.assertFalse(policy.allow_knowledge_search, text)
+            # UI 空时需 knowledge_search 取入口 URL；仍跳过预检索
+            self.assertTrue(policy.allow_knowledge_search, text)
             _, kept, hint, policy2 = apply_intent_routing(
                 text, tools, kb_active=True
             )
             self.assertEqual(policy2.reason, "testcase_execute", text)
             self.assertIn("execute_skill_script", [t.name for t in kept], text)
-            self.assertNotIn("knowledge_search", [t.name for t in kept], text)
+            self.assertIn("knowledge_search", [t.name for t in kept], text)
             self.assertIn("execute_testcase", hint, text)
 
         self.assertFalse(

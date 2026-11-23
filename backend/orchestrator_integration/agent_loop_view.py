@@ -97,9 +97,10 @@ _KB_PRIORITY_HINT = """
 ## 多工具顺序与组合
 - 有依赖时必须按序：先 read_skill_content，再只读 execute（get_/list_），再写入。
 - 多条写入：一次 commands + parallel=false；仅互不依赖的只读/执行才可 parallel=true。
-- 执行用例（用户已确认执行）：本轮不要 knowledge_search；同会话内勿重复 read_skill_content；
-  优先一条 `execute_testcase --testcase_id N --wait_result`；成功后不要再 get_execution_records；
-  同一失败命令无差别重试最多 1 次。
+- 执行用例（用户已确认执行）：同会话内勿重复 read_skill_content；有 UiTestCase 则一条
+  `execute_testcase --testcase_id N --wait_result`；UI 为空则 playwright 按功能步骤实测。
+  knowledge_search 仅用于取入口 URL/账号，禁止用知识库代替实测；成功后不要再 get_execution_records；
+  未真正执行前禁止 report_task_blocked；同一失败命令无差别重试最多 1 次。
 
 ## 自主执行（禁止逼用户写剧本 / 禁止假「下一步」）
 - 用户目标含 URL / 加购 / 传图 / 执行用例时：同一轮内连续调用工具直到完成或不可恢复失败。
@@ -2565,8 +2566,10 @@ class AgentLoopStreamAPIView(View):
                     "web_only": "本轮以读网页为主且无有效检索词，已跳过知识库预检索。",
                     "write_approval": "本轮为写入确认，已跳过知识库预检索。",
                     "testcase_execute": (
-                        "本轮为执行测试用例/自动化：已跳过知识库与精排；禁止 knowledge_search；"
-                        "同会话内勿重复 read_skill_content；一条 execute_testcase --wait_result 即可，"
+                        "本轮为执行测试用例/自动化：已跳过预检索与精排。"
+                        "同会话内勿重复 read_skill_content；有 UiTestCase 则一条 "
+                        "execute_testcase --wait_result；UI 为空则 playwright 实测。"
+                        "knowledge_search 仅查入口 URL/账号；禁止只查询不执行；"
                         "成功后不要再 get_execution_records；失败无差别重试最多 1 次。"
                     ),
                 }.get(kb_policy.reason, "本轮已跳过知识库预检索。")

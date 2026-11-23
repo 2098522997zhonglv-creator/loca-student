@@ -760,7 +760,25 @@ def evaluate_post_condition(
             reasons.append("url-reader 无输出")
         elif "needs_confirmation" in joined and "draft" in joined:
             pass
-    elif playbook_id == "testcase_execute":
+    elif playbook_id in {"testcase_execute", "task_orchestrator"}:
+        from orchestrator_integration.execute_flow_guard import (
+            has_execute_run_evidence,
+        )
+
+        looks_like_case_flow = playbook_id == "testcase_execute" or any(
+            k in joined
+            for k in ("get_testcases", "case_id", "testcase_id", "get_testcase")
+        )
+        # 仅查询/空转不得宣称执行完成（app.log 多次只查后 assert/blocked）
+        if (
+            looks_like_case_flow
+            and joined.strip()
+            and not has_execute_run_evidence(tool_results)
+        ):
+            ok = False
+            reasons.append(
+                "未执行用例：缺少 execute_testcase / run_testcase / 浏览器实测证据"
+            )
         if "不在本轮分区" in joined or "越权" in joined:
             ok = False
             reasons.append("执行区门禁拒绝")

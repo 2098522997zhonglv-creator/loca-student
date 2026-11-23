@@ -317,10 +317,53 @@ def get_meta_tools() -> list:
             summary: 已收集的参数与进展摘要
             missing_capability: 缺少的能力/权限说明
         """
+        from orchestrator_integration.execute_flow_guard import (
+            PREMATURE_BLOCKED_MSG,
+            analyze_execute_progress,
+            is_premature_blocked,
+        )
         from orchestrator_integration.telemetry_context import get_telemetry_context
         from orchestrator_integration.tool_telemetry import record_tool_telemetry
 
         ctx = get_telemetry_context()
+        commission = ctx.commission
+        prior = list(getattr(commission, "last_tool_results", None) or []) if commission else []
+        # 摘要里常含 case_id / get_testcases，一并计入进展判定
+        progress = analyze_execute_progress(
+            prior + [summary or "", missing_capability or ""]
+        )
+        if (ctx.zone or "").strip() == "execute" and is_premature_blocked(progress):
+            record_tool_telemetry(
+                zone=ctx.zone,
+                playbook=ctx.playbook,
+                tool_name="report_task_blocked",
+                skill_name="",
+                success=False,
+                error_kind="premature_blocked",
+                attribution="planning",
+                session_id=ctx.session_id,
+                user_id=ctx.user_id,
+            )
+            logger.info(
+                "[report_task_blocked] premature reject discovery=%s has_cases=%s",
+                progress.get("discovery_hits"),
+                progress.get("has_cases"),
+            )
+            return json.dumps(
+                {
+                    "status": "rejected",
+                    "error_code": "premature_blocked",
+                    "message": PREMATURE_BLOCKED_MSG,
+                    "summary": (summary or "").strip()[:2000],
+                    "missing_capability": (missing_capability or "").strip()[:500],
+                    "next": (
+                        "UI 有用例 → execute_testcase --wait_result；"
+                        "UI 为空 → playwright 按功能步骤实测（可 knowledge_search 取入口 URL）。"
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         record_tool_telemetry(
             zone=ctx.zone,
             playbook=ctx.playbook,

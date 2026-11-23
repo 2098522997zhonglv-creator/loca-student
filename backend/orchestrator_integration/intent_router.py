@@ -518,12 +518,12 @@ def decide_kb_access_policy(
     decision = decision or classify_user_intent(text)
     pq = (prefetch_query or "").strip()
 
-    # 确认/执行用例：完全离开知识库路径（无预检索、无精排、禁 knowledge_search）
+    # 确认/执行用例：跳过预检索/精排，但保留 knowledge_search 供 UI 空时查入口 URL
     if is_testcase_execute_intent(text, decision):
         return KbAccessPolicy(
             skip_prefetch=True,
             force_kb=False,
-            allow_knowledge_search=False,
+            allow_knowledge_search=True,
             reason="testcase_execute",
             try_answer_cache=False,
         )
@@ -717,16 +717,21 @@ def build_intent_hint(
     if kb_policy and kb_policy.reason == "testcase_execute":
         lines.extend(
             [
-                "- 本轮为「执行/验证测试」：优先查 UI 自动化用例；有则一条 "
-                "execute_testcase --testcase_id <N> --wait_result（只读执行，无需确认）。",
-                "- 同一会话内：若历史已出现过对应 Skill 的 read_skill_content，本轮不要再读。",
-                "- 若 get_testcases/get_ui_pages 为空：禁止只汇报「无法执行」；同轮改 playwright-skill，"
-                "按功能用例步骤对目标环境实测并交截图。入口可用知识库规则+分支名推导后立刻 goto，"
-                "禁止问「是否按推导地址试 / 请补入口 / 选路径 A/B」。",
+                "- 本轮为「执行/验证测试」：目标是真正跑起来，不是盘点用例。",
+                "- 最短路径：get_modules（可选）→ get_testcases(loca-stude 功能) → "
+                "get_testcases(ui-automation)。有 UiTestCase 则立刻一条 "
+                "execute_testcase --testcase_id <N> --wait_result（无需确认）。",
+                "- loca-stude 的功能 case_id ≠ UiTestCase id；禁止拿功能 ID 去 "
+                "execute_testcase，也禁止用 dig get_testcase_detail / list_files / "
+                "get_env 代替执行。",
+                "- 若 UI get_testcases/get_ui_pages 为空：同轮改 playwright-skill，"
+                "按功能用例步骤对目标环境实测并交截图。缺入口 URL 时 knowledge_search "
+                "只查环境地址/账号，取到后立刻 goto；禁止问「是否按推导地址试 / 请补入口」。",
+                "- knowledge_search 仅用于取入口/账号，禁止用知识库结论文代替实测。",
                 "- 成功后不要再紧跟 get_execution_records；仅失败/timeout 排查时查一次。",
-                "- 未明确要求「生成/创建 UI 自动化」时：禁止 create_ui_* / set_case_steps；"
-                "浏览器实测不属于写入。",
-                "- 多条互相独立的只读/执行：commands + parallel=true；有依赖则 parallel=false。",
+                "- 未明确要求「生成/创建 UI 自动化」时：禁止 create_ui_* / set_case_steps。",
+                "- 在完成 execute_testcase 或 playwright 实测前：禁止 report_task_blocked / "
+                "assert_task_postcondition。",
                 "- 同一命令无差别重试不得超过 1 次；第二次仍失败则换浏览器实测或 blocked。",
             ]
         )

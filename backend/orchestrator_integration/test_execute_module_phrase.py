@@ -36,7 +36,8 @@ class ExecuteModulePhraseTests(unittest.TestCase):
         d = IntentDecision(intents={"qa"}, primary="qa", reason="t")
         kb = decide_kb_access_policy(_USER_MSG, d)
         self.assertEqual(kb.reason, "testcase_execute")
-        self.assertFalse(kb.allow_knowledge_search)
+        # UI 空时保留 knowledge_search 取入口；仍跳过预检索
+        self.assertTrue(kb.allow_knowledge_search)
         z = resolve_skill_zone(_USER_MSG, d, kb)
         self.assertEqual(z.zone_id, ZONE_EXECUTE)
         self.assertTrue(z.allow_execute)

@@ -1294,6 +1294,47 @@ def get_skill_tools(
         except Exception:
             pass
 
+    def _maybe_force_run_nudge(
+        text: str,
+        *,
+        commands: Optional[list] = None,
+        command: Optional[str] = None,
+    ) -> str:
+        """执行区查完用例仍空转时，在工具结果末尾附加强制推进提示。"""
+        try:
+            from orchestrator_integration.execute_flow_guard import (
+                analyze_execute_progress,
+                append_force_run_nudge,
+                should_nudge_force_run,
+            )
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            if (ctx.zone or "").strip() != "execute":
+                return text
+            extras: list[str] = []
+            if command:
+                extras.append(str(command))
+            for item in commands or []:
+                if isinstance(item, dict) and item.get("command"):
+                    extras.append(str(item.get("command")))
+                elif isinstance(item, str):
+                    extras.append(item)
+            prior = []
+            if ctx.commission is not None:
+                prior = list(getattr(ctx.commission, "last_tool_results", None) or [])
+            progress = analyze_execute_progress(prior + [text], extra_commands=extras)
+            if should_nudge_force_run(progress):
+                logger.info(
+                    "[execute_skill_script] force_run_nudge discovery=%s has_cases=%s",
+                    progress.get("discovery_hits"),
+                    progress.get("has_cases"),
+                )
+                return append_force_run_nudge(text, enabled=True)
+        except Exception as nudge_err:
+            logger.debug("force_run_nudge skipped: %s", nudge_err)
+        return text
+
     @langchain_tool
     def read_skill_content(skill_name: str) -> str:
         """
@@ -2270,7 +2311,7 @@ def get_skill_tools(
                 result_text=out[:800],
             )
             _release_batch_reservation()
-            return out
+            return _maybe_force_run_nudge(out, commands=list(commands or []))
 
         # 单个执行模式
         if not skill_name or not command:
@@ -2452,7 +2493,7 @@ def get_skill_tools(
                     error_kind="" if ok else "execute_error",
                     result_text=str(result)[:800],
                 )
-                return result
+                return _maybe_force_run_nudge(str(result), command=command)
             except Exception as exc:
                 _emit_telemetry(
                     tool_name="execute_skill_script",

@@ -425,17 +425,18 @@ def _build_nodes(
         nodes: List[PlanNode] = [
             PlanNode(
                 node_id="query_cases",
-                goal="区分来源类型并查询可执行用例/环境（平台/UI/API 标识不混用）",
+                goal="区分来源类型并查询可执行用例/环境（平台/UI/API 标识不混用）；查到后立刻进入执行，禁止 discovery 死循环",
                 primary_candidates=[
                     "ui-automation",
                     "loca-stude",
                     "api-automation",
                     "execute_skill_script",
+                    "knowledge_search",
                 ],
-                fallback_candidates=["knowledge_search", "read_skill_content"],
+                fallback_candidates=["read_skill_content", "playwright-skill"],
                 output_keys=["case_ref", "testcase_id", "env_base_url", "source_type"],
                 completion_checks=[
-                    "已确认来源类型与可执行方式；无 UiTestCase 时记录可转临时浏览器脚本"
+                    "已确认来源类型与可执行方式；无 UiTestCase 时记录可转临时浏览器脚本并进入 run_or_browser"
                 ],
             ),
         ]
@@ -495,19 +496,19 @@ def _build_nodes(
             PlanNode(
                 node_id="run_or_browser",
                 goal=(
-                    "有 UI 用例则 execute_testcase（关联本次 record_id；"
-                    "支持变量/条件/参数化/前后置）；否则浏览器按步骤实测"
+                    "有 UI 用例则立刻 execute_testcase --wait_result（关联本次 record_id）；"
+                    "UI 为空则 playwright 按功能步骤实测；禁止再堆 get_* discovery"
                 ),
                 depends_on=list(run_dep),
                 primary_candidates=[
                     "ui-automation",
                     "playwright-skill",
                     "execute_skill_script",
+                    "knowledge_search",
                 ],
                 fallback_candidates=[
                     "playwright-cli",
                     "request_executor_heal",
-                    "knowledge_search",
                 ],
                 input_refs=[
                     "case_ref",

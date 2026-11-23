@@ -137,6 +137,7 @@ def orch_node_acceptance(
                 "testcase_id",
                 "case_id",
                 "case_ref",
+                "case_name",
                 "get_testcases",
                 "get_testcase",
                 "source_type",

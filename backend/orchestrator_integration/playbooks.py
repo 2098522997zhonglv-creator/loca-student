@@ -99,10 +99,12 @@ def resolve_playbook(
             "执行测试用例/自动化",
             steps=(
                 "同会话若已读过 ui-automation：直接查询/execute，不要再反复 read_skill_content",
-                "先 get_testcases / get_testcase 判断是否存在可跑的 UI 自动化用例",
-                "若有 UiTestCase：一条 execute_testcase --testcase_id <N> --wait_result；成功后直接汇总，禁止紧跟 get_execution_records",
-                "若 UI 用例/页面/步骤为 0：禁止只写「无法执行」结束；同轮改 playwright，按功能用例步骤对目标环境实测并交截图",
-                "入口 URL：知识库规则+分支名可推导则立刻 goto 实测（标注规则推导）；禁止问用户「是否按推导地址试」",
+                "先 get_testcases(loca) 定位功能用例，再 get_testcases(ui-automation) 判断是否有可跑脚本",
+                "若有 UiTestCase：立刻一条 execute_testcase --testcase_id <N> --wait_result；成功后直接汇总，禁止紧跟 get_execution_records",
+                "loca 功能 case_id 不是 UiTestCase；禁止拿去 execute_testcase，禁止用 get_testcase_detail/list_files/get_env 空转代替执行",
+                "若 UI 用例/页面/步骤为 0：禁止只写「无法执行」或 report_task_blocked；同轮改 playwright，按功能步骤实测并交截图",
+                "缺入口 URL：knowledge_search 只查环境地址后立刻 goto；禁止问用户「是否按推导地址试」",
+                "完成 execute_testcase 或浏览器实测前禁止 assert_task_postcondition / report_task_blocked",
                 "若用户还要求生成 UI 自动化脚本：先完成浏览器实测汇报；create_ui_* 写入走确认按钮，勿中途问「下一步」",
             ),
             skip=(
@@ -111,6 +113,7 @@ def resolve_playbook(
                 "未确认的 create_ui_*/set_case_steps",
                 "无 UI 用例就停问用户",
                 "假路径 A/B 等确认",
+                "只查不跑就 blocked",
             ),
             preferred_skills=(
                 "ui-automation",
