@@ -2127,7 +2127,7 @@ class AgentLoopStreamAPIView(View):
                     pass
 
             chat_session, created = await sync_to_async(
-                ChatSession.objects.get_or_create
+                ChatSession.objects.get_or_create, thread_sensitive=False
             )(
                 session_id=session_id,
                 defaults={
@@ -2203,7 +2203,14 @@ class AgentLoopStreamAPIView(View):
                     except Exception:
                         pass
                 agent_runtime = AgentRuntime()
-                runtime_task = await sync_to_async(agent_runtime.start)(
+                logger.info(
+                    "AgentLoopStreamAPI: runtime.start begin session=%s turn=%s",
+                    session_id,
+                    _turn_relation if "_turn_relation" in locals() else "",
+                )
+                runtime_task = await sync_to_async(
+                    agent_runtime.start, thread_sensitive=False
+                )(
                     session=chat_session,
                     user=request.user,
                     project_id=int(project_id) if project_id else None,
@@ -2217,6 +2224,70 @@ class AgentLoopStreamAPIView(View):
                     config_overrides=config_overrides,
                     resume_task_id=resume_task_id,
                 )
+                logger.info(
+                    "AgentLoopStreamAPI: runtime.start done task=%s status=%s stage=%s ambiguous=%s",
+                    getattr(runtime_task, "public_task_id", None),
+                    getattr(runtime_task, "status", None),
+                    getattr(runtime_task, "current_stage", None),
+                    bool(
+                        (getattr(runtime_task, "task_scope", None) or {}).get(
+                            "ambiguous_resume"
+                        )
+                    ),
+                )
+                # create_or_resume 仍可能因旧逻辑返回消歧任务：必须可见，禁止静默 lease_held
+                if runtime_task is not None and (
+                    getattr(runtime_task, "task_scope", None) or {}
+                ).get("ambiguous_resume"):
+                    from orchestrator_integration.turn_context import (
+                        ambiguous_candidates_payload,
+                        list_open_task_contexts,
+                    )
+
+                    _cands = await sync_to_async(
+                        list_open_task_contexts, thread_sensitive=False
+                    )(
+                        session_id=session_id or "",
+                        user_id=int(request.user.id),
+                        project_id=int(project_id) if project_id else None,
+                    )
+                    payload = ambiguous_candidates_payload(_cands)
+                    amb_msg = str(
+                        payload.get("message")
+                        or "当前会话有多个未完成任务，请指定要继续哪一个（task_id）。"
+                    )
+                    logger.warning(
+                        "AgentLoopStreamAPI: runtime ambiguous_resume session=%s open=%s",
+                        session_id,
+                        len(_cands),
+                    )
+                    yield create_sse_data(
+                        {
+                            "type": "task_status",
+                            "status": "ambiguous",
+                            "error_code": "ambiguous_tasks",
+                            "message": amb_msg,
+                            "payload": payload,
+                            "message_kind": "final",
+                        }
+                    )
+                    yield create_sse_data(
+                        {
+                            "type": "stream",
+                            "data": amb_msg,
+                            "message_kind": "final",
+                        }
+                    )
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": "ambiguous",
+                            "task_status": "ambiguous",
+                            "message_kind": "final",
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
                 # 持久化编排计划与策略版本（在途任务回退依据）
                 if runtime_task is not None and _orch_plan is not None:
                     try:
@@ -2250,6 +2321,16 @@ class AgentLoopStreamAPIView(View):
                     and getattr(runtime_task, "lease_owner", "")
                     != agent_runtime.lease_owner
                 ):
+                    lease_msg = (
+                        "任务正由其他执行者处理，已返回现有状态。"
+                        "请稍后重试，或新开会话再执行用例。"
+                    )
+                    logger.warning(
+                        "AgentLoopStreamAPI: lease_held task=%s owner=%s self=%s",
+                        getattr(runtime_task, "public_task_id", None),
+                        getattr(runtime_task, "lease_owner", ""),
+                        agent_runtime.lease_owner,
+                    )
                     yield create_sse_data(
                         {
                             "type": "task_status",
@@ -2257,14 +2338,22 @@ class AgentLoopStreamAPIView(View):
                             "task_id": runtime_task.public_task_id
                             or str(runtime_task.id),
                             "status": runtime_task.status,
-                            "message": "任务正由其他执行者处理，已返回现有状态",
+                            "message": lease_msg,
                             "payload": {
                                 "lease_owner": runtime_task.lease_owner,
                                 "acquired": False,
                             },
                         }
                     )
+                    yield create_sse_data(
+                        {
+                            "type": "stream",
+                            "data": lease_msg,
+                            "message_kind": "final",
+                        }
+                    )
                     yield create_sse_data({"type": "complete", "status": "lease_held"})
+                    yield "data: [DONE]\n\n"
                     return
                 runtime_session = RuntimeSession(
                     runtime=agent_runtime,
@@ -2329,12 +2418,26 @@ class AgentLoopStreamAPIView(View):
                     "AgentLoopStreamAPI: runtime task create failed: %s", rt_err
                 )
 
-            # 8. 获取系统提示词（注入 Skills，便于基于知识库生成后写入平台）
+            # 8. 获取系统提示词
+            # 执行用例路径已挂 allowlist Skill 工具，不必再把全量 skills 元数据塞进 prompt（易卡住）
+            _include_skills = not (
+                getattr(kb_policy, "reason", "") == "testcase_execute"
+                or getattr(skill_zone, "zone_id", "") == "execute"
+            )
+            logger.info(
+                "AgentLoopStreamAPI: loading system prompt include_skills=%s",
+                _include_skills,
+            )
             effective_prompt, prompt_source = await get_effective_system_prompt_async(
                 request.user,
                 prompt_id,
                 project,
-                include_skills=True,
+                include_skills=_include_skills,
+            )
+            logger.info(
+                "AgentLoopStreamAPI: system prompt ready source=%s len=%s",
+                prompt_source,
+                len(effective_prompt or ""),
             )
 
             # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
@@ -2604,9 +2707,38 @@ class AgentLoopStreamAPIView(View):
                 )
 
             # 12. 创建 Agent（LangChain v1 统一路径）
+            # 新执行用例：独立 checkpoint，避免同会话 500+ 历史把 astream 拖死
+            _invoke_thread_id = thread_id
+            if (
+                getattr(kb_policy, "reason", "") == "testcase_execute"
+                or (
+                    (_turn_relation if "_turn_relation" in locals() else "")
+                    in ("", "none", "new_question")
+                    and getattr(skill_zone, "zone_id", "") == "execute"
+                )
+            ):
+                _tid_suffix = (
+                    getattr(runtime_task, "public_task_id", None)
+                    or getattr(task_commission, "task_id", None)
+                    or uuid.uuid4().hex[:8]
+                )
+                _invoke_thread_id = f"{thread_id}_exec_{_tid_suffix}"
+                logger.info(
+                    "AgentLoopStreamAPI: use isolated checkpoint thread=%s (base=%s)",
+                    _invoke_thread_id,
+                    thread_id,
+                )
+            yield create_sse_data(
+                {
+                    "type": "status",
+                    "message": "正在创建执行 Agent…",
+                }
+            )
             async with get_async_checkpointer() as checkpointer:
                 # 获取中间件（需要同步到异步，因为内部有 ORM 查询）
-                middleware = await sync_to_async(get_middleware_from_config)(
+                middleware = await sync_to_async(
+                    get_middleware_from_config, thread_sensitive=False
+                )(
                     active_config,
                     llm,
                     user=request.user,
@@ -2637,16 +2769,27 @@ class AgentLoopStreamAPIView(View):
 
                 # 13. 配置调用参数
                 invoke_config = {
-                    "configurable": {"thread_id": thread_id},
+                    "configurable": {"thread_id": _invoke_thread_id},
                     "recursion_limit": 1000,  # 支持约500次工具调用
                 }
                 input_messages = {"messages": [user_msg]}
 
                 # 13.1 发送前修复历史消息（配对错误 + 风险工具输出）
-                await _sanitize_history_before_model_call(
-                    agent=agent,
-                    invoke_config=invoke_config,
-                    log_prefix="AgentLoopStreamAPI",
+                # 独立 exec thread 通常无历史；sanitize 失败不得阻塞开跑
+                try:
+                    await _sanitize_history_before_model_call(
+                        agent=agent,
+                        invoke_config=invoke_config,
+                        log_prefix="AgentLoopStreamAPI",
+                    )
+                except Exception as san_err:
+                    logger.warning(
+                        "AgentLoopStreamAPI: sanitize skipped: %s", san_err
+                    )
+                logger.info(
+                    "AgentLoopStreamAPI: starting astream thread=%s tools=%s",
+                    _invoke_thread_id,
+                    len(tools),
                 )
 
                 # 14. 步骤跟踪状态

@@ -174,13 +174,29 @@ def create_or_resume_task(
         existing = open_qs.order_by("-updated_at").first()
 
     relation = (turn_relation or "").strip()
-    # RC20：多任务消歧 — 不静默 resume
-    if relation == TURN_AMBIGUOUS or (
-        open_count >= 2
-        and not resume_task_id
-        and any(
-            k in (goal or "")
-            for k in ("继续", "接着", "剩下的", "按上面的方案")
+    from orchestrator_integration.turn_context import (
+        TURN_NEW,
+        TURN_NONE,
+        _is_bare_continue_phrase,
+        _looks_like_new_execute_command,
+    )
+
+    goal_text = goal or ""
+    new_execute = _looks_like_new_execute_command(goal_text)
+    bare_continue = _is_bare_continue_phrase(goal_text)
+    # 完整「执行…用例」或显式新问题：必须新建，禁止被 goal 里的「继续」字样绑回旧任务
+    force_new = (not resume_task_id) and (
+        new_execute
+        or relation in {TURN_NEW, TURN_NONE}
+    )
+
+    # RC20：多任务消歧 — 仅短句「继续」；长执行指令不得消歧卡死
+    if (not force_new) and (
+        relation == TURN_AMBIGUOUS
+        or (
+            open_count >= 2
+            and not resume_task_id
+            and bare_continue
         )
     ):
         # 返回最近任务但标记 ambiguous（调用方读 task_scope）
@@ -192,12 +208,9 @@ def create_or_resume_task(
             existing.save(update_fields=["task_scope", "updated_at"])
         return existing
 
-    # 「继续」关键词或显式 turn_relation=supplement/continue/correct → 复用
-    continue_like = any(
-        k in (goal or "")
-        for k in ("继续", "接着", "剩下的", "复用 session_id", "按上面的方案")
-    )
-    should_resume = bool(existing) and (
+    # 短「继续」或显式 turn_relation=supplement/continue/correct → 复用
+    continue_like = bare_continue and not new_execute
+    should_resume = (not force_new) and bool(existing) and (
         relation in {TURN_CONTINUE, TURN_SUPPLEMENT, TURN_CORRECT}
         or continue_like
         or bool(resume_task_id)
