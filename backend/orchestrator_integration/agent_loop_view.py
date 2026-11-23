@@ -3454,9 +3454,8 @@ class AgentLoopStreamAPIView(View):
         ).strip()
 
         # 兜底：如果前端没传 test_case_id，尝试从消息中解析
+        # 注意：勿在本函数内再 import re，会遮蔽模块级 re，导致上方 re.sub 触发 UnboundLocalError
         if not test_case_id and user_message:
-            import re
-
             # 匹配 "执行ID为 11 的测试用例" 或 "测试用例 ID：11" 等模式
             match = re.search(
                 r"(?:执行\s*ID\s*为|测试用例\s*(?:ID|id)[：:]\s*|case[_-]?id[：:=]\s*)(\d+)",
