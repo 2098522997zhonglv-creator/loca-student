@@ -231,7 +231,7 @@ def executable_open_tasks(
     return out
 
 
-def _looks_like_new_execute_command(text: str) -> bool:
+def looks_like_new_execute_command(text: str) -> bool:
     """完整「执行…用例/模块」指令：即使含「继续推进」也是新任务，不是续跑旧任务。"""
     try:
         from orchestrator_integration.intent_router import (
@@ -246,7 +246,7 @@ def _looks_like_new_execute_command(text: str) -> bool:
         )
 
 
-def _is_bare_continue_phrase(text: str) -> bool:
+def is_bare_continue_phrase(text: str) -> bool:
     """短续跑口令；长句里夹「继续」不算。"""
     t = (text or "").strip()
     if not t:
@@ -257,6 +257,11 @@ def _is_bare_continue_phrase(text: str) -> bool:
     if len(t) <= 10 and any(k in t for k in _CONTINUE_CUES):
         return True
     return False
+
+
+# 兼容旧私有名
+_looks_like_new_execute_command = looks_like_new_execute_command
+_is_bare_continue_phrase = is_bare_continue_phrase
 
 
 def classify_turn_relation(

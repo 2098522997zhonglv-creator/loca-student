@@ -16,6 +16,14 @@ from asgiref.sync import sync_to_async
 from django.db import transaction
 from django.utils import timezone
 
+from orchestrator_integration.runtime.lease_service import (
+    acquire_lease,
+    heartbeat_lease,
+    park_for_approval,
+    release_lease,
+    try_claim_execution,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_BUDGET = {
@@ -128,236 +136,28 @@ def create_or_resume_task(
     config_overrides: Optional[Dict[str, Any]] = None,
     resume_task_id: str = "",
 ) -> Any:
-    """创建新任务或复用同会话未完成任务（继续/补充语义）。"""
-    from orchestrator_integration.models import AgentTask, AgentBlackboard
-    from orchestrator_integration.turn_context import (
-        TURN_AMBIGUOUS,
-        TURN_CONTINUE,
-        TURN_CORRECT,
-        TURN_SUPPLEMENT,
-        extract_constraint_patch,
+    """创建新任务或复用同会话未完成任务。
+
+    实现已迁至 ``orchestrator_integration.runtime``：
+    ResumePolicy 决策 → LeaseService 租约 → TaskStore 持久化。
+    """
+    from orchestrator_integration.runtime.create_or_resume import (
+        create_or_resume_task as _impl,
     )
 
-    owner = lease_owner or f"worker-{uuid.uuid4().hex[:8]}"
-    now = timezone.now()
-    open_statuses = (
-        "pending",
-        "running",
-        "awaiting_approval",
-        "blocked",
-        "paused",
-        "cancelling",
-    )
-    open_qs = AgentTask.objects.filter(session=session, status__in=open_statuses)
-    open_count = open_qs.count()
-    existing = None
-    if resume_task_id:
-        existing = (
-            open_qs.filter(public_task_id=resume_task_id).first()
-            or AgentTask.objects.filter(
-                pk=resume_task_id, status__in=open_statuses
-            ).first()
-        )
-        # RC20：禁止复活终态任务
-        if existing is None:
-            terminal = (
-                AgentTask.objects.filter(public_task_id=resume_task_id).first()
-                or AgentTask.objects.filter(pk=resume_task_id).first()
-            )
-            if terminal is not None and str(terminal.status) in {
-                "cancelled",
-                "completed",
-                "failed",
-            }:
-                return terminal
-    else:
-        existing = open_qs.order_by("-updated_at").first()
-
-    relation = (turn_relation or "").strip()
-    from orchestrator_integration.turn_context import (
-        TURN_NEW,
-        TURN_NONE,
-        _is_bare_continue_phrase,
-        _looks_like_new_execute_command,
-    )
-
-    goal_text = goal or ""
-    new_execute = _looks_like_new_execute_command(goal_text)
-    bare_continue = _is_bare_continue_phrase(goal_text)
-    # 完整「执行…用例」或显式新问题：必须新建，禁止被 goal 里的「继续」字样绑回旧任务
-    force_new = (not resume_task_id) and (
-        new_execute
-        or relation in {TURN_NEW, TURN_NONE}
-    )
-
-    # RC20：多任务消歧 — 仅短句「继续」；长执行指令不得消歧卡死
-    if (not force_new) and (
-        relation == TURN_AMBIGUOUS
-        or (
-            open_count >= 2
-            and not resume_task_id
-            and bare_continue
-        )
-    ):
-        # 返回最近任务但标记 ambiguous（调用方读 task_scope）
-        if existing is not None:
-            scope = dict(existing.task_scope or {})
-            scope["ambiguous_resume"] = True
-            scope["open_task_count"] = open_count
-            existing.task_scope = scope
-            existing.save(update_fields=["task_scope", "updated_at"])
-        return existing
-
-    # 短「继续」或显式 turn_relation=supplement/continue/correct → 复用
-    continue_like = bare_continue and not new_execute
-    should_resume = (not force_new) and bool(existing) and (
-        relation in {TURN_CONTINUE, TURN_SUPPLEMENT, TURN_CORRECT}
-        or continue_like
-        or bool(resume_task_id)
-    )
-    if should_resume:
-        task = existing
-        if not acquire_lease(task, owner):
-            return task
-        # 继续/补充：保留原目标与授权，不覆盖 goal（AC17 / FR08.5）
-        scope = dict(task.task_scope or {})
-        scope.pop("ambiguous_resume", None)
-        if not scope.get("raw_goal"):
-            scope["raw_goal"] = task.goal or ""
-        msg = (goal or "")[:2000]
-        if relation == TURN_CORRECT:
-            apply_goal_correction(task, msg)
-            scope = dict(task.task_scope or {})
-            scope["correction_message"] = msg
-        elif relation == TURN_SUPPLEMENT or (
-            not continue_like and relation != TURN_CONTINUE
-        ):
-            scope["supplement_message"] = msg
-            constraints = dict(scope.get("constraints") or {})
-            constraints.update(extract_constraint_patch(msg))
-            if constraints:
-                scope["constraints"] = constraints
-        else:
-            scope["continue_message"] = msg
-            # 「按上面的方案继续」类也可能带环境补充
-            constraints = dict(scope.get("constraints") or {})
-            constraints.update(extract_constraint_patch(msg))
-            if constraints:
-                scope["constraints"] = constraints
-        task.task_scope = scope
-        if auth_scope:
-            merged = dict(task.auth_scope or {})
-            # 只合并显式新增 allow；deny 并集；不删除原授权
-            allow = set(merged.get("allow_actions") or [])
-            deny = set(merged.get("deny_actions") or [])
-            allow |= set(auth_scope.get("allow_actions") or [])
-            deny |= set(auth_scope.get("deny_actions") or [])
-            # 原 deny 优先：不得因继续话术放宽
-            allow -= deny
-            merged["allow_actions"] = sorted(allow)
-            merged["deny_actions"] = sorted(deny)
-            for k, v in auth_scope.items():
-                if k not in {"allow_actions", "deny_actions"} and k not in merged:
-                    merged[k] = v
-            task.auth_scope = merged
-        # 用户明确继续/补充：预算打满则自动续额，否则承接指令会 0 步空转
-        pb_id = ""
-        if commission is not None:
-            pb_id = str(getattr(commission, "playbook_id", "") or "")
-        topup = topup_budget_for_user_continuation(task, playbook_id=pb_id)
-        if topup.get("tool_topup") or topup.get("token_topup"):
-            scope = dict(task.task_scope or {})
-            scope["continuation_budget_topup"] = topup
-            task.task_scope = scope
-        task.save(
-            update_fields=[
-                "task_scope",
-                "auth_scope",
-                "budget",
-                "max_steps",
-                "updated_at",
-                "lease_owner",
-                "lease_expires_at",
-                "status",
-            ]
-        )
-        return task
-
-    # D04：统一任务执行配置快照（业务步数 ≠ 工具上限）
-    from orchestrator_integration.task_execution_config import (
-        budget_from_effective,
-        build_effective_config,
-        validate_config_overrides,
-    )
-
-    stages = stage_plan or []
-    ov = {}
-    if config_overrides:
-        checked = validate_config_overrides(
-            config_overrides if isinstance(config_overrides, dict) else {}
-        )
-        if checked.get("ok"):
-            ov = checked.get("overrides") or {}
-    effective = build_effective_config(
-        stage_plan=stages,
-        auth_scope=auth_scope or {},
-        commission=commission,
-        overrides=ov,
-    )
-    # RC11：持久化 response_locale（显式覆盖 > 用户消息推断）
-    try:
-        from orchestrator_integration.message_locale import infer_response_locale
-
-        explicit_locale = ""
-        if isinstance(ov, dict):
-            explicit_locale = str(ov.get("response_locale") or "")
-        budget_locale = infer_response_locale(
-            goal or "", explicit=explicit_locale
-        )
-        effective["response_locale"] = budget_locale
-    except Exception:
-        effective.setdefault("response_locale", "auto")
-    budget = budget_from_effective(effective)
-    budget["response_locale"] = effective.get("response_locale", "auto")
-    # 兼容旧 DEFAULT_BUDGET 键
-    for k, v in DEFAULT_BUDGET.items():
-        budget.setdefault(k, v)
-    public_id = getattr(commission, "task_id", None) or _new_public_id()
-    current_stage = stages[0]["stage_id"] if stages else ""
-    merged_auth = dict(auth_scope or {})
-    merged_auth.update(effective.get("auth_scope") or {})
-    task = AgentTask.objects.create(
+    return _impl(
         session=session,
-        project_id=project_id,
         user=user,
-        public_task_id=public_id,
-        goal=goal or "",
-        status="running",
-        max_steps=int(budget.get("max_tool_actions") or budget.get("max_tool_steps") or 28),
-        plan_version=1,
-        current_stage=current_stage,
-        stage_plan=stages,
-        auth_scope=merged_auth,
-        task_scope={
-            "target_url": _extract_url(goal),
-            "raw_goal": (goal or "")[:2000],
-            "config_hash": budget.get("config_hash", ""),
-            "schema_version": budget.get("schema_version", 1),
-        },
-        budget=budget,
-        facts={},
-        lease_owner=owner,
-        lease_expires_at=now + timedelta(minutes=15),
-        version=1,
+        project_id=project_id,
+        goal=goal,
+        commission=commission,
+        auth_scope=auth_scope,
+        stage_plan=stage_plan,
+        lease_owner=lease_owner,
+        turn_relation=turn_relation,
+        config_overrides=config_overrides,
+        resume_task_id=resume_task_id,
     )
-    AgentBlackboard.objects.get_or_create(task=task)
-    append_event(
-        task,
-        "task_started",
-        status="running",
-        payload={"goal": task.goal[:500], "stage": current_stage},
-    )
-    return task
 
 
 def topup_budget_for_user_continuation(
@@ -447,133 +247,6 @@ def topup_budget_for_user_continuation(
                 new_tok,
             )
     return out
-
-
-def acquire_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
-    """条件更新获取执行权（FR04.3）。"""
-    result = try_claim_execution(task, owner, ttl_minutes=ttl_minutes)
-    return bool(result.get("acquired"))
-
-
-def try_claim_execution(
-    task, owner: str, ttl_minutes: int = 15
-) -> Dict[str, Any]:
-    """认领执行权（AC08）：成功或返回现有执行者状态，不抛异常。"""
-    from orchestrator_integration.models import AgentTask
-
-    now = timezone.now()
-    expires = now + timedelta(minutes=ttl_minutes)
-    with transaction.atomic():
-        row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
-        if row is None:
-            return {"acquired": False, "error_code": "task_missing"}
-        if row.status == "cancelling":
-            return {
-                "acquired": False,
-                "error_code": "task_cancelling",
-                "status": row.status,
-                "task_id": row.public_task_id or str(row.id),
-            }
-        if row.status in ("completed", "failed", "cancelled"):
-            return {
-                "acquired": False,
-                "error_code": "task_terminal",
-                "status": row.status,
-                "task_id": row.public_task_id or str(row.id),
-            }
-        # 审批等待中允许 resume 接管租约（FLOW01）
-        awaiting = row.status == "awaiting_approval"
-        lease_ok = (
-            not row.lease_owner
-            or row.lease_owner == owner
-            or (row.lease_expires_at and row.lease_expires_at <= now)
-            or awaiting
-        )
-        if not lease_ok:
-            return {
-                "acquired": False,
-                "error_code": "lease_held",
-                "status": row.status,
-                "lease_owner": row.lease_owner,
-                "lease_expires_at": row.lease_expires_at.isoformat()
-                if row.lease_expires_at
-                else None,
-                "task_id": row.public_task_id or str(row.id),
-                "version": row.version,
-            }
-        new_status = (
-            "running"
-            if row.status in ("pending", "blocked", "paused", "awaiting_approval")
-            else row.status
-        )
-        updated = AgentTask.objects.filter(pk=row.pk, version=row.version).update(
-            lease_owner=owner,
-            lease_expires_at=expires,
-            version=row.version + 1,
-            status=new_status,
-            updated_at=now,
-        )
-        if not updated:
-            return {"acquired": False, "error_code": "version_conflict"}
-        task.lease_owner = owner
-        task.lease_expires_at = expires
-        task.version = row.version + 1
-        task.status = new_status
-        return {
-            "acquired": True,
-            "status": new_status,
-            "task_id": row.public_task_id or str(row.id),
-            "version": task.version,
-            "lease_owner": owner,
-        }
-
-
-def heartbeat_lease(task, owner: str, ttl_minutes: int = 15) -> bool:
-    """续租心跳；非持有者失败。"""
-    from orchestrator_integration.models import AgentTask
-
-    now = timezone.now()
-    expires = now + timedelta(minutes=ttl_minutes)
-    n = AgentTask.objects.filter(pk=task.pk, lease_owner=owner).update(
-        lease_expires_at=expires, updated_at=now
-    )
-    if n:
-        task.lease_expires_at = expires
-    return bool(n)
-
-
-def release_lease(task, owner: str = "") -> None:
-    from orchestrator_integration.models import AgentTask
-
-    qs = AgentTask.objects.filter(pk=task.pk)
-    if owner:
-        qs = qs.filter(lease_owner=owner)
-    qs.update(lease_owner="", lease_expires_at=None, updated_at=timezone.now())
-    task.lease_owner = ""
-    task.lease_expires_at = None
-
-
-def park_for_approval(task, *, interrupt_id: str = "") -> None:
-    """写入确认发出时释放租约并进入 awaiting_approval，供 resume 接管（FLOW01）。"""
-    from orchestrator_integration.models import AgentTask
-
-    AgentTask.objects.filter(pk=task.pk).exclude(
-        status__in=("completed", "failed", "cancelled", "cancelling")
-    ).update(
-        status="awaiting_approval",
-        lease_owner="",
-        lease_expires_at=None,
-        updated_at=timezone.now(),
-    )
-    task.status = "awaiting_approval"
-    task.lease_owner = ""
-    task.lease_expires_at = None
-    append_event(
-        task,
-        "approval_required",
-        status="awaiting_approval",
-        payload={"interrupt_id": interrupt_id or ""},
-    )
 
 
 def assert_task_access(
