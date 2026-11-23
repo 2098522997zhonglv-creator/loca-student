@@ -24,6 +24,22 @@ class ChatActivityTests(unittest.TestCase):
                 self.assertTrue(marker.exists())
                 self.assertIn("session=s1", marker.read_text(encoding="utf-8"))
 
+    def test_import_routing_deps_keys(self):
+        from orchestrator_integration.chat_activity import import_agent_loop_routing_deps
+
+        # 无 django/langchain 时可能失败；有则校验关键键
+        try:
+            deps = import_agent_loop_routing_deps()
+        except ImportError:
+            self.skipTest("runtime deps unavailable")
+        for key in (
+            "classify_user_intent",
+            "list_open_task_contexts",
+            "TURN_AMBIGUOUS",
+            "get_builtin_tools",
+        ):
+            self.assertIn(key, deps)
+
 
 if __name__ == "__main__":
     unittest.main()

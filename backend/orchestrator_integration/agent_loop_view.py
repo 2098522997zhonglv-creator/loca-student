@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -1369,55 +1370,78 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
                 )
 
+            # 先推进度再 import：同步重导入若堵在事件循环上，前端会像「对话停住」
+            yield create_sse_data(
+                {
+                    "type": "status",
+                    "message": "正在解析意图并挂载执行工具…",
+                }
+            )
             try:
-                from orchestrator_integration.chat_activity import touch_chat_active
+                from orchestrator_integration.chat_activity import (
+                    runtime_git_head,
+                    touch_chat_active,
+                )
 
                 touch_chat_active(session_id=session_id or "", reason="post_kb_tools")
                 logger.info(
-                    "AgentLoopStreamAPI: post_kb → intent/open-task routing session=%s",
+                    "AgentLoopStreamAPI: post_kb → routing session=%s git=%s",
                     session_id,
+                    runtime_git_head(),
                 )
             except Exception:
-                pass
+                logger.info(
+                    "AgentLoopStreamAPI: post_kb → routing session=%s", session_id
+                )
 
             # 6. 意图分区 → 按区挂载 Skill 工具（非 LLM 语义选 skill）
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
-            from orchestrator_integration.builtin_tools import get_builtin_tools
-            from orchestrator_integration.builtin_tools.skill_tools import (
-                detect_user_write_approval,
+            # 必须进线程：builtin_tools/langchain 首次 import 可达数秒～数十秒
+            from orchestrator_integration.chat_activity import (
+                import_agent_loop_routing_deps,
             )
-            from orchestrator_integration.intent_router import (
-                apply_intent_routing,
-                classify_user_intent,
-                decide_kb_access_policy,
+
+            _t0 = time.monotonic()
+            _deps = await sync_to_async(
+                import_agent_loop_routing_deps, thread_sensitive=False
+            )()
+            logger.info(
+                "AgentLoopStreamAPI: routing deps imported in %.2fs session=%s",
+                time.monotonic() - _t0,
+                session_id,
             )
-            from orchestrator_integration.skill_zones import (
-                ZONE_BROWSER,
-                resolve_skill_zone,
-                zone_skills,
-            )
-            from orchestrator_integration.turn_context import (
-                TURN_AMBIGUOUS,
-                ambiguous_candidates_payload,
-                classify_turn_relation,
-                executable_open_tasks,
-                list_open_task_contexts,
-                load_open_task_context,
-                routing_text_for_classify,
-                should_preserve_execution,
-                stage_specs_from_prior,
-            )
+            get_builtin_tools = _deps["get_builtin_tools"]
+            detect_user_write_approval = _deps["detect_user_write_approval"]
+            apply_intent_routing = _deps["apply_intent_routing"]
+            classify_user_intent = _deps["classify_user_intent"]
+            decide_kb_access_policy = _deps["decide_kb_access_policy"]
+            ZONE_BROWSER = _deps["ZONE_BROWSER"]
+            resolve_skill_zone = _deps["resolve_skill_zone"]
+            zone_skills = _deps["zone_skills"]
+            TURN_AMBIGUOUS = _deps["TURN_AMBIGUOUS"]
+            ambiguous_candidates_payload = _deps["ambiguous_candidates_payload"]
+            classify_turn_relation = _deps["classify_turn_relation"]
+            executable_open_tasks = _deps["executable_open_tasks"]
+            list_open_task_contexts = _deps["list_open_task_contexts"]
+            load_open_task_context = _deps["load_open_task_context"]
+            routing_text_for_classify = _deps["routing_text_for_classify"]
+            should_preserve_execution = _deps["should_preserve_execution"]
+            stage_specs_from_prior = _deps["stage_specs_from_prior"]
 
             # FR08.4/08.5：分类与工具裁剪前加载未完成任务（顺序不得颠倒）
             _prior_task = None
             _open_tasks = []
             try:
-                _open_tasks = await sync_to_async(list_open_task_contexts)(
+                _open_tasks = await sync_to_async(
+                    list_open_task_contexts, thread_sensitive=False
+                )(
                     session_id=session_id or "",
                     user_id=int(request.user.id),
                     project_id=int(project_id) if project_id else None,
                 )
-                _prior_task = await sync_to_async(load_open_task_context)(
+                _prior_task = await sync_to_async(
+                    load_open_task_context, thread_sensitive=False
+                )(
                     session_id=session_id or "",
                     user_id=int(request.user.id),
                     project_id=int(project_id) if project_id else None,
@@ -3379,6 +3403,9 @@ class AgentLoopStreamAPIView(View):
             return api_error_response(f"Invalid JSON: {e}", 400)
 
         user_message = body_data.get("message")
+        # 前端偶发带 \t/\r；压成空格，避免路由/展示异常
+        if isinstance(user_message, str):
+            user_message = re.sub(r"[\t\r\f\v]+", " ", user_message).strip()
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_id = body_data.get("knowledge_base_id")
@@ -3461,8 +3488,20 @@ class AgentLoopStreamAPIView(View):
             logger.info(f"AgentLoopStreamAPI: Generated new session_id: {session_id}")
 
         msg_preview = (user_message or "")[:80].replace("\n", " ")
+        try:
+            from orchestrator_integration.chat_activity import (
+                runtime_git_head,
+                touch_chat_active,
+            )
+
+            _git = runtime_git_head()
+            touch_chat_active(session_id=session_id or "", reason="llm_chat_start")
+        except Exception:
+            _git = "unknown"
         logger.info(
-            "LLM_CHAT start user_id=%s project_id=%s session_id=%s kb_id=%s stream=%s msg_len=%s preview=%r",
+            "LLM_CHAT start git=%s user_id=%s project_id=%s session_id=%s kb_id=%s "
+            "stream=%s msg_len=%s preview=%r",
+            _git,
             user.id,
             project_id,
             session_id,
@@ -3471,12 +3510,6 @@ class AgentLoopStreamAPIView(View):
             len(user_message or ""),
             msg_preview,
         )
-        try:
-            from orchestrator_integration.chat_activity import touch_chat_active
-
-            touch_chat_active(session_id=session_id or "", reason="llm_chat_start")
-        except Exception:
-            pass
 
         # 5.1 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
         # 场景：前端先断开 SSE，再调用 stop API，可能导致信号留存到下一次请求
