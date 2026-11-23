@@ -1467,6 +1467,23 @@ class AgentLoopStreamAPIView(View):
                 and len(_exec_open) == 1
             ):
                 _prior_task = _exec_open[0]
+            # 完整「执行…用例」：丢掉不可执行 prior，避免 turn=continue 绑到 fetch_conditions
+            try:
+                from orchestrator_integration.intent_router import (
+                    looks_like_testcase_execute_keywords as _exec_kw,
+                )
+
+                if (
+                    not resume_task_id
+                    and _exec_kw(user_message or "")
+                    and (
+                        _prior_task is None
+                        or not getattr(_prior_task, "is_executable_stage", False)
+                    )
+                ):
+                    _prior_task = None
+            except Exception:
+                pass
             _turn_relation = classify_turn_relation(
                 user_message,
                 _prior_task,

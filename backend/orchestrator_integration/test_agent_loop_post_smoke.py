@@ -16,6 +16,12 @@ class NormalizeUserMessageTests(unittest.TestCase):
         self.assertEqual(out, "执行 skill 继续推进执行 SKU素材同步 模块用例")
         self.assertNotIn("\t", out)
 
+    def test_literal_backslash_t(self):
+        raw = r"执行 skill 继续推进执行\tSKU素材同步 模块用例"
+        out = normalize_user_message(raw)
+        self.assertNotIn("\\t", out)
+        self.assertIn("SKU素材同步", out)
+
     def test_non_str_passthrough(self):
         self.assertIsNone(normalize_user_message(None))
         self.assertEqual(normalize_user_message(123), 123)

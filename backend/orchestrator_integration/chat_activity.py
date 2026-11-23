@@ -27,13 +27,15 @@ def _marker_path() -> Optional[Path]:
 
 
 def normalize_user_message(message: Any) -> Any:
-    """压平前端偶发的 \\t/\\r 等空白；非 str 原样返回。
+    """压平前端偶发的 tab/\\t/\\r 等空白；非 str 原样返回。
 
     独立函数便于单测，也避免在 View.post 内再 import re 触发 UnboundLocalError。
     """
     if not isinstance(message, str):
         return message
-    return re.sub(r"[\t\r\f\v]+", " ", message).strip()
+    # 既处理真实控制字符，也处理字面量 "\t"/"\n"（日志里常见 \\t）
+    text = message.replace("\\t", " ").replace("\\n", " ").replace("\\r", " ")
+    return re.sub(r"[\t\r\f\v]+", " ", text).strip()
 
 
 def runtime_git_head() -> str:

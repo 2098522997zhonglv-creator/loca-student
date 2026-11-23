@@ -231,6 +231,34 @@ def executable_open_tasks(
     return out
 
 
+def _looks_like_new_execute_command(text: str) -> bool:
+    """完整「执行…用例/模块」指令：即使含「继续推进」也是新任务，不是续跑旧任务。"""
+    try:
+        from orchestrator_integration.intent_router import (
+            looks_like_testcase_execute_keywords,
+        )
+
+        return bool(looks_like_testcase_execute_keywords(text))
+    except Exception:
+        return bool(
+            re.search(r"执行.{0,120}(全部)?(用例|测试用例|套件)", text)
+            or re.search(r"模块\s*\d*.{0,40}(全部)?用例", text)
+        )
+
+
+def _is_bare_continue_phrase(text: str) -> bool:
+    """短续跑口令；长句里夹「继续」不算。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t in _CONTINUE_CUES or t in ("继续。", "继续吧", "请继续", "接着做", "接着干", "继续呀"):
+        return True
+    # 极短且以继续类词为主
+    if len(t) <= 10 and any(k in t for k in _CONTINUE_CUES):
+        return True
+    return False
+
+
 def classify_turn_relation(
     message: str,
     prior: Optional[PriorTaskContext],
@@ -248,11 +276,17 @@ def classify_turn_relation(
         return TURN_NONE
     if any(k in text for k in _CANCEL_CUES):
         return TURN_CANCEL
-    # RC20：≥2 可执行未完成且说「继续」但未指定 task_id → 消歧
+
+    new_execute = _looks_like_new_execute_command(text)
+    # 完整执行用例指令优先：不因含「继续」被当成续跑/消歧
+    if new_execute and not resume_task_id:
+        return TURN_NEW if prior else TURN_NONE
+
+    # RC20：≥2 可执行未完成且说短「继续」但未指定 task_id → 消歧
     if (
         open_count >= 2
         and not resume_task_id
-        and any(k in text for k in _CONTINUE_CUES)
+        and _is_bare_continue_phrase(text)
     ):
         return TURN_AMBIGUOUS
     if prior and any(k in text for k in _CORRECT_CUES):
@@ -265,7 +299,12 @@ def classify_turn_relation(
         return TURN_CORRECT
     if not prior:
         return TURN_NONE
-    if any(k in text for k in _CONTINUE_CUES):
+    if _is_bare_continue_phrase(text) or (
+        any(k in text for k in _CONTINUE_CUES) and not new_execute
+    ):
+        # 非可执行 prior 上的「继续」不续跑，避免绑到 fetch_conditions 等僵尸阶段
+        if not prior.is_executable_stage:
+            return TURN_NEW
         return TURN_CONTINUE
     if any(k in text for k in _NEW_QUESTION_MARKERS):
         return TURN_NEW
@@ -320,6 +359,9 @@ def routing_text_for_classify(
     """分类/立项用文本：补充/继续时带上原目标，但不无条件污染每条消息。"""
     text = (message or "").strip()
     if not prior or relation not in {TURN_CONTINUE, TURN_SUPPLEMENT}:
+        return text
+    # 不可执行阶段（如 fetch_conditions）的 goal 不能污染新执行指令
+    if not prior.is_executable_stage:
         return text
     goal = (prior.goal or "").strip()
     if not goal:
