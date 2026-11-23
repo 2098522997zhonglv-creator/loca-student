@@ -3402,10 +3402,9 @@ class AgentLoopStreamAPIView(View):
         except json.JSONDecodeError as e:
             return api_error_response(f"Invalid JSON: {e}", 400)
 
-        user_message = body_data.get("message")
-        # 前端偶发带 \t/\r；压成空格，避免路由/展示异常
-        if isinstance(user_message, str):
-            user_message = re.sub(r"[\t\r\f\v]+", " ", user_message).strip()
+        from orchestrator_integration.chat_activity import normalize_user_message
+
+        user_message = normalize_user_message(body_data.get("message"))
         session_id = body_data.get("session_id")
         project_id = body_data.get("project_id")
         knowledge_base_id = body_data.get("knowledge_base_id")
@@ -3454,7 +3453,7 @@ class AgentLoopStreamAPIView(View):
         ).strip()
 
         # 兜底：如果前端没传 test_case_id，尝试从消息中解析
-        # 注意：勿在本函数内再 import re，会遮蔽模块级 re，导致上方 re.sub 触发 UnboundLocalError
+        # 勿在本函数内再 import re（会遮蔽模块级名）
         if not test_case_id and user_message:
             # 匹配 "执行ID为 11 的测试用例" 或 "测试用例 ID：11" 等模式
             match = re.search(

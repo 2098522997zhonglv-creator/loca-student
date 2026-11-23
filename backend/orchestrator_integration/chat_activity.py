@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,16 @@ def _marker_path() -> Optional[Path]:
         return log_dir / _MARKER_NAME
     except Exception:
         return None
+
+
+def normalize_user_message(message: Any) -> Any:
+    """压平前端偶发的 \\t/\\r 等空白；非 str 原样返回。
+
+    独立函数便于单测，也避免在 View.post 内再 import re 触发 UnboundLocalError。
+    """
+    if not isinstance(message, str):
+        return message
+    return re.sub(r"[\t\r\f\v]+", " ", message).strip()
 
 
 def runtime_git_head() -> str:
