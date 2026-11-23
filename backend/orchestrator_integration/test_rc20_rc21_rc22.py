@@ -53,6 +53,51 @@ class Rc20UnitTests(SimpleTestCase):
         )
         self.assertEqual(rel2, "continue")
 
+    def test_continue_ignores_zombie_non_exec_open_count(self):
+        """僵尸 QA/空阶段不应把「继续」消歧成静默结束。"""
+        from orchestrator_integration.turn_context import (
+            PriorTaskContext,
+            executable_open_tasks,
+        )
+
+        zombies = [
+            PriorTaskContext(
+                task_pk=1,
+                public_task_id="z1",
+                goal="知识库问答",
+                current_stage="",
+                status="running",
+            ),
+            PriorTaskContext(
+                task_pk=2,
+                public_task_id="z2",
+                goal="随便问问",
+                current_stage="qa",
+                status="pending",
+            ),
+        ]
+        self.assertEqual(executable_open_tasks(zombies), [])
+        rel = classify_turn_relation(
+            "继续", None, open_count=len(executable_open_tasks(zombies))
+        )
+        self.assertEqual(rel, "none")
+
+        one_exec = zombies + [
+            PriorTaskContext(
+                task_pk=3,
+                public_task_id="e1",
+                goal="执行模块27用例",
+                current_stage="execute",
+                status="running",
+            )
+        ]
+        execs = executable_open_tasks(one_exec)
+        self.assertEqual(len(execs), 1)
+        rel2 = classify_turn_relation(
+            "继续", execs[0], open_count=len(execs)
+        )
+        self.assertEqual(rel2, "continue")
+
     def test_correct_detects_product_swap(self):
         from orchestrator_integration.turn_context import PriorTaskContext
 

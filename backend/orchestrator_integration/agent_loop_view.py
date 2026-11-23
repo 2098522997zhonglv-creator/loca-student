@@ -1389,6 +1389,7 @@ class AgentLoopStreamAPIView(View):
                 TURN_AMBIGUOUS,
                 ambiguous_candidates_payload,
                 classify_turn_relation,
+                executable_open_tasks,
                 list_open_task_contexts,
                 load_open_task_context,
                 routing_text_for_classify,
@@ -1416,22 +1417,72 @@ class AgentLoopStreamAPIView(View):
                     "AgentLoopStreamAPI: load prior task failed: %s", prior_err
                 )
                 _prior_task = None
+            # 消歧只看可执行任务，避免僵尸 QA/空阶段任务把「继续」静默卡死
+            _exec_open = executable_open_tasks(_open_tasks)
+            if (
+                not resume_task_id
+                and _prior_task is not None
+                and not _prior_task.is_executable_stage
+                and _exec_open
+            ):
+                _prior_task = _exec_open[0]
+            elif (
+                not resume_task_id
+                and _prior_task is None
+                and len(_exec_open) == 1
+            ):
+                _prior_task = _exec_open[0]
             _turn_relation = classify_turn_relation(
                 user_message,
                 _prior_task,
-                open_count=len(_open_tasks),
+                open_count=len(_exec_open),
                 resume_task_id=resume_task_id or "",
+            )
+            logger.info(
+                "AgentLoopStreamAPI: turn_relation=%s open=%s exec_open=%s "
+                "prior=%s resume_task_id=%r msg=%r",
+                _turn_relation,
+                len(_open_tasks),
+                len(_exec_open),
+                getattr(_prior_task, "public_task_id", None),
+                resume_task_id or "",
+                (user_message or "")[:40],
             )
             # RC20：多任务消歧 — 只问一次，不新建/不静默续错任务
             if _turn_relation == TURN_AMBIGUOUS:
-                payload = ambiguous_candidates_payload(_open_tasks)
+                payload = ambiguous_candidates_payload(_exec_open or _open_tasks)
+                amb_msg = str(
+                    payload.get("message")
+                    or "当前会话有多个未完成任务，请指定要继续哪一个（task_id）。"
+                )
+                # 附候选，便于聊天区直接可见（前端旧版忽略 task_status 时也能看到）
+                cand_lines = []
+                for c in payload.get("candidates") or []:
+                    cand_lines.append(
+                        f"- task_id={c.get('task_id')}｜{(c.get('goal') or '')[:80]}"
+                    )
+                if cand_lines:
+                    amb_msg = amb_msg + "\n" + "\n".join(cand_lines)
+                logger.warning(
+                    "AgentLoopStreamAPI: ambiguous continue session=%s candidates=%s",
+                    session_id,
+                    [c.get("task_id") for c in (payload.get("candidates") or [])],
+                )
                 yield create_sse_data(
                     {
                         "type": "task_status",
                         "status": "ambiguous",
                         "error_code": "ambiguous_tasks",
-                        "message": payload.get("message"),
+                        "message": amb_msg,
                         "payload": payload,
+                        "message_kind": "final",
+                    }
+                )
+                # 写入 stream，避免前端只处理 task_blocked/completed 时「像没触发对话」
+                yield create_sse_data(
+                    {
+                        "type": "stream",
+                        "data": amb_msg,
                         "message_kind": "final",
                     }
                 )

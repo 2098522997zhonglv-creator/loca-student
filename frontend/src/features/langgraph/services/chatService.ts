@@ -949,7 +949,12 @@ export async function sendChatMessageStream(
               }
             }
             stream.taskEvents = [...(stream.taskEvents || []), parsed];
-            if (parsed.type === 'task_blocked' || parsed.type === 'task_completed') {
+            if (
+              parsed.type === 'task_blocked' ||
+              parsed.type === 'task_completed' ||
+              (parsed.type === 'task_status' &&
+                String(parsed.status || '') === 'ambiguous')
+            ) {
               const reasons = Array.isArray(parsed.acceptance?.reasons)
                 ? (parsed.acceptance.reasons as string[]).join('；')
                 : Array.isArray(
@@ -969,6 +974,10 @@ export async function sendChatMessageStream(
                 label = st === 'cancelling' ? '任务取消中' : '任务已取消';
               } else if (st === 'blocked') {
                 label = `任务未完全完成${reasons ? `：${reasons}` : ''}`;
+              } else if (st === 'ambiguous') {
+                label =
+                  String(parsed.message || '') ||
+                  '当前会话有多个未完成任务，请指定要继续哪一个（task_id）。';
               }
               stream.messages.push({
                 content: label,

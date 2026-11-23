@@ -218,6 +218,19 @@ _FILE_RE = re.compile(
 )
 
 
+def executable_open_tasks(
+    tasks: Optional[List[PriorTaskContext]],
+) -> List[PriorTaskContext]:
+    """仅保留可继续执行的未完成任务（排除僵尸 QA/空阶段）。"""
+    out: List[PriorTaskContext] = []
+    for t in tasks or []:
+        if t is None:
+            continue
+        if t.is_executable_stage:
+            out.append(t)
+    return out
+
+
 def classify_turn_relation(
     message: str,
     prior: Optional[PriorTaskContext],
@@ -225,13 +238,17 @@ def classify_turn_relation(
     open_count: int = 1,
     resume_task_id: str = "",
 ) -> str:
-    """识别本轮相对未完成任务的关系：继续 / 补充 / 纠正 / 消歧 / 新问题 / 取消。"""
+    """识别本轮相对未完成任务的关系：继续 / 补充 / 纠正 / 消歧 / 新问题 / 取消。
+
+    open_count 应为「可执行未完成任务」数量（见 executable_open_tasks），
+    不要把无阶段的僵尸任务算进去，否则短句「继续」会被误消歧并静默结束。
+    """
     text = (message or "").strip()
     if not prior and open_count <= 0:
         return TURN_NONE
     if any(k in text for k in _CANCEL_CUES):
         return TURN_CANCEL
-    # RC20：≥2 未完成且说「继续」但未指定 task_id → 消歧
+    # RC20：≥2 可执行未完成且说「继续」但未指定 task_id → 消歧
     if (
         open_count >= 2
         and not resume_task_id
