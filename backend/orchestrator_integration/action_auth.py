@@ -313,6 +313,19 @@ def confirm_capability_expand(task, *, approve: bool) -> Dict[str, Any]:
         AgentTask.objects.filter(pk=task.pk).update(
             facts=facts, updated_at=timezone.now()
         )
+        task.facts = facts
+        try:
+            from orchestrator_integration.task_orchestrator.gates import (
+                apply_l3_approval_to_task,
+            )
+
+            apply_l3_approval_to_task(
+                task,
+                approve=False,
+                targets=list(pending.get("allow_actions") or []),
+            )
+        except Exception:
+            pass
         return {"ok": True, "status": "rejected"}
 
     auth = dict(task.auth_scope or {})
@@ -338,6 +351,29 @@ def confirm_capability_expand(task, *, approve: bool) -> Dict[str, Any]:
         budget=budget,
         updated_at=timezone.now(),
     )
+    task.auth_scope = auth
+    task.facts = facts
+    task.budget = budget
+    # L3：扩权确认同步到 task_plan.pending_auth
+    try:
+        from orchestrator_integration.task_orchestrator.gates import (
+            apply_l3_approval_to_task,
+        )
+        from orchestrator_integration.task_orchestrator.node_runtime import (
+            apply_remount_to_context,
+        )
+
+        l3 = apply_l3_approval_to_task(
+            task,
+            approve=True,
+            targets=list(pending.get("allow_actions") or []),
+        )
+        if l3.get("remount_skills"):
+            apply_remount_to_context(l3.get("remount_skills") or [])
+        facts = dict(task.facts or {})
+        auth = dict(task.auth_scope or {})
+    except Exception:
+        pass
     task.auth_scope = auth
     task.facts = facts
     task.budget = budget

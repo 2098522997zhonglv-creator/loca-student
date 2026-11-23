@@ -136,6 +136,10 @@ def infer_plan_kind(
         or "query_cases" in ids
         or "run_or_browser" in ids
         or any(k in text for k in ("执行用例", "执行测试", "跑用例", "testcase"))
+        or (
+            ("执行" in text or "运行" in text or "跑" in text)
+            and ("用例" in text or "模块" in text)
+        )
     ):
         return PLAN_KIND_TESTCASE
     if (

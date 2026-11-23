@@ -31,6 +31,10 @@
 | skill_catalog UI/API 动作 | 以 `skill_action_sync` 从脚本同步（D01/D02）；旧名经别名映射 |
 | 执行结果关联 | Skill 返回后 `bind_execution_ref` 写入 facts；禁止最新记录串用 |
 | 主流程失败清理 | `advance_plan_node(failed=True)` 仍调度 `cleanup_data`（R12） |
+| input_refs 硬门禁 | `gates.check_input_refs`：缺 prepare 产出不得进 `run_or_browser` |
+| 跨工具对象 ID | `assert_cross_tool_object_ids`：facts 与工具输出必须一致 |
+| 弱断言拒绝 | `reject_weak_assertions` 接入 `evaluate_post_condition` |
+| L3 批准 | `apply_l3_approval_to_task` 接入扩权确认与写确认 resume |
 
 ## 复杂用例 Skill 能力清单（20261118）
 

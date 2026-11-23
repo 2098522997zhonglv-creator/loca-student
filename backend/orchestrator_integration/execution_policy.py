@@ -852,6 +852,27 @@ def evaluate_post_condition(
         if "业务拒绝不得记为成功" not in reasons:
             reasons.append("业务拒绝不得记为成功")
 
+    # 弱断言拒绝（URL 含 order / 外层 success 冒充通过）
+    try:
+        from orchestrator_integration.task_orchestrator.gates import (
+            assert_cross_tool_object_ids,
+            reject_weak_assertions,
+        )
+
+        weak = reject_weak_assertions(tool_results, facts=facts)
+        if weak:
+            ok = False
+            for w in weak:
+                if w not in reasons:
+                    reasons.append(w)
+        cross = assert_cross_tool_object_ids(facts, joined)
+        if cross:
+            ok = False
+            if cross not in reasons:
+                reasons.append(cross)
+    except Exception:
+        pass
+
     return {
         "ok": ok,
         "post_condition": post_condition,
