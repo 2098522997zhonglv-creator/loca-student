@@ -1369,6 +1369,17 @@ class AgentLoopStreamAPIView(View):
                     f"AgentLoopStreamAPI: ⚠️ 跳过知识库工具 (knowledge_base_id={knowledge_base_id}, use_knowledge_base={use_knowledge_base})"
                 )
 
+            try:
+                from orchestrator_integration.chat_activity import touch_chat_active
+
+                touch_chat_active(session_id=session_id or "", reason="post_kb_tools")
+                logger.info(
+                    "AgentLoopStreamAPI: post_kb → intent/open-task routing session=%s",
+                    session_id,
+                )
+            except Exception:
+                pass
+
             # 6. 意图分区 → 按区挂载 Skill 工具（非 LLM 语义选 skill）
             kb_qa_mode = bool(knowledge_base_id and use_knowledge_base)
             from orchestrator_integration.builtin_tools import get_builtin_tools
@@ -2574,6 +2585,14 @@ class AgentLoopStreamAPIView(View):
                 logger.info(
                     f"AgentLoopStreamAPI: Agent created with {len(tools)} tools"
                 )
+                try:
+                    from orchestrator_integration.chat_activity import touch_chat_active
+
+                    touch_chat_active(
+                        session_id=session_id or "", reason="agent_created"
+                    )
+                except Exception:
+                    pass
 
                 # 13. 配置调用参数
                 invoke_config = {
@@ -3452,6 +3471,12 @@ class AgentLoopStreamAPIView(View):
             len(user_message or ""),
             msg_preview,
         )
+        try:
+            from orchestrator_integration.chat_activity import touch_chat_active
+
+            touch_chat_active(session_id=session_id or "", reason="llm_chat_start")
+        except Exception:
+            pass
 
         # 5.1 清理陈旧停止信号，避免上一次"停止"残留影响本轮首次发送
         # 场景：前端先断开 SSE，再调用 stop API，可能导致信号留存到下一次请求

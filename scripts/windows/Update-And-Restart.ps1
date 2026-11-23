@@ -85,6 +85,7 @@ Sync-BundledSkills
 
 if ($changed) {
     Write-UpdateLog "Code changed, restarting Django, worker and beat..."
+    Wait-ChatIdleBeforeRestart -IdleSec 12 -MaxWaitSec 90
     Stop-CeleryBeat
     Stop-ReviewWorker
     Stop-KnowledgeCenter

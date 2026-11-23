@@ -125,6 +125,40 @@ function Get-ListenPids {
     }
 }
 
+function Wait-ChatIdleBeforeRestart {
+    # Agent 对话进行中写入 data/logs/chat_active.ts；更新脚本杀 Daphne 前先等空闲，
+    # 避免「挂完知识库工具就被自动更新杀掉」导致前端像没触发对话。
+    param(
+        [int]$IdleSec = 12,
+        [int]$MaxWaitSec = 90
+    )
+    Ensure-LogDir
+    $marker = Join-Path $script:LogDir "chat_active.ts"
+    if (-not (Test-Path $marker)) {
+        Write-UpdateLog "No chat_active marker, restart immediately"
+        return
+    }
+    $deadline = (Get-Date).AddSeconds($MaxWaitSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $raw = (Get-Content $marker -TotalCount 1 -ErrorAction Stop)
+            $ts = [double](($raw -split '\s+')[0])
+            $nowUnix = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            $age = [double]($nowUnix - $ts)
+            if ($age -ge $IdleSec) {
+                Write-UpdateLog ("Chat idle for {0:N1}s (>= {1}s), safe to restart" -f $age, $IdleSec)
+                return
+            }
+            Write-UpdateLog ("Chat active {0:N1}s ago, waiting before restart..." -f $age)
+        } catch {
+            Write-UpdateLog "chat_active unreadable, restart immediately: $($_.Exception.Message)"
+            return
+        }
+        Start-Sleep -Seconds 3
+    }
+    Write-UpdateLog "Chat still active after ${MaxWaitSec}s, proceeding with forced restart"
+}
+
 function Stop-KnowledgeCenter {
     Ensure-LogDir
     $pids = Get-ListenPids -Port $script:Port
@@ -134,8 +168,15 @@ function Stop-KnowledgeCenter {
     }
     foreach ($procId in $pids) {
         try {
-            Stop-Process -Id $procId -Force -ErrorAction Stop
-            Write-UpdateLog "Stopped process PID=$procId on port $($script:Port)"
+            # 先尝试优雅结束，给进行中的 SSE 一点收尾时间
+            Stop-Process -Id $procId -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            if (Get-Process -Id $procId -ErrorAction SilentlyContinue) {
+                Stop-Process -Id $procId -Force -ErrorAction Stop
+                Write-UpdateLog "Force-stopped process PID=$procId on port $($script:Port)"
+            } else {
+                Write-UpdateLog "Gracefully stopped process PID=$procId on port $($script:Port)"
+            }
         } catch {
             Write-UpdateLog "Stop PID=$procId failed: $($_.Exception.Message)"
         }
