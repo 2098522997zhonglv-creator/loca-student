@@ -370,7 +370,11 @@ def classify_skill_output(
             )
         )
 
-    if _TIMEOUT_RE.search(raw) and (
+    # Skill 说明/知识库原文中的 timeout 示例不能作为本次调用超时的证据。
+    reference_text = skill_name in {"read_skill_content", "knowledge_search"} and not re.match(
+        r"^(错误[:：]|Error[:：]|Traceback|TimeoutError)", raw, re.I
+    )
+    if not reference_text and _TIMEOUT_RE.search(raw) and (
         "错误" in raw or "Timeout" in raw or "timeout" in raw.lower()
     ):
         return _with_meta(
@@ -467,6 +471,18 @@ def adapt_mcp_tool_result(
                 except (TypeError, ValueError):
                     texts.append(str(item))
         raw = "\n".join(texts) if texts else json.dumps(raw, ensure_ascii=False)
+
+    # 内置 Skill 已返回序列化的 ToolResult。MCP/SSE 再适配时保持幂等，
+    # 避免每经过一层都把整份 JSON 塞进 raw_text 并生成新的 operation_id。
+    if isinstance(raw, str):
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, dict) and decoded.get("status") in {
+            "succeeded", "failed", "unknown", "needs_confirmation", "skipped", "cancelled"
+        } and isinstance(decoded.get("data"), dict):
+            raw = decoded
 
     if isinstance(raw, dict) and raw.get("status") in {
         "succeeded",

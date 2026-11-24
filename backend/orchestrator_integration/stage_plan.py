@@ -374,15 +374,21 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
         for k in (
             "不要下单",
             "不要提交订单",
+            "不提交订单",
+            "不提交测试订单",
             "禁止下单",
             "不下单",
             "不要结算",
+            "不结算",
+            "勿下单",
+            "勿提交订单",
             "禁止提交订单",
             "不要提交",
         )
     )
     deny_pay = any(
-        k in text for k in ("不要支付", "不需要支付", "不支付", "禁止支付", "勿支付")
+        k in text for k in ("不要支付", "不需要支付", "不支付", "禁止支付", "勿支付",
+                            "不付款", "不要付款", "禁止付款", "勿付款")
     )
     if deny_order:
         deny.append("submit_order")
@@ -391,7 +397,7 @@ def infer_auth_scope(message: str) -> Dict[str, Any]:
     # R06：按动作局部语义；「不要支付」不得吞掉明确「提交订单」授权
     def _action_locally_denied(action_terms: tuple[str, ...]) -> bool:
         for term in action_terms:
-            for neg in ("不要", "禁止", "勿", "别", "不需要", "无需"):
+            for neg in ("不要", "禁止", "勿", "别", "不需要", "无需", "不"):
                 if f"{neg}{term}" in text or f"{neg} {term}" in text:
                     return True
         return False

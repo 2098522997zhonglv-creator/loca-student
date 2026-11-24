@@ -3006,7 +3006,7 @@ class AgentLoopStreamAPIView(View):
                             # 检测工具调用开始（用于生成 step_start 事件）
                             elif isinstance(chunk, dict):
                                 for node_name, node_output in chunk.items():
-                                    if node_name == "agent" and isinstance(
+                                    if node_name in {"agent", "model"} and isinstance(
                                         node_output, dict
                                     ):
                                         messages = node_output.get("messages", [])
@@ -5213,7 +5213,7 @@ class AgentLoopResumeAPIView(View):
                             # 检测工具调用开始
                             elif isinstance(chunk, dict):
                                 for node_name, node_output in chunk.items():
-                                    if node_name == "agent" and isinstance(
+                                    if node_name in {"agent", "model"} and isinstance(
                                         node_output, dict
                                     ):
                                         messages = node_output.get("messages", [])

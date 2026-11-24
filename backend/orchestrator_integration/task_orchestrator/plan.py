@@ -405,7 +405,17 @@ def _build_nodes(
 
     # 用例执行路径优先：即使话术带「浏览器实测」，也走执行计划（浏览器在二层备用）
     # P1/R12：prepare → 标识登记 → run → assert → cleanup（主流程失败仍清理）
-    if executeish or (apiish and any(k in text for k in ("执行", "跑", "断言", "回归"))):
+    # 浏览器任务也会要求核对「接口返回字段」；这不是执行平台接口用例。
+    explicit_api_execution = any(
+        k in text
+        for k in ("执行接口", "接口用例", "接口场景", "场景用例", "接口测试",
+                  "API测试", "API 测试", "run_interface", "task_suite", "套件")
+    )
+    if executeish or (
+        apiish
+        and (not browserish or explicit_api_execution)
+        and any(k in text for k in ("执行", "跑", "断言", "回归"))
+    ):
         need_prepare = any(
             k in text
             for k in (
