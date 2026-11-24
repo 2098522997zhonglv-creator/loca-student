@@ -56,7 +56,65 @@ _ID_PATTERNS = (
             re.I,
         ),
     ),
+    (
+        "order_sn",
+        re.compile(
+            r'"order_sn"\s*:\s*"([^"]+)"|order_sn\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
+    (
+        "cart_id",
+        re.compile(
+            r'"cart_id"\s*:\s*"([^"]+)"|cart_id\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
+    (
+        "cart_item_id",
+        re.compile(
+            r'"cart_item_id"\s*:\s*"([^"]+)"|cart_item_id\s*[:=]\s*([A-Za-z0-9_-]+)',
+            re.I,
+        ),
+    ),
 )
+
+# 节点 output_keys / 跨工具事实字段（F07／F12）
+_FACT_VALUE_KEYS = (
+    "record_id",
+    "execution_id",
+    "task_execution_id",
+    "testcase_id",
+    "case_id",
+    "object_id",
+    "prepared_object_ids",
+    "parametrize_results",
+    "test_result",
+    "cleanup_status",
+    "cleanup_errors",
+    "order_sn",
+    "cart_id",
+    "cart_item_id",
+    "entry_url",
+    "product_url",
+    "product_hint",
+    "test_image",
+    "extracted_vars",
+    "upload_ok",
+    "preview_ok",
+    "env_base_url",
+    "page_ok",
+    "amount",
+    "rules",
+    "failed_steps",
+    "passed_steps",
+)
+
+_TEST_OUTCOME_VALUES = frozenset(
+    {"passed", "failed", "error", "skipped", "pass", "fail"}
+)
+_TOOL_CALL_SUCCESS = frozenset({"success", "succeeded", "ok", "true"})
+_TOOL_CALL_FAILURE = frozenset({"failed", "error", "false"})
 
 
 def extract_structured_blob(text: str) -> Dict[str, Any]:
@@ -93,92 +151,144 @@ def extract_structured_blob(text: str) -> Dict[str, Any]:
     return blobs[-1] if blobs else {}
 
 
+def _merge_blob_layers(blob: Dict[str, Any]) -> Dict[str, Any]:
+    """顶层 + data.* 合并；内层测试态优先于外层调用态（F02／F12）。"""
+    if not isinstance(blob, dict):
+        return {}
+    merged = dict(blob)
+    nested = blob.get("data")
+    if isinstance(nested, dict):
+        for k, v in nested.items():
+            if v in (None, ""):
+                continue
+            if k == "status":
+                # 内层 status 记为 test/data 态，外层保留为 tool 调用态
+                merged.setdefault("inner_status", v)
+                if str(v).lower() in _TEST_OUTCOME_VALUES or str(v).lower() in {
+                    "failed",
+                    "error",
+                    "running",
+                    "completed",
+                }:
+                    merged["inner_status"] = v
+            elif k not in merged or merged[k] in (None, ""):
+                merged[k] = v
+            elif k in _FACT_VALUE_KEYS:
+                merged[k] = v
+    return merged
+
+
 def extract_execution_ids(text: str) -> Dict[str, Any]:
-    blob = extract_structured_blob(text)
+    blob = _merge_blob_layers(extract_structured_blob(text))
     out: Dict[str, Any] = {}
-    for key in (
-        "record_id",
-        "execution_id",
-        "task_execution_id",
-        "testcase_id",
-        "case_id",
-        "object_id",
-        "prepared_object_ids",
-        "parametrize_results",
-        "test_result",
-        "status",
-        "cleanup_status",
-        "cleanup_errors",
-    ):
+    for key in _FACT_VALUE_KEYS:
         if key in blob and blob[key] not in (None, ""):
             out[key] = blob[key]
+    # 外层调用 status 与内层测试 status 分离
+    if "status" in blob and blob["status"] not in (None, ""):
+        out["status"] = blob["status"]
+    if "inner_status" in blob and blob["inner_status"] not in (None, ""):
+        out["inner_status"] = blob["inner_status"]
     for key, pat in _ID_PATTERNS:
         if key not in out:
             m = pat.search(text or "")
             if m:
                 val = next((g for g in m.groups() if g is not None), None)
                 if val is not None:
-                    out[key] = int(val) if key.endswith("_id") and str(val).isdigit() else val
+                    out[key] = (
+                        int(val)
+                        if key.endswith("_id") and str(val).isdigit()
+                        else val
+                    )
     return out
+
+
+def _looks_like_tool_failure(joined: str, ids: Dict[str, Any]) -> bool:
+    """结构化失败：外层/内层 status=failed|error，或明确 error 载荷。"""
+    st = str(ids.get("inner_status") or ids.get("status") or "").lower()
+    if st in _TOOL_CALL_FAILURE or st in {"failed", "error"}:
+        return True
+    if re.search(
+        r'(?i)"status"\s*:\s*"(failed|error)"|"ok"\s*:\s*false|"success"\s*:\s*false',
+        joined or "",
+    ):
+        return True
+    if re.search(r'(?i)"error"\s*:\s*"[^"]{3,}"', joined or "") and not re.search(
+        r'(?i)"status"\s*:\s*"(success|succeeded|passed)"', joined or ""
+    ):
+        # 纯错误对象且无成功态
+        if "case_id" not in (joined or "") and "testcase_id" not in (joined or ""):
+            return True
+        if re.search(r"(?i)failed:|service unavailable|assertions missing", joined or ""):
+            return True
+    return False
+
+
+def _truthy_flag(val: Any) -> bool:
+    if isinstance(val, bool):
+        return val
+    if val in (None, ""):
+        return False
+    return str(val).strip().lower() in {"1", "true", "yes", "ok", "passed", "success"}
 
 
 def orch_node_acceptance(
     stage_id: str, tool_results: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """编排节点专用验收（可推进则 ok）。"""
+    """编排节点专用验收（可推进则 ok）。按结构化结果判定，拒绝失败误推进。"""
     joined = "\n".join(str(x) for x in (tool_results or []) if x)
     sid = stage_id or ""
     ids = extract_execution_ids(joined)
 
     if sid in {"query_cases"}:
-        if any(
-            k in joined
-            for k in (
-                "testcase_id",
-                "case_id",
-                "case_ref",
-                "case_name",
-                "get_testcases",
-                "get_testcase",
-                "source_type",
-                "ui_testcase",
-                "api_scenario",
+        if _looks_like_tool_failure(joined, ids):
+            return {"ok": False, "reason": "query_failed", "stage_id": sid, "ids": ids}
+        # 必须有真实 case 标识；动作名出现在错误文案中不算（F04）
+        has_case = bool(ids.get("testcase_id") or ids.get("case_id"))
+        if not has_case:
+            # JSON 列表成功形态：[{"case_id": N, "case_name": ...}]
+            has_case = bool(
+                re.search(r'"case_id"\s*:\s*\d+|"testcase_id"\s*:\s*\d+', joined or "")
             )
-        ) or ids.get("testcase_id") or ids.get("case_id"):
+        if has_case:
             return {"ok": True, "reason": "case_ref_found", "stage_id": sid, "ids": ids}
         return {"ok": False, "reason": "missing_case_ref", "stage_id": sid}
 
     if sid in {"prepare_data", "api_prepare_or_run"}:
-        if any(
-            k in joined
-            for k in (
-                "prepared_object_ids",
-                "object_id",
-                "extracted_vars",
-                "front_sql",
-                "parametrize",
-                "task_execution_id",
-                "execution_id",
-                "造数",
-                "准备成功",
+        if _looks_like_tool_failure(joined, ids):
+            return {
+                "ok": False,
+                "reason": "prepare_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if (
+            ids.get("object_id")
+            or ids.get("prepared_object_ids")
+            or ids.get("extracted_vars")
+            or ids.get("task_execution_id")
+            or ids.get("execution_id")
+            or any(
+                k in joined
+                for k in ("prepared_object_ids", "造数", "准备成功", "front_sql")
             )
-        ) or ids.get("object_id") or ids.get("task_execution_id") or ids.get(
-            "execution_id"
         ):
             return {"ok": True, "reason": "prepare_evidence", "stage_id": sid, "ids": ids}
         return {"ok": False, "reason": "prepare_incomplete", "stage_id": sid}
 
     if sid in {"run_or_browser", "execute", "execute_testcase"}:
-        if ids.get("record_id") or ids.get("execution_id") or any(
+        if ids.get("record_id") or ids.get("execution_id") or ids.get(
+            "task_execution_id"
+        ):
+            return {
+                "ok": True,
+                "reason": "run_execution_bound",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if any(
             k in joined
-            for k in (
-                "record_id",
-                "execution_id",
-                "parametrize_results",
-                "终态",
-                "execute_testcase",
-                "u_case_result",
-            )
+            for k in ("parametrize_results", "终态", "u_case_result")
         ):
             return {
                 "ok": True,
@@ -189,20 +299,24 @@ def orch_node_acceptance(
         return {"ok": False, "reason": "missing_execution_ref", "stage_id": sid}
 
     if sid in {"assert_and_deliver"}:
-        if any(
-            k in joined
-            for k in (
-                "assertions",
-                "assert_",
-                "passed",
-                "failed",
-                "业务断言",
-                "assert_task_postcondition",
-                "test_result",
-            )
-        ):
+        if _looks_like_tool_failure(joined, ids):
+            return {
+                "ok": False,
+                "reason": "assert_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        tr = str(ids.get("test_result") or ids.get("inner_status") or "").lower()
+        if tr in {"passed", "pass"}:
             return {"ok": True, "reason": "assert_evidence", "stage_id": sid, "ids": ids}
-        return {"ok": False, "reason": "assert_incomplete", "stage_id": sid}
+        if re.search(
+            r'(?i)"ok"\s*:\s*true|"test_result"\s*:\s*"passed"|'
+            r'assert_task_postcondition[^\n]{0,80}"ok"\s*:\s*true|'
+            r'"assertions"\s*:\s*\[',
+            joined or "",
+        ) and not re.search(r"(?i)assertions missing", joined or ""):
+            return {"ok": True, "reason": "assert_evidence", "stage_id": sid, "ids": ids}
+        return {"ok": False, "reason": "assert_incomplete", "stage_id": sid, "ids": ids}
 
     if sid in {"cleanup_data"}:
         if any(
@@ -217,26 +331,155 @@ def orch_node_acceptance(
             )
         ) or ids.get("cleanup_status"):
             return {"ok": True, "reason": "cleanup_done", "stage_id": sid, "ids": ids}
-        # 无清理动作也允许推进结束（避免卡死）
         if "无需清理" in joined or "no cleanup" in joined.lower():
             return {"ok": True, "reason": "cleanup_noop", "stage_id": sid}
         return {"ok": False, "reason": "cleanup_incomplete", "stage_id": sid}
 
-    # 浏览器常见节点
+    if sid in {"customize_upload", "upload"}:
+        if _looks_like_tool_failure(joined, ids):
+            return {"ok": False, "reason": "upload_failed", "stage_id": sid, "ids": ids}
+        upload_ok = _truthy_flag(ids.get("upload_ok")) or bool(
+            re.search(r'(?i)"upload_ok"\s*:\s*true', joined or "")
+        )
+        preview_ok = _truthy_flag(ids.get("preview_ok")) or bool(
+            re.search(r'(?i)"preview_ok"\s*:\s*true', joined or "")
+        )
+        if upload_ok and preview_ok:
+            return {
+                "ok": True,
+                "reason": "upload_preview_ok",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        return {
+            "ok": False,
+            "reason": "upload_incomplete",
+            "stage_id": sid,
+            "ids": ids,
+        }
+
+    if sid in {"add_to_cart"}:
+        if _looks_like_tool_failure(joined, ids):
+            return {
+                "ok": False,
+                "reason": "add_to_cart_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if ids.get("cart_id") or ids.get("cart_item_id"):
+            return {
+                "ok": True,
+                "reason": "cart_bound",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        return {
+            "ok": False,
+            "reason": "missing_cart_id",
+            "stage_id": sid,
+            "ids": ids,
+        }
+
+    if sid in {"submit_order"}:
+        if _looks_like_tool_failure(joined, ids):
+            return {
+                "ok": False,
+                "reason": "submit_order_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if ids.get("order_sn"):
+            return {"ok": True, "reason": "order_bound", "stage_id": sid, "ids": ids}
+        return {
+            "ok": False,
+            "reason": "missing_order_sn",
+            "stage_id": sid,
+            "ids": ids,
+        }
+
     if sid in {
         "fetch_conditions",
         "check_executable",
-        "add_to_cart",
-        "submit_order",
-        "upload",
         "deliver",
     }:
+        if _looks_like_tool_failure(joined, ids):
+            return {
+                "ok": False,
+                "reason": "browser_node_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if sid == "fetch_conditions" and (
+            ids.get("entry_url")
+            or ids.get("product_url")
+            or "entry_url" in joined
+            or "http" in joined.lower()
+        ):
+            return {
+                "ok": True,
+                "reason": "fetch_conditions_ok",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if sid == "check_executable" and (
+            _truthy_flag(ids.get("page_ok"))
+            or ids.get("product_url")
+            or "page_ok" in joined
+        ):
+            return {
+                "ok": True,
+                "reason": "check_executable_ok",
+                "stage_id": sid,
+                "ids": ids,
+            }
         if joined.strip():
-            # 有工具输出即视为有进展；细粒度仍由既有 browser_interact 逻辑兜底
-            return {"ok": True, "reason": "browser_node_output", "stage_id": sid}
+            return {
+                "ok": True,
+                "reason": "browser_node_output",
+                "stage_id": sid,
+                "ids": ids,
+            }
         return {"ok": False, "reason": "no_tool_output", "stage_id": sid}
 
     return {"ok": False, "reason": "unknown_orch_node", "stage_id": sid}
+
+
+def resolve_test_result_from_ids(ids: Dict[str, Any]) -> Optional[str]:
+    """仅从明确测试态推导 passed/failed；外层 success 不算通过（F01／F02）。"""
+
+    def _failed_steps() -> bool:
+        try:
+            return int(ids.get("failed_steps") or 0) > 0
+        except (TypeError, ValueError):
+            return False
+
+    explicit = ids.get("test_result")
+    if explicit not in (None, ""):
+        val = str(explicit).lower()
+        if _failed_steps():
+            return "failed"
+        if val in {"passed", "pass"}:
+            return "passed"
+        if val in {"failed", "fail"}:
+            return "failed"
+        if val == "error":
+            return "error"
+        if val == "skipped":
+            return "skipped"
+        # UI 执行器常把 test_result/status 写成 success：不等于 passed
+        return None
+
+    inner = str(ids.get("inner_status") or "").lower()
+    if _failed_steps() or inner in {"failed", "fail"}:
+        return "failed"
+    if inner in {"passed", "pass"}:
+        return "passed"
+    if inner == "error":
+        return "error"
+    if inner == "skipped":
+        return "skipped"
+    # 外层 status=success／failed：不映射为测试通过
+    return None
 
 
 def merge_ids_into_facts(
@@ -246,7 +489,7 @@ def merge_ids_into_facts(
     skill_name: str = "",
     tool_succeeded: bool = True,
 ) -> Tuple[Dict[str, Any], str]:
-    """把执行标识与对象 ID 写入 facts；返回 (facts, note)。"""
+    """把执行标识与节点输出写入 facts；调用 success ≠ 测试 passed。"""
     out = dict(facts or {})
     note = ""
     if ids.get("testcase_id") or ids.get("case_id"):
@@ -274,33 +517,48 @@ def merge_ids_into_facts(
         )
         if ids.get("task_execution_id"):
             out["task_execution_id"] = ids.get("task_execution_id")
-    for k in (
-        "object_id",
-        "prepared_object_ids",
-        "parametrize_results",
-        "cleanup_status",
-        "cleanup_errors",
-    ):
+
+    for k in _FACT_VALUE_KEYS:
+        if k in {
+            "testcase_id",
+            "case_id",
+            "record_id",
+            "execution_id",
+            "task_execution_id",
+            "test_result",
+            "status",
+            "failed_steps",
+            "passed_steps",
+        }:
+            continue
         if k in ids and ids[k] not in (None, ""):
             out[k] = ids[k]
-    test_result = ids.get("test_result")
-    if not test_result and ids.get("status") in {
-        "success",
-        "failed",
-        "passed",
-        "error",
-        "skipped",
-    }:
-        # UI 执行器 success≠passed；映射为粗粒度
-        st = ids.get("status")
-        test_result = (
-            "passed"
-            if st in {"success", "passed"}
-            else ("failed" if st == "failed" else st)
-        )
+            # 结构化溯源（F12）
+            from orchestrator_integration.task_orchestrator.execution_refs import (
+                _now as _fact_now,
+            )
+
+            sources = dict(out.get("fact_sources") or {})
+            sources[k] = {
+                "value": ids[k],
+                "skill_name": skill_name or "",
+                "updated_at": _fact_now(),
+            }
+            out["fact_sources"] = sources
+
+    test_result = resolve_test_result_from_ids(ids)
     if test_result:
-        out = update_execution_status(out, status="completed", test_result=test_result)
+        out = update_execution_status(
+            out, status="completed", test_result=test_result
+        )
     note = call_success_is_not_test_pass(tool_succeeded, out.get("test_result"))
+    outer = str(ids.get("status") or "").lower()
+    if tool_succeeded or outer in _TOOL_CALL_SUCCESS:
+        if not test_result:
+            note = note or (
+                "工具调用 succeeded 仅表示受理/调用成功，不是测试通过。"
+                "须读取本次 execution_id 对应断言与业务终态后再判定 passed/failed。"
+            )
     return out, note
 
 

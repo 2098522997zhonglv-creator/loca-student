@@ -1185,38 +1185,61 @@ class PlaywrightExecutor:
             preflight_case_config,
         )
 
-        # 参数化：多数据行分别执行，结果互不覆盖
+        # 参数化：单行与多行统一注入；多行每行独立 DataProcessor（F10／F11）
         rows = parse_parametrize_rows(getattr(config, "parametrize", None))
-        if len(rows) > 1 and getattr(config, "parametrize_row", None) is None:
-            all_results = []
-            overall_failed = 0
-            for idx, row in enumerate(rows):
-                row_cfg = replace(
+        if getattr(config, "parametrize_row", None) is None and getattr(
+            config, "parametrize_data", None
+        ) is None:
+            nonempty_rows = [r for r in rows if isinstance(r, dict) and r]
+            if len(nonempty_rows) > 1:
+                from data_processor import DataProcessor
+
+                baseline = getattr(config, "data_processor", None)
+                all_results = []
+                overall_failed = 0
+                for idx, row in enumerate(nonempty_rows):
+                    if baseline is not None and hasattr(baseline, "fork"):
+                        row_processor = baseline.fork()
+                    elif baseline is not None and hasattr(baseline, "get_all"):
+                        row_processor = DataProcessor()
+                        for k, v in (baseline.get_all() or {}).items():
+                            row_processor.set_cache(str(k), v)
+                    else:
+                        row_processor = DataProcessor()
+                    row_cfg = replace(
+                        config,
+                        parametrize_row=idx,
+                        parametrize_data=row,
+                        parametrize=None,
+                        data_processor=row_processor,
+                    )
+                    one = await self.execute_test_case(row_cfg)
+                    all_results.append(one.model_dump())
+                    if one.status == "failed":
+                        overall_failed += 1
+                status = "failed" if overall_failed else "success"
+                return CaseResultModel(
+                    case_id=config.case_id,
+                    status=status,
+                    message=f"参数化完成: {len(nonempty_rows) - overall_failed}/{len(nonempty_rows)} 行通过",
+                    total_steps=sum(r.get("total_steps", 0) for r in all_results),
+                    passed_steps=sum(r.get("passed_steps", 0) for r in all_results),
+                    failed_steps=sum(r.get("failed_steps", 0) for r in all_results),
+                    skipped_steps=sum(r.get("skipped_steps", 0) for r in all_results),
+                    duration=sum(r.get("duration", 0) for r in all_results),
+                    steps=[],
+                    record_id=config.record_id,
+                    execution_id=config.execution_id,
+                    parametrize_results=all_results,
+                )
+            if len(nonempty_rows) == 1:
+                # 单行也注入 parametrize_data，与多行一致（F10）
+                config = replace(
                     config,
-                    parametrize_row=idx,
-                    parametrize_data=row,
-                    # 子行不再二次展开
+                    parametrize_row=0,
+                    parametrize_data=nonempty_rows[0],
                     parametrize=None,
                 )
-                one = await self.execute_test_case(row_cfg)
-                all_results.append(one.model_dump())
-                if one.status == "failed":
-                    overall_failed += 1
-            status = "failed" if overall_failed else "success"
-            return CaseResultModel(
-                case_id=config.case_id,
-                status=status,
-                message=f"参数化完成: {len(rows) - overall_failed}/{len(rows)} 行通过",
-                total_steps=sum(r.get("total_steps", 0) for r in all_results),
-                passed_steps=sum(r.get("passed_steps", 0) for r in all_results),
-                failed_steps=sum(r.get("failed_steps", 0) for r in all_results),
-                skipped_steps=sum(r.get("skipped_steps", 0) for r in all_results),
-                duration=sum(r.get("duration", 0) for r in all_results),
-                steps=[],
-                record_id=config.record_id,
-                execution_id=config.execution_id,
-                parametrize_results=all_results,
-            )
 
         preflight_err = preflight_case_config(config)
         if preflight_err:

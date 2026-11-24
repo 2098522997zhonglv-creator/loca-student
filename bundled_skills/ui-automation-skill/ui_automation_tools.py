@@ -798,6 +798,35 @@ except ImportError:
     WEBSOCKET_AVAILABLE = False
 
 
+def should_accept_case_result(
+    *,
+    case_id,
+    testcase_id,
+    result_record_id=None,
+    result_execution_id=None,
+    bound_record_id=None,
+    bound_execution_id=None,
+) -> bool:
+    """是否接受 WebSocket 回传的用例结果（F09：必须匹配本次绑定标识）。"""
+    if case_id != testcase_id:
+        return False
+    if bound_record_id is not None and result_record_id is not None:
+        if str(result_record_id) != str(bound_record_id):
+            return False
+    if bound_execution_id is not None and result_execution_id is not None:
+        if str(result_execution_id) != str(bound_execution_id):
+            return False
+    if bound_record_id is not None and result_record_id is None:
+        return False
+    if (
+        bound_execution_id is not None
+        and result_execution_id is None
+        and bound_record_id is None
+    ):
+        return False
+    return True
+
+
 def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: str = None, wait_result: bool = True, timeout: int = 120):
     """
     执行测试用例
@@ -839,27 +868,35 @@ def execute_testcase(testcase_id: int, env_config_id: int = None, actuator_id: s
                         bound_record_id = func_args.get("record_id")
                     if func_args.get("execution_id"):
                         bound_execution_id = func_args.get("execution_id")
-            # 检查是否是执行结果
+            # 检查是否是执行结果（必须匹配本次绑定的 record_id／execution_id，F09）
             if func_name in ("u_case_result", "case_result"):
-                if func_args.get("case_id") == testcase_id:
-                    rid = func_args.get("record_id") or bound_record_id
-                    eid = func_args.get("execution_id") or bound_execution_id
-                    result = {
-                        "status": "success" if func_args.get("status") == "success" else "failed",
-                        "case_id": testcase_id,
-                        "record_id": rid,
-                        "execution_id": eid,
-                        "message": func_args.get("message", ""),
-                        "total_steps": func_args.get("total_steps", 0),
-                        "passed_steps": func_args.get("passed_steps", 0),
-                        "failed_steps": func_args.get("failed_steps", 0),
-                        "skipped_steps": func_args.get("skipped_steps", 0),
-                        "duration": func_args.get("duration", 0),
-                        "parametrize_results": func_args.get("parametrize_results") or [],
-                        "test_result": func_args.get("status"),
-                        "note": "工具受理成功不等于测试通过；以 test_result/断言为准",
-                    }
-                    execution_done.set()
+                if not should_accept_case_result(
+                    case_id=func_args.get("case_id"),
+                    testcase_id=testcase_id,
+                    result_record_id=func_args.get("record_id"),
+                    result_execution_id=func_args.get("execution_id"),
+                    bound_record_id=bound_record_id,
+                    bound_execution_id=bound_execution_id,
+                ):
+                    return
+                rid = func_args.get("record_id") or bound_record_id
+                eid = func_args.get("execution_id") or bound_execution_id
+                result = {
+                    "status": "success" if func_args.get("status") == "success" else "failed",
+                    "case_id": testcase_id,
+                    "record_id": rid,
+                    "execution_id": eid,
+                    "message": func_args.get("message", ""),
+                    "total_steps": func_args.get("total_steps", 0),
+                    "passed_steps": func_args.get("passed_steps", 0),
+                    "failed_steps": func_args.get("failed_steps", 0),
+                    "skipped_steps": func_args.get("skipped_steps", 0),
+                    "duration": func_args.get("duration", 0),
+                    "parametrize_results": func_args.get("parametrize_results") or [],
+                    "test_result": func_args.get("status"),
+                    "note": "工具受理成功不等于测试通过；以 test_result/断言为准",
+                }
+                execution_done.set()
             # 检查错误消息
             elif data.get("code") != 200 and data.get("msg"):
                 if "执行器" in data.get("msg", "") or "失败" in data.get("msg", ""):

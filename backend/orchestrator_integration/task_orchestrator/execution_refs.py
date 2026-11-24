@@ -48,19 +48,49 @@ def bind_execution_ref(
     status: str = "submitted",
     skill_name: str = "",
 ) -> Dict[str, Any]:
-    """写入本次执行标识；后续 wait/query/report 必须带同一标识。"""
+    """写入本次执行标识；后续 wait/query/report 必须带同一标识。
+
+    绑定新的 execution_id／record_id 时：归档旧 execution_ref，清空顶层
+    test_result，新执行从 submitted/running、未判定结果开始（F08）。
+    """
     out = dict(facts or {})
+    prev = dict(out.get("execution_ref") or {})
+    prev_eid = prev.get("execution_id")
+    prev_rid = prev.get("record_id")
+    rebinding_different = (
+        execution_id is not None
+        and prev_eid not in (None, "")
+        and str(prev_eid) != str(execution_id)
+    ) or (
+        record_id is not None
+        and prev_rid not in (None, "")
+        and str(prev_rid) != str(record_id)
+    )
+    is_fresh = (not prev) or (prev_eid in (None, "") and prev_rid in (None, ""))
+    is_new_binding = bool(is_fresh or rebinding_different)
+    if rebinding_different and prev:
+        history = list(out.get("execution_history") or [])
+        history.append(prev)
+        out["execution_history"] = history[-10:]
+    if is_new_binding:
+        out.pop("test_result", None)
+
     ref = {
-        "execution_id": execution_id,
-        "record_id": record_id,
-        "operation_id": operation_id,
-        "case_ref": case_ref or out.get("case_ref"),
+        "execution_id": execution_id if execution_id is not None else prev_eid,
+        "record_id": record_id if record_id is not None else prev_rid,
+        "operation_id": operation_id or prev.get("operation_id") or "",
+        "case_ref": case_ref or out.get("case_ref") or prev.get("case_ref"),
         "status": status,  # submitted|running|completed|cancelled|unknown
-        "skill_name": skill_name,
-        "bound_at": _now(),
+        "skill_name": skill_name or prev.get("skill_name") or "",
+        "bound_at": _now() if is_new_binding else (prev.get("bound_at") or _now()),
     }
-    # 测试结果与调用状态分离
-    ref["test_result"] = out.get("test_result")  # passed|failed|error|skipped|None
+    # 新绑定不得继承历史 passed；同绑定更新可保留已有 test_result
+    if is_new_binding:
+        ref["test_result"] = None
+    else:
+        ref["test_result"] = prev.get("test_result")
+        if ref["test_result"] is None:
+            ref["test_result"] = out.get("test_result")
     out["execution_ref"] = ref
     if case_ref:
         out["case_ref"] = case_ref

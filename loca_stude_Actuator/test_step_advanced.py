@@ -87,6 +87,17 @@ class StepAdvancedTests(unittest.TestCase):
         self.assertEqual(parse_parametrize_rows(None), [{}])
         self.assertEqual(parse_parametrize_rows({"rows": [{"x": 1}]}), [{"x": 1}])
 
+    def test_data_processor_fork_isolates_runtime_vars(self):
+        base = DataProcessor()
+        base.set_cache("shared", "base")
+        row1 = base.fork()
+        row1.set_cache("extracted_token", "t1")
+        row2 = base.fork()
+        row2.set_cache("user", "beta")
+        self.assertEqual(row2.get_cache("shared"), "base")
+        self.assertIsNone(row2.get_cache("extracted_token"))
+        self.assertEqual(row1.get_cache("extracted_token"), "t1")
+
 
 if __name__ == "__main__":
     unittest.main()

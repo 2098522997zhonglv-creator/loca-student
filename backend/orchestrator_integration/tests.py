@@ -2067,7 +2067,8 @@ class AgentSmartnessTests(SimpleTestCase):
         )
         self.assertTrue(plan["must_reconcile"])
         self.assertFalse(plan["allow_replay"])
-        self.assertEqual(plan["reconcile_action"], "get_execution_records")
+        # Catalog 约定按本次 record 精确回查（单数）；旧复数名为别名
+        self.assertEqual(plan["reconcile_action"], "get_execution_record")
         self.assertEqual(plan["resource_keys"].get("execution_id"), "e99")
 
         planned = resolve_dependent_skips(

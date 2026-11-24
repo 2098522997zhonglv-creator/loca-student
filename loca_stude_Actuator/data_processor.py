@@ -43,6 +43,12 @@ class DataProcessor:
         """清空缓存"""
         self._cache.clear()
         logger.debug("已清空所有变量缓存")
+
+    def fork(self) -> "DataProcessor":
+        """复制公共基线为独立运行上下文（参数化行隔离，F11）。"""
+        child = DataProcessor()
+        child._cache = self._cache.copy()
+        return child
     
     def load_public_data(self, public_data_list: list[dict]) -> None:
         """从公共数据列表加载变量到缓存

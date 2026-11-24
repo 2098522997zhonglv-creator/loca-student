@@ -34,6 +34,11 @@ def is_task_orchestrator_enabled(
             return raw
         return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
+    # 显式环境变量优先于已加载的 Django settings（便于测试与运维热开关）
+    env_raw = os.environ.get("TASK_ORCHESTRATOR_ENABLED")
+    if env_raw is not None and str(env_raw).strip() != "":
+        return str(env_raw).strip().lower() in ("1", "true", "yes", "on")
+
     try:
         from django.conf import settings
 
@@ -42,8 +47,7 @@ def is_task_orchestrator_enabled(
     except Exception:
         pass
 
-    env = (os.environ.get("TASK_ORCHESTRATOR_ENABLED") or "true").strip().lower()
-    return env in ("1", "true", "yes", "on")
+    return True
 
 
 def strategy_version_for_new_task(enabled: bool) -> str:
