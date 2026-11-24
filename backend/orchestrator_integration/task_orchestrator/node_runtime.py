@@ -232,30 +232,78 @@ def _truthy_flag(val: Any) -> bool:
     return str(val).strip().lower() in {"1", "true", "yes", "ok", "passed", "success"}
 
 
+def _latest_attempt(tool_results: Optional[List[str]]) -> str:
+    """取最近一次工具结果；二层备用成功后不应被历史失败永久阻断（X03）。"""
+    attempts = [str(x) for x in (tool_results or []) if x]
+    return attempts[-1] if attempts else ""
+
+
+def _evaluate_assertions_payload(text: str) -> Optional[bool]:
+    """逐项核对 assertions。
+
+    Returns:
+        True: 存在非空断言且全部 passed
+        False: 有 assertions 字段但为空，或任一项失败
+        None: 无 assertions 字段（改用其他证据）
+    """
+    blob = _merge_blob_layers(extract_structured_blob(text or ""))
+    if "assertions" not in blob:
+        # 顶层未出现时再扫原文，避免误把别的数组当断言
+        if not re.search(r'(?i)"assertions"\s*:', text or ""):
+            return None
+        return False
+    assertions = blob.get("assertions")
+    if not isinstance(assertions, list):
+        return False
+    if len(assertions) == 0:
+        return False  # X02：空数组不算完成核验
+    for item in assertions:
+        if not isinstance(item, dict):
+            return False
+        if "passed" in item:
+            if not _truthy_flag(item.get("passed")):
+                return False  # X01
+            continue
+        if "ok" in item:
+            if not _truthy_flag(item.get("ok")):
+                return False
+            continue
+        result = str(item.get("result") or item.get("status") or "").lower()
+        if result in {"failed", "fail", "error", "false"}:
+            return False
+        if result not in {"passed", "pass", "success", "ok", "true"}:
+            # 无明确通过字段 → 不完整
+            return False
+    return True
+
+
 def orch_node_acceptance(
     stage_id: str, tool_results: Optional[List[str]] = None
 ) -> Dict[str, Any]:
-    """编排节点专用验收（可推进则 ok）。按结构化结果判定，拒绝失败误推进。"""
-    joined = "\n".join(str(x) for x in (tool_results or []) if x)
+    """编排节点专用验收（可推进则 ok）。按最近一次有效尝试的结构化结果判定。"""
+    attempts = [str(x) for x in (tool_results or []) if x]
+    latest = attempts[-1] if attempts else ""
+    # 历史文本仅作诊断；成败与 ID 以最近一次尝试为准（X03）
+    joined = latest
     sid = stage_id or ""
-    ids = extract_execution_ids(joined)
+    ids = extract_execution_ids(latest)
 
     if sid in {"query_cases"}:
-        if _looks_like_tool_failure(joined, ids):
+        if _looks_like_tool_failure(latest, ids):
             return {"ok": False, "reason": "query_failed", "stage_id": sid, "ids": ids}
         # 必须有真实 case 标识；动作名出现在错误文案中不算（F04）
         has_case = bool(ids.get("testcase_id") or ids.get("case_id"))
         if not has_case:
             # JSON 列表成功形态：[{"case_id": N, "case_name": ...}]
             has_case = bool(
-                re.search(r'"case_id"\s*:\s*\d+|"testcase_id"\s*:\s*\d+', joined or "")
+                re.search(r'"case_id"\s*:\s*\d+|"testcase_id"\s*:\s*\d+', latest or "")
             )
         if has_case:
             return {"ok": True, "reason": "case_ref_found", "stage_id": sid, "ids": ids}
         return {"ok": False, "reason": "missing_case_ref", "stage_id": sid}
 
     if sid in {"prepare_data", "api_prepare_or_run"}:
-        if _looks_like_tool_failure(joined, ids):
+        if _looks_like_tool_failure(latest, ids):
             return {
                 "ok": False,
                 "reason": "prepare_failed",
@@ -269,7 +317,7 @@ def orch_node_acceptance(
             or ids.get("task_execution_id")
             or ids.get("execution_id")
             or any(
-                k in joined
+                k in latest
                 for k in ("prepared_object_ids", "造数", "准备成功", "front_sql")
             )
         ):
@@ -287,7 +335,7 @@ def orch_node_acceptance(
                 "ids": ids,
             }
         if any(
-            k in joined
+            k in latest
             for k in ("parametrize_results", "终态", "u_case_result")
         ):
             return {
@@ -299,10 +347,25 @@ def orch_node_acceptance(
         return {"ok": False, "reason": "missing_execution_ref", "stage_id": sid}
 
     if sid in {"assert_and_deliver"}:
-        if _looks_like_tool_failure(joined, ids):
+        if _looks_like_tool_failure(latest, ids):
             return {
                 "ok": False,
                 "reason": "assert_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        assertion_verdict = _evaluate_assertions_payload(latest)
+        if assertion_verdict is False:
+            return {
+                "ok": False,
+                "reason": "assert_failed",
+                "stage_id": sid,
+                "ids": ids,
+            }
+        if assertion_verdict is True:
+            return {
+                "ok": True,
+                "reason": "assert_evidence",
                 "stage_id": sid,
                 "ids": ids,
             }
@@ -311,10 +374,9 @@ def orch_node_acceptance(
             return {"ok": True, "reason": "assert_evidence", "stage_id": sid, "ids": ids}
         if re.search(
             r'(?i)"ok"\s*:\s*true|"test_result"\s*:\s*"passed"|'
-            r'assert_task_postcondition[^\n]{0,80}"ok"\s*:\s*true|'
-            r'"assertions"\s*:\s*\[',
-            joined or "",
-        ) and not re.search(r"(?i)assertions missing", joined or ""):
+            r'assert_task_postcondition[^\n]{0,120}"ok"\s*:\s*true',
+            latest or "",
+        ) and not re.search(r"(?i)assertions missing", latest or ""):
             return {"ok": True, "reason": "assert_evidence", "stage_id": sid, "ids": ids}
         return {"ok": False, "reason": "assert_incomplete", "stage_id": sid, "ids": ids}
 

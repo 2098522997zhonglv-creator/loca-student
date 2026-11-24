@@ -807,8 +807,15 @@ def should_accept_case_result(
     bound_record_id=None,
     bound_execution_id=None,
 ) -> bool:
-    """是否接受 WebSocket 回传的用例结果（F09：必须匹配本次绑定标识）。"""
+    """是否接受 WebSocket 回传的用例结果。
+
+    F09：已绑定后必须匹配本次 record/execution。
+    X05：受理标识尚未建立前，仅凭 case_id 不得接受任意同用例结果。
+    """
     if case_id != testcase_id:
+        return False
+    # 未收到 effective_runtime 绑定前：拒绝结果，避免他次运行抢先交差
+    if bound_record_id is None and bound_execution_id is None:
         return False
     if bound_record_id is not None and result_record_id is not None:
         if str(result_record_id) != str(bound_record_id):

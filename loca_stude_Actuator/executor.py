@@ -1186,18 +1186,30 @@ class PlaywrightExecutor:
         )
 
         # 参数化：单行与多行统一注入；多行每行独立 DataProcessor（F10／F11）
-        rows = parse_parametrize_rows(getattr(config, "parametrize", None))
+        # 显式 list 中的 {} 是合法空输入行，不得过滤（X04）
+        raw_parametrize = getattr(config, "parametrize", None)
+        rows = parse_parametrize_rows(raw_parametrize)
         if getattr(config, "parametrize_row", None) is None and getattr(
             config, "parametrize_data", None
         ) is None:
-            nonempty_rows = [r for r in rows if isinstance(r, dict) and r]
-            if len(nonempty_rows) > 1:
+            dict_rows = [r for r in rows if isinstance(r, dict)]
+            explicit_list = isinstance(raw_parametrize, list) and len(raw_parametrize) >= 1
+            explicit_rows_obj = (
+                isinstance(raw_parametrize, dict)
+                and isinstance(raw_parametrize.get("rows"), list)
+                and len(raw_parametrize.get("rows") or []) >= 1
+            )
+            # 未显式传 parametrize 时 parse 会得到 [{}]，按单次无参执行，不走进多行调度
+            schedule_rows = dict_rows if (explicit_list or explicit_rows_obj) else [
+                r for r in dict_rows if r
+            ]
+            if len(schedule_rows) > 1:
                 from data_processor import DataProcessor
 
                 baseline = getattr(config, "data_processor", None)
                 all_results = []
                 overall_failed = 0
-                for idx, row in enumerate(nonempty_rows):
+                for idx, row in enumerate(schedule_rows):
                     if baseline is not None and hasattr(baseline, "fork"):
                         row_processor = baseline.fork()
                     elif baseline is not None and hasattr(baseline, "get_all"):
@@ -1221,7 +1233,10 @@ class PlaywrightExecutor:
                 return CaseResultModel(
                     case_id=config.case_id,
                     status=status,
-                    message=f"参数化完成: {len(nonempty_rows) - overall_failed}/{len(nonempty_rows)} 行通过",
+                    message=(
+                        f"参数化完成: {len(schedule_rows) - overall_failed}/"
+                        f"{len(schedule_rows)} 行通过"
+                    ),
                     total_steps=sum(r.get("total_steps", 0) for r in all_results),
                     passed_steps=sum(r.get("passed_steps", 0) for r in all_results),
                     failed_steps=sum(r.get("failed_steps", 0) for r in all_results),
@@ -1232,12 +1247,14 @@ class PlaywrightExecutor:
                     execution_id=config.execution_id,
                     parametrize_results=all_results,
                 )
-            if len(nonempty_rows) == 1:
-                # 单行也注入 parametrize_data，与多行一致（F10）
+            if len(schedule_rows) == 1 and (
+                schedule_rows[0] or explicit_list or explicit_rows_obj
+            ):
+                # 单行（含显式 [{}]）也注入 parametrize_data（F10）
                 config = replace(
                     config,
                     parametrize_row=0,
-                    parametrize_data=nonempty_rows[0],
+                    parametrize_data=schedule_rows[0],
                     parametrize=None,
                 )
 

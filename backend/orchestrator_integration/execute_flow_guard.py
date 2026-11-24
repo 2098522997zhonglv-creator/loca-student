@@ -28,6 +28,13 @@ _RUN_RE = re.compile(
     r"playwright-skill[^\n]{0,80}(?:goto|click|fill|screenshot)"
 )
 
+# 已有本次执行终态（含业务 failed）也算「跑完」，任务可收口（AC07）
+_TERMINAL_RUN_RE = re.compile(
+    r"(?i)(?:execution_id|record_id)\s*[:=]\S+.{0,120}"
+    r"(?:终态|test_result|断言|passed|failed|error|skipped)|"
+    r"终态\s*[:=]\s*(?:passed|failed|error|skipped)"
+)
+
 _CASE_EVIDENCE_RE = re.compile(
     r"(?i)\"case_id\"\s*:\s*\d+|\"testcase_id\"\s*:\s*\d+|"
     r"case_id\s*[:=]\s*\d+|testcase_id\s*[:=]\s*\d+|get_testcases"
@@ -97,7 +104,11 @@ def is_premature_blocked(progress: Dict[str, Any]) -> bool:
 
 
 def has_execute_run_evidence(tool_results: Optional[Sequence[Any]]) -> bool:
-    return bool(_RUN_RE.search(_join_texts(tool_results)))
+    joined = _join_texts(tool_results)
+    if _RUN_RE.search(joined):
+        return True
+    # execution_id/record_id + 终态/断言：含业务失败的完整执行证据
+    return bool(_TERMINAL_RUN_RE.search(joined))
 
 
 def append_force_run_nudge(text: str, *, enabled: bool) -> str:
