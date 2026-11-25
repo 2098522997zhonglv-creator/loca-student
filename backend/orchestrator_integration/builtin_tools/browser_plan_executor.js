@@ -89,6 +89,7 @@ async function requiredCheck(page, bindings) {
   context.on('response', onResponse);
   try {
     await page.locator(bindings.text).fill('');
+    Object.assign(bindings,await discover(page));
     await page.locator(bindings.submit).click();
     const validation = page.waitForFunction(() => [...document.querySelectorAll('.text-error,[role="alert"],[aria-invalid="true"]')]
       .filter(el => el.getClientRects().length).map(el => (el.innerText || el.validationMessage || '').trim()).filter(Boolean).length > 0,
@@ -116,7 +117,9 @@ async function execute(page, plan) {
     if (plan.action !== 'run_form_test') throw new Error('不支持的执行计划动作');
     const target = new URL(plan.url), current = new URL(page.url());
     if (current.origin!==target.origin || current.pathname!==target.pathname) throw new Error('当前页面与计划目标不同，需修复当前节点');
-    const bindings = plan.bindings;
+    // DOM bindings belong to the executor. Never ask an LLM to round-trip
+    // selectors/options/readonly metadata: a shortened copy is not a binding.
+    const bindings = await discover(page);
     if (!bindings?.text || !bindings?.submit || (!bindings?.cart_url && !bindings?.cart_control)) throw new Error('计划缺少已识别表单绑定');
     // Preserve explicitly requested no-extra defaults. Unknown additional
     // mandatory groups are returned for binding, not silently omitted.
@@ -130,7 +133,10 @@ async function execute(page, plan) {
         else if(/no,?\s*thanks|不需要|无需|不要/i.test(group.label) && !group.hasText) throw new Error('无法确认不添加额外选项，需要绑定');
       }
     }
+    Object.assign(bindings,await discover(page));
     if(plan.empty_check) {
+      if(plan.rows[0]?.color) await selectExact(page,plan.rows[0].color);
+      Object.assign(bindings,await discover(page));
       result.empty_check = await requiredCheck(page,bindings);
       result.steps.push({node_id:'empty_check',...result.empty_check});
       await screenshot(page,plan,'02_plan_empty_check');
@@ -139,7 +145,9 @@ async function execute(page, plan) {
       const record = {key:row.key, value:row.value, color:row.color, quantity:row.quantity};
       try {
         if(row.color) await selectExact(page,row.color);
+        Object.assign(bindings,await discover(page));
         await page.locator(bindings.text).fill(row.value);
+        Object.assign(bindings,await discover(page));
         if(bindings.quantity) {
           const quantity=page.locator(bindings.quantity), expected=String(row.quantity || 1);
           if(await quantity.inputValue()!==expected) {
@@ -175,6 +183,7 @@ async function execute(page, plan) {
       }
       result.rows.push(record);
     }
+    Object.assign(bindings,await discover(page));
     if(bindings.cart_url) await page.goto(bindings.cart_url,{waitUntil:'domcontentloaded'});
     else {
       await page.locator(bindings.cart_control).click();

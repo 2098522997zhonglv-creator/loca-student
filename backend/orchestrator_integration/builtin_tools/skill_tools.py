@@ -1764,7 +1764,7 @@ def get_skill_tools(
             parallel: 批量是否并发；默认 False（串行）。含写入时即使传 True 也会强制串行。
             max_workers: 批量并发上限（仅 parallel=true 时生效，默认 5）
             user_confirmed: 写入类命令是否已获用户明确同意；未同意不得为 true
-            browser_plan: 浏览器表单计划。inspect_form: {action:"inspect_form",url, screenshots:true}，返回当前页面 bindings；run_form_test: {action:"run_form_test",url,bindings,rows:[{key,value,color,quantity}],empty_check:true,no_extras:true,screenshots:true}，连续执行必填检查、精确选色、文本预览、各行加购、购物车回读并截图。用已查询的规则判断适用性；未知控件返回 needs_binding 后只修复剩余步骤。使用同一 session_id。无需 shell 或固定等待。
+            browser_plan: 浏览器表单计划。inspect_form: {action:"inspect_form",url, screenshots:true}，返回页面结构；绑定由 Runtime 持有，无需回传；run_form_test: {action:"run_form_test",url,binding_ref:"current_dom",rows:[{key,value,color,quantity}],empty_check:true,no_extras:true,screenshots:true}，连续执行必填检查、精确选色、文本预览、各行加购、购物车回读并截图。用已查询的规则判断适用性；未知控件返回 needs_binding 后只修复剩余步骤。使用同一 session_id。无需 shell 或固定等待。
             script: playwright-skill 原始 JavaScript。非空时优先于兼容 command，无需 shell 引号；空字符串按未提供处理，不能和 commands 批次混用。
 
         Returns:

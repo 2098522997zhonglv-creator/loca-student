@@ -251,8 +251,8 @@ def form_execution_hint(state):
         return ""
     payload = {"url":state["target_url"], "screenshots":state.get("requires_screenshot", False)}
     if plan.get("bindings"):
-        payload.update(action="run_form_test", bindings=plan["bindings"], rows=pending,
+        payload.update(action="run_form_test", binding_ref="current_dom", rows=pending,
                        empty_check=state.get("requires_empty_check") and not state.get("empty_check"), no_extras=state.get("no_extras", False))
-        return "知识库规则与当前页面适用时，直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 连续执行剩余参数、预览与核验；无需为每一行重新请求模型或插入固定等待：" + json.dumps(payload,ensure_ascii=False)
+        return "本轮规则已获取，目标 URL、参数和授权来自当前用户指令，无需再查商品目录或分支对照。仅遇到影响下一动作的具体规则缺口时补查。绑定由 Runtime 从当前 DOM 获取，不复制或改写 bindings。直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 连续执行剩余参数、预览与核验；无需为每一行重新请求模型或插入固定等待：" + json.dumps(payload,ensure_ascii=False)
     payload["action"] = "inspect_form"
-    return "先查询任务所需知识库规则并判断条件，再直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 识别表单；识别后用 run_form_test 连续执行参数行，无需 read_skill_content 或额外授权。未知控件交回原脚本路径修复：" + json.dumps(payload,ensure_ascii=False)
+    return ("本轮知识库规则已获取，沿用现有来源，直接识别页面；仅遇到具体缺失再补查。" if state.get("knowledge_checked") else "先查询任务所需知识库规则并判断条件。") + "直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 识别表单；识别后用 run_form_test 连续执行参数行，无需 read_skill_content 或额外授权。未知控件交回原脚本路径修复：" + json.dumps(payload,ensure_ascii=False)

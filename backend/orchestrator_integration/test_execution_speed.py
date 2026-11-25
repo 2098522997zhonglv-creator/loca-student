@@ -26,7 +26,8 @@ class ExecutionSpeedTests(SimpleTestCase):
         state['rows']['row-1']={'result':'failed','retryable':False}
         hint = form_execution_hint(state)
         self.assertIn('run_form_test',hint)
-        self.assertIn('#current-dom',hint)
+        self.assertIn('current_dom',hint)
+        self.assertNotIn('#current-dom',hint)
         self.assertIn('E2E_BETA',hint)
         self.assertNotIn('E2E_ALPHA',hint)
 

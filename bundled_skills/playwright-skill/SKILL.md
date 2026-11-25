@@ -9,7 +9,7 @@ description: 浏览器自动化执行工具。用于执行 Web 页面测试、�
 
 对已给定 URL、颜色、文本和数量的购物车测试，先以 `knowledge_search` 查询必要规则并判断适用性，再调用内置表单操作：
 1. `execute_skill_script(skill_name="playwright-skill", browser_plan={"action":"inspect_form","url":"目标 PDP","screenshots":true})`：读取真实 DOM 并返回 `bindings`，无需重复读取 Skill。
-2. 同一会话调用 `browser_plan={"action":"run_form_test","url":"同一 PDP","bindings":上一步绑定,"rows":[{"key":"row-1","value":"文本","color":"完整颜色名","quantity":1}],"empty_check":true,"no_extras":true,"screenshots":true}`：连续执行必填、预览、参数行与购物车回读。参数行必须对应当前任务，不包含已执行行；额外前置操作先在原脚本路径完成。
+2. 同一会话调用 `browser_plan={"action":"run_form_test","url":"同一 PDP","binding_ref":"current_dom","rows":[{"key":"row-1","value":"文本","color":"完整颜色名","quantity":1}],"empty_check":true,"no_extras":true,"screenshots":true}`：连续执行必填、预览、参数行与购物车回读。绑定由 Runtime 直接从当前 DOM 获取，不让模型复制或重写。参数行必须对应当前任务，不包含已执行行；额外前置操作先在原脚本路径完成。
 3. `needs_binding` 表示未知控件，按 snapshot 修复当前步骤；已确认的成功和业务失败都保留，未知写入先回查。此操作不能覆盖上传、登录、下单等额外目标。
 
 等待页面条件、实际响应、预览更新；不要插入固定秒数等待。使用 Runtime 的 page/context 与原生 script，读取本机产物使用 Node fs，避免跨系统 shell 命令。内置操作已经读取页面结构，原始脚本仍先检查当前 DOM。
