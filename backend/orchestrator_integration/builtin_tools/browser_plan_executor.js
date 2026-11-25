@@ -49,7 +49,7 @@ async function selectExact(page, value, scope = null) {
     const norm = t => (t || '').replace(/\s+/g, ' ').trim();
     const visible = el => !!el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden';
     const native = [...root.querySelectorAll('select')].filter(visible).find(el => [...el.options].some(o => norm(o.label) === value));
-    let target = native;
+    let target = native, selected = native ? [...native.selectedOptions].some(o=>norm(o.label)===value) : false;
     if (!target) {
       const candidates = [...root.querySelectorAll('button,label,div,span,li,[role="option"],[role="radio"]')]
         .filter(el => visible(el) && norm(el.innerText) === value);
@@ -66,19 +66,31 @@ async function selectExact(page, value, scope = null) {
       // Click the actual label/content, not merely its containing tile.
       // Vue/custom controls often attach the handler to an inner element;
       // clicking its ancestor never dispatches that child's handler.
+      const isSelected = el => el.getAttribute('aria-selected')==='true' || el.getAttribute('aria-checked')==='true' || el.checked===true ||
+        [...el.classList].some(c=>/(?:^|[-_])(?:active|selected|checked)$/.test(c) && !/inactive|unselected|unchecked|not[-_]/.test(c));
+      selected=[targets[0],...targets[0].querySelectorAll('*')].some(isSelected);
       target = candidates.find(el => resolve(el)===targets[0] && ![...el.children].some(child=>visible(child)&&norm(child.innerText)===value)) || targets[0];
     }
     document.querySelectorAll('[data-loca-plan="choice"]').forEach(x => x.removeAttribute('data-loca-plan'));
     target.setAttribute('data-loca-plan','choice');
-    return {selector:'[data-loca-plan="choice"]', native:target.tagName==='SELECT'};
+    return {selector:'[data-loca-plan="choice"]', native:target.tagName==='SELECT',selected};
   }, {value,scope});
   if (binding.error) throw new Error(binding.error);
+  if (binding.selected) return;
   if (binding.native) await page.selectOption(binding.selector, {label:value});
   else await page.locator(binding.selector).click();
 }
 
 async function screenshot(page, plan, name) {
   if (plan.screenshots) await page.screenshot({path:path.join(process.env.SCREENSHOT_DIR, name + '.png'),fullPage:false});
+}
+
+async function waitEnabled(page, selector) {
+  await page.waitForFunction(selector=>{
+    const el=document.querySelector(selector);
+    return el && el.getClientRects().length && !el.disabled && el.getAttribute('aria-disabled')!=='true' && el.getAttribute('aria-busy')!=='true' &&
+      ![...el.classList].some(c=>/(?:^|[-_])disabled$/.test(c));
+  },selector,{timeout:15000});
 }
 
 async function requiredCheck(page, bindings) {
@@ -93,6 +105,7 @@ async function requiredCheck(page, bindings) {
   try {
     await page.locator(bindings.text).fill('');
     Object.assign(bindings,await discover(page));
+    await waitEnabled(page,bindings.submit);
     await page.locator(bindings.submit).click();
     const validation = page.waitForFunction(() => [...document.querySelectorAll('.text-error,[role="alert"],[aria-invalid="true"]')]
       .filter(el => el.getClientRects().length).map(el => (el.innerText || el.validationMessage || '').trim()).filter(Boolean).length > 0,
@@ -162,6 +175,7 @@ async function execute(page, plan) {
         await page.waitForFunction(value => [...document.querySelectorAll('.text-preview,[data-testid="preview"],[class*="preview"]')]
           .some(el => el.getClientRects().length && (el.innerText || '').includes(value)),row.value,{timeout:10000});
         await screenshot(page,plan,`${row.key}_preview`);
+        await waitEnabled(page,bindings.submit);
         const response = page.waitForResponse(res => isCartUrl(res.url()) && /POST|PUT|PATCH/.test(res.request().method()),{timeout:15000});
         // Consume a possible timeout immediately; an uncertain write must not
         // turn into an unhandled rejection or an automatic retry.
