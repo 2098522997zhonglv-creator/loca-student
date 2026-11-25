@@ -53,7 +53,7 @@ await page.click('button[type="submit"]');
 
 ## 使用方法
 
-优先通过 `execute_skill_script(skill_name="playwright-skill", script="原始 JavaScript", session_id="本任务会话")` 调用。`script` 支持真实换行、引号和正则，不需要 shell 转义；不要同时传 `command`。已确认的页面结构和同一隔离游客会话在本任务内复用。
+优先通过 `execute_skill_script(skill_name="playwright-skill", script="原始 JavaScript", session_id="本任务会话")` 调用。`script` 支持真实换行、引号和正则，不需要 shell 转义；非空 `script` 优先于兼容字段 `command`，空 `script` 按未提供处理。已确认的页面结构和同一隔离游客会话在本任务内复用。
 
 兼容旧调用时可传 `command`：
 
