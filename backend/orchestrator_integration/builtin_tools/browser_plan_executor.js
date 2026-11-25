@@ -63,7 +63,10 @@ async function selectExact(page, value, scope = null) {
       };
       const targets = [...new Set(candidates.map(resolve))];
       if (targets.length !== 1) return {error:`选项 ${value} 需要明确绑定，匹配 ${targets.length} 个节点`};
-      target = targets[0];
+      // Click the actual label/content, not merely its containing tile.
+      // Vue/custom controls often attach the handler to an inner element;
+      // clicking its ancestor never dispatches that child's handler.
+      target = candidates.find(el => resolve(el)===targets[0] && ![...el.children].some(child=>visible(child)&&norm(child.innerText)===value)) || targets[0];
     }
     document.querySelectorAll('[data-loca-plan="choice"]').forEach(x => x.removeAttribute('data-loca-plan'));
     target.setAttribute('data-loca-plan','choice');
