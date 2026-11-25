@@ -76,6 +76,16 @@ def observe(state: dict, *, tool_name: str, result: dict, command: str = "") -> 
                 "result": "passed" if response["success"] else "failed",
                 "preview": response.get("previews") or [],
             }
+    # Some storefronts render the known empty cart without a new API request.
+    # Explicitly rejected writes plus an observed empty cart page are valid
+    # negative-test evidence. They can never establish a successful cart row.
+    if (not state.get("cart_readback") and obs.get("cart_empty") and navigated
+            and urlparse(page_url).netloc == urlparse(state["target_url"]).netloc
+            and urlparse(page_url).path.rstrip("/") in {"/cart", "/cart/index"}
+            and all(state["rows"].get(r["key"], {}).get("result") == "failed"
+                    and not state["rows"][r["key"]].get("retryable") for r in state["expected_rows"])):
+        state["cart_readback"] = {"http_status": 200, "cart_count": 0, "operation_id": result["operation_id"],
+                                  "observed_via": "rendered_cart_page", "page_url": page_url}
     return state
 
 
@@ -172,7 +182,8 @@ def report(state: dict) -> str:
             evidence += f"；请求商品标识：{row['request_product_id']}"
         lines.append(f"| {cell(expected['value'] or expected['key'])} | {'通过' if row['result'] == 'passed' else '失败'} | {cell(evidence)} |")
     cart = state["cart_readback"]
-    lines += [f"| 购物车回读 | 已核验 | HTTP {cart.get('http_status')}，商品行数 {cart.get('cart_count')}，商品金额 {cart.get('items_amount', '接口未提供')} |", ""]
+    source = "页面空态（HTTP 为页面响应）" if cart.get("observed_via") == "rendered_cart_page" else "接口回读"
+    lines += [f"| 购物车回读 | 已核验 | {source}，HTTP {cart.get('http_status')}，商品行数 {cart.get('cart_count')}，商品金额 {cart.get('items_amount', '无商品行，未提供行金额')} |", ""]
     identifiers = dict(cart.get("identifiers") or {})
     for row in state["rows"].values():
         identifiers.update(row.get("identifiers") or {})

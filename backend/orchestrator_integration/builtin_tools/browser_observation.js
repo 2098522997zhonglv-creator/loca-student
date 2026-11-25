@@ -121,6 +121,7 @@ async function startObservation(context, page) {
     try {
       Object.assign(observation, await page.evaluate(() => ({
         title: document.title, ready: document.readyState,
+        cart_empty: /\/(?:cart|cart\/index)\/?$/.test(location.pathname) && /(?:your\s+)?cart\s+is\s+empty|购物车(?:是)?空的|购物车为空/i.test(document.body.innerText),
         input_values: [...document.querySelectorAll('input,textarea')]
           .filter(el => el.offsetParent && !/password|email|hidden/.test(el.type || '') && !/token|secret|card|captcha/i.test(el.name || ''))
           .map(el => String(el.value || '').slice(0, 160)).slice(0, 40),

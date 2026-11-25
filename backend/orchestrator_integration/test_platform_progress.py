@@ -27,6 +27,20 @@ GOAL = (f"执行真实复杂测试验收：先查询知识库，再在 {TARGET} 
 
 
 class ProtocolAndContractTests(unittest.TestCase):
+    def test_explicit_empty_cart_page_finishes_rejected_rows_without_inventing_an_api_response(self):
+        from .browser_test_runtime import observe, delivery_ready
+        state = contract_for_goal(GOAL)
+        state.update(knowledge_checked=True, page_checked=True, empty_check={"passed": True}, artifacts=[{"url": "/media/cart.png"}])
+        state["rows"] = {r["key"]: {"result": "failed", "retryable": False, "operation_id": r["key"]} for r in state["expected_rows"]}
+        result = {"operation_id": "page-cart", "data": {"browser_observation": {"page_url": "https://example.test/cart", "cart_empty": True,
+                  "responses": [{"action": "navigation", "http_status": 200}]}}}
+        observed = observe(state, tool_name="execute_skill_script", result=result)
+        self.assertTrue(delivery_ready(observed))
+        self.assertEqual(observed["cart_readback"]["observed_via"], "rendered_cart_page")
+        self.assertNotIn("items_amount", observed["cart_readback"])
+        state["rows"]["row-1"]["result"] = "passed"
+        self.assertFalse(observe(state, tool_name="execute_skill_script", result=result).get("cart_readback"))
+
     def test_report_keeps_multiline_preview_inside_its_parameter_row(self):
         from .browser_test_runtime import report
         state = contract_for_goal(GOAL)
