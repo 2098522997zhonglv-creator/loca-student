@@ -27,6 +27,11 @@ GOAL = (f"执行真实复杂测试验收：先查询知识库，再在 {TARGET} 
 
 
 class ProtocolAndContractTests(unittest.TestCase):
+    def test_cart_delivery_adapter_keeps_order_and_multiple_product_tasks_on_their_full_plan(self):
+        self.assertIsNone(contract_for_goal(GOAL.replace("不提交订单", "提交订单获取订单号")))
+        self.assertIsNone(contract_for_goal(GOAL + "，另测 /another-pdp-20"))
+        self.assertIsNotNone(contract_for_goal(GOAL))
+
     def test_explicit_empty_cart_page_finishes_rejected_rows_without_inventing_an_api_response(self):
         from .browser_test_runtime import observe, delivery_ready
         state = contract_for_goal(GOAL)

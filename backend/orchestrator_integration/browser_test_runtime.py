@@ -16,6 +16,13 @@ def contract_for_goal(goal: str):
     # adapter handles browser cart tests, never infers an unobserved upload.
     if re.search(r"上传|传图|upload photo", goal, re.I):
         return None
+    # This delivery adapter is only for a single-product cart test. Checkout,
+    # orders and multiple products must retain their full existing task plan.
+    actions = re.sub(r"(?:不|不要|禁止|无需)(?:提交订单|下单|支付|付款)", "", goal)
+    if re.search(r"提交订单|下单|支付|付款|checkout|place.?order|\bpay\b", actions, re.I):
+        return None
+    if len(set(re.findall(r"/[A-Za-z0-9_/-]+-pdp-\d+", goal))) > 1:
+        return None
     urls = re.findall(r"https?://[^\s，,；;）)]+", goal)
     if not urls:
         return None
