@@ -341,10 +341,15 @@ async function main() {
       'getContextOptionsWithHeaders',
       `
 let { browser, context, page } = state;
+try {
+await (async () => {
 ${code}
+})();
+} finally {
 state.browser = browser;
 state.context = context;
 state.page = page;
+}
 `
     );
 

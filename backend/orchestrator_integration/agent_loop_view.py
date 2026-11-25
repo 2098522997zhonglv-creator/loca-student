@@ -2426,10 +2426,14 @@ class AgentLoopStreamAPIView(View):
                     "AgentLoopStreamAPI: runtime task create failed: %s", rt_err
                 )
 
+            from orchestrator_integration.browser_test_runtime import contract_for_goal
+            _planned_cart_test = bool(contract_for_goal(user_message))
+
             # 8. 获取系统提示词
             # 执行用例路径已挂 allowlist Skill 工具，不必再把全量 skills 元数据塞进 prompt（易卡住）
             _include_skills = not (
-                getattr(kb_policy, "reason", "") == "testcase_execute"
+                _planned_cart_test
+                or getattr(kb_policy, "reason", "") == "testcase_execute"
                 or getattr(skill_zone, "zone_id", "") == "execute"
             )
             logger.info(
@@ -2447,6 +2451,10 @@ class AgentLoopStreamAPIView(View):
                 prompt_source,
                 len(effective_prompt or ""),
             )
+
+            if _planned_cart_test:
+                from orchestrator_integration.browser_test_runtime import form_execution_hint
+                effective_prompt = (effective_prompt or "") + "\n\n" + form_execution_hint(contract_for_goal(user_message))
 
             # 8.0 意图驱动工具选择提示（始终注入）+ 本轮意图路由
             # 证据口径仅在执行面注入，避免纯问答被长合规提示压成「只报告不行动」
@@ -2517,6 +2525,10 @@ class AgentLoopStreamAPIView(View):
                 _skip_prefetch = False
             elif _playbook_bans_kb:
                 _skip_prefetch = True
+            if _planned_cart_test:
+                # Execution still queries the KB once, with a focused tool query.
+                # Avoid embedding the full test prompt and then repeating it.
+                _skip_prefetch = True
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,
@@ -2580,6 +2592,8 @@ class AgentLoopStreamAPIView(View):
                         "成功后不要再 get_execution_records；失败无差别重试最多 1 次。"
                     ),
                 }.get(kb_policy.reason, "本轮已跳过知识库预检索。")
+                if _planned_cart_test:
+                    skip_note = "本轮由执行计划通过 knowledge_search 查询必要条件，已跳过重复的全文预检索；仍须查询并理解业务规则后执行。"
                 effective_prompt = (
                     (effective_prompt or "").rstrip()
                     + f"\n\n（{skip_note}）"

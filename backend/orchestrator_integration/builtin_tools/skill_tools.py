@@ -1731,6 +1731,7 @@ def get_skill_tools(
         max_workers: int = 5,
         user_confirmed: bool = False,
         script: Optional[str] = None,
+        browser_plan: Optional[dict] = None,
     ) -> str:
         """
         执行 Skill 脚本命令（单个或批量）。由模型按意图决定是否调用。
@@ -1739,7 +1740,7 @@ def get_skill_tools(
         不适用：仅根据知识库回答业务事实——请用 knowledge_search 或预检索。
 
         ## 调用顺序（重要）
-        1. 先 read_skill_content(skill_name)，再本工具；禁止把 skill 名当 tool 名调用。
+        1. 原始脚本先 read_skill_content(skill_name)；内置 browser_plan 可直接执行，无需读取脚本说明。
         2. 有依赖的多步按序执行；用户已经授权的动作直接执行，仅在缺少必要信息或超出授权时询问。
         3. 多条互相独立的只读命令可用 commands + parallel=true；凡含写入或有先后依赖，必须 parallel=false（默认）。
         4. 批量写入优先用一条 commands 列表串行组合，而不是多次并行单条调用。
@@ -1763,6 +1764,7 @@ def get_skill_tools(
             parallel: 批量是否并发；默认 False（串行）。含写入时即使传 True 也会强制串行。
             max_workers: 批量并发上限（仅 parallel=true 时生效，默认 5）
             user_confirmed: 写入类命令是否已获用户明确同意；未同意不得为 true
+            browser_plan: 浏览器表单计划。inspect_form: {action:"inspect_form",url, screenshots:true}，返回当前页面 bindings；run_form_test: {action:"run_form_test",url,bindings,rows:[{key,value,color,quantity}],empty_check:true,no_extras:true,screenshots:true}，连续执行必填检查、精确选色、文本预览、各行加购、购物车回读并截图。用已查询的规则判断适用性；未知控件返回 needs_binding 后只修复剩余步骤。使用同一 session_id。无需 shell 或固定等待。
             script: playwright-skill 原始 JavaScript。非空时优先于兼容 command，无需 shell 引号；空字符串按未提供处理，不能和 commands 批次混用。
 
         Returns:
@@ -1774,6 +1776,11 @@ def get_skill_tools(
 
         from django.db import close_old_connections
 
+        if browser_plan is not None:
+            if skill_name != "playwright-skill" or commands or script or command:
+                return json.dumps({"status": "failed", "error": "browser_plan 适用于 playwright-skill 单次执行，不能与 script/command/commands 混用"}, ensure_ascii=False)
+            engine = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_plan_executor.js")
+            script = "console.log(JSON.stringify({browser_plan:await require(" + json.dumps(engine) + ").execute(page," + json.dumps(browser_plan, ensure_ascii=False) + ")}));"
         script = script if script and script.strip() else None
         if script is not None:
             if skill_name != "playwright-skill" or commands:

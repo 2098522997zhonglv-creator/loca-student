@@ -122,7 +122,7 @@ def json_documents(text: str) -> List[Dict[str, Any]]:
     """Decode successive JSON values in labelled stdout, without greedy braces."""
     decoder = json.JSONDecoder()
     raw, offset, documents = text or "", 0, []
-    while offset < len(raw) and len(documents) < 80:
+    while offset < len(raw):
         match = re.search(r"[\[{]", raw[offset:])
         if not match:
             break
@@ -137,6 +137,7 @@ def json_documents(text: str) -> List[Dict[str, Any]]:
         elif isinstance(value, list):
             documents.extend(x for x in value[:40] if isinstance(x, dict))
         offset = start + consumed
+        documents = documents[-80:]
     return documents
 
 
@@ -366,6 +367,19 @@ def classify_skill_output(
         structured_data["browser_observation"] = browser_observations[-1]
         business_documents.extend(r for r in browser_observations[-1].get("responses", []) if isinstance(r, dict) and r.get("success") is not None)
     structured_data["execution_status"] = "failed" if code not in (None, 0) else "succeeded"
+    execution = next((d["runtime_execution"] for d in reversed(documents) if isinstance(d.get("runtime_execution"), dict)), None)
+    if execution:
+        structured_data["runtime_execution"] = execution
+        structured_data["execution_status"] = execution.get("status")
+        if execution.get("status") == "failed":
+            return ToolResult(status="failed", operation_id=op_id, data=structured_data,
+                error_code="browser_script_error", retryable=False, evidence=evidence,
+                duration_ms=duration_ms, exit_code=code, observed_at=observed,
+                summary=str(execution.get("error") or "浏览器脚本执行失败")[:500])
+    for document in reversed(documents):
+        if isinstance(document.get("browser_plan"), dict):
+            structured_data["browser_plan"] = document["browser_plan"]
+            break
 
     def _with_meta(tr: ToolResult) -> ToolResult:
         if primary_type:

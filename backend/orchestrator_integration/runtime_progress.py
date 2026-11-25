@@ -33,7 +33,7 @@ def _command(args):
             commands = json.loads(commands)
         except ValueError:
             commands = []
-    return str(args.get("script") or args.get("command") or "") + "\n" + "\n".join(str(x.get("command") or x.get("script") or "") for x in commands if isinstance(x, dict))
+    return json.dumps(args.get("browser_plan") or {}, ensure_ascii=False) + "\n" + str(args.get("script") or args.get("command") or "") + "\n" + "\n".join(str(x.get("command") or x.get("script") or "") for x in commands if isinstance(x, dict))
 
 
 def _sync_test_progress(task, state):
@@ -75,7 +75,19 @@ def start_call(task_id, call_id, name, args):
     if task.status in {"completed", "failed", "cancelled", "cancelling"}:
         return {"reject": "任务已结束或正在取消，不启动新的动作。", "precharged": False}
     state = (task.facts or {}).get("browser_test") or browser_tests.contract_for_goal(task.goal)
-    rejected = browser_tests.guard_command(state, _command(args)) if state and name == "execute_skill_script" else ""
+    plan_rejection = ""
+    plan_arg = args.get("browser_plan") or {}
+    if state and plan_arg.get("action") == "run_form_test":
+        expected = {row["key"]: row for row in state["expected_rows"]}
+        # The compiled path shares the existing call ledger and row identity.
+        # Never replay a completed or uncertain write through a new plan call.
+        prior_plans = AgentStep.objects.filter(task=task, tool_name=name, tool_input__browser_plan__action="run_form_test")
+        unresolved = prior_plans.filter(status__in=["running", "unknown"]).exists()
+        completed = state.get("rows", {})
+        invalid = unresolved or any(row != expected.get(row.get("key")) or row.get("key") in completed for row in plan_arg.get("rows", []))
+        if invalid:
+            plan_rejection = "计划含已执行、未知状态或不匹配的参数行；先核验已有结果，仅修复剩余节点。"
+    rejected = plan_rejection or (browser_tests.guard_command(state, _command(args)) if state and name == "execute_skill_script" else "")
     precharged = not bool(args.get("commands"))
     if precharged:
         ok, reason = consume_budget(task, tool_steps=1)
@@ -293,7 +305,7 @@ class RuntimeProgressMiddleware(AgentMiddleware):
         from .models import AgentTask
         task = AgentTask.objects.get(pk=self.task_id)
         state = (task.facts or {}).get("browser_test")
-        hint = browser_tests.directive(state) if state else ""
+        hint = "\n".join(filter(None, [browser_tests.directive(state), browser_tests.form_execution_hint(state)])) if state else ""
         if not hint:
             return request
         text = str(request.system_message.content or "") if request.system_message else ""

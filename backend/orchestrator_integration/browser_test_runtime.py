@@ -43,6 +43,7 @@ def contract_for_goal(goal: str):
         "requires_empty_check": bool(re.search(r"为空|空文本|空值|empty", goal, re.I)),
         "empty_check": None, "cart_readback": None, "last_inputs": [],
         "requires_screenshot": "截图" in goal, "artifacts": [],
+        "no_extras": bool(re.search(r"(?:无需|不要|不加|不需).{0,8}(?:配件|包装)", goal)),
     }
 
 
@@ -54,6 +55,11 @@ def observe(state: dict, *, tool_name: str, result: dict, command: str = "") -> 
         state["knowledge_checked"] = True
         sources = re.findall(r"来源[:：]\s*([^\n)）]+)", raw)
         state["sources"] = list(dict.fromkeys(state.get("sources", []) + sources))[:15]
+    plan = data.get("browser_plan") or {}
+    if plan:
+        state["form_plan"] = {k: plan[k] for k in ("action", "status", "bindings", "message", "snapshot", "duration_ms") if k in plan}
+        if state.get("requires_empty_check") and isinstance(plan.get("empty_check"), dict):
+            state["empty_check"] = {**plan["empty_check"], "operation_id": result["operation_id"]}
     obs = data.get("browser_observation")
     if not isinstance(obs, dict):
         return state
@@ -140,7 +146,7 @@ def directive(state: dict) -> str:
     deviations = state.get("invalid_attempts") or []
     if not state.get("rows") and not deviations:
         return ""
-    pending = [(f"颜色 {r['color']}，" if r.get("color") else "") + f"文本 {r['value'] or r['key']}" + (f"，数量 {r['quantity']}" if r.get("quantity") else "") for r in state["expected_rows"] if r["key"] not in state["rows"]]
+    pending = [(f"颜色 {r['color']}，" if r.get("color") else "") + f"文本 {r['value'] or r['key']}" + (f"，数量 {r['quantity']}" if r.get("quantity") else "") for r in state["expected_rows"] if r["key"] not in state["rows"] or state["rows"][r["key"]].get("retryable")]
     if pending:
         if deviations:
             return "实际请求参数与目标行不一致，尚未完成目标参数行。使用精确选项匹配（exact:true 或完整文本正则，Blue 不能匹配 Sky Blue），补做：" + "；".join(pending) + "。保留偏差记录，不重放已完成的正确参数行。"
@@ -190,13 +196,13 @@ def report(state: dict) -> str:
     def cell(value):
         return re.sub(r"\s+", " ", str(value)).strip().replace("|", "\\|")
 
-    failed = any(row.get("result") == "failed" for row in state["rows"].values())
+    failed = any(row.get("result") == "failed" for row in state["rows"].values()) or bool(state.get("empty_check") and not state["empty_check"].get("passed"))
     lines = ["真实测试已执行并完成核验。" + ("商城加购用例未通过。" if failed else "加购断言通过。"),
              "", f"目标商品：{state['target_url']}", "知识库来源：" + "；".join(state.get("sources") or ["本轮知识库检索，详见执行记录"]), "",
              "| 检查项 | 结果 | 真实证据 |", "|---|---|---|"]
     if state.get("requires_empty_check"):
         check = state.get("empty_check") or {}
-        lines.append("| 空文本必填拦截 | " + ("通过" if check.get("passed") else "未核实") + " | " + cell("；".join(check.get("errors") or [])) + " |")
+        lines.append("| 空文本必填拦截 | " + ("通过" if check.get("passed") else "失败") + " | " + cell("；".join(check.get("errors") or [])) + " |")
     for expected in state["expected_rows"]:
         row = state["rows"][expected["key"]]
         evidence = f"HTTP {row.get('http_status')}；{row.get('error_code') or ''}；{row.get('message') or ''}；operation_id={row['operation_id']}"
@@ -226,6 +232,26 @@ def delivered_acceptance(task):
     if not state.get("report_prepared") or not delivery_ready(state) or not state.get("report_content"):
         return None
     failures = [x for x in state["rows"].values() if x.get("result") == "failed"]
-    return {"ok": True, "execution_completed": True, "test_result": "failed" if failures else "passed",
+    return {"ok": True, "execution_completed": True, "test_result": "failed" if failures or (state.get("empty_check") and not state["empty_check"].get("passed")) else "passed",
             "external_failures": failures, "reasons": ["测试执行与报告交付完成；商城用例未通过。"] if failures else [],
             "report": state["report_content"], "evidence_operation_ids": [r["operation_id"] for r in state["rows"].values()]}
+
+
+def form_execution_hint(state):
+    """Bind supported form work to a continuous executor; model interprets KB rules."""
+    if not state or any(not row.get("value") or not row.get("color") or not row.get("quantity") for row in state.get("expected_rows", [])):
+        return ""
+    import json
+    pending = [row for row in state["expected_rows"] if row["key"] not in state.get("rows", {})]
+    plan = state.get("form_plan") or {}
+    if plan.get("status") == "needs_binding":
+        return "表单执行器遇到未知控件，按返回 snapshot 修复当前节点；保留所有已观察结果，禁止重放未知状态的写请求。"
+    if not pending:
+        return ""
+    payload = {"url":state["target_url"], "screenshots":state.get("requires_screenshot", False)}
+    if plan.get("bindings"):
+        payload.update(action="run_form_test", bindings=plan["bindings"], rows=pending,
+                       empty_check=state.get("requires_empty_check") and not state.get("empty_check"), no_extras=state.get("no_extras", False))
+        return "知识库规则与当前页面适用时，直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 连续执行剩余参数、预览与核验；无需为每一行重新请求模型或插入固定等待：" + json.dumps(payload,ensure_ascii=False)
+    payload["action"] = "inspect_form"
+    return "先查询任务所需知识库规则并判断条件，再直接用 execute_skill_script(skill_name='playwright-skill', browser_plan=以下JSON) 识别表单；识别后用 run_form_test 连续执行参数行，无需 read_skill_content 或额外授权。未知控件交回原脚本路径修复：" + json.dumps(payload,ensure_ascii=False)

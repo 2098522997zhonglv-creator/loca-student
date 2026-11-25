@@ -375,6 +375,10 @@ class _PlaywrightNodeProcess:
                 else:
                     output = strip_terminal_control_sequences(str(err))
 
+        output += "\n" + json.dumps({"runtime_execution": {
+            "status": "succeeded" if resp.get("ok", False) else "failed",
+            "error": str(resp.get("error") or "")[:1500],
+        }}, ensure_ascii=False)
         return output
 
     def terminate(self, graceful: bool = True) -> None:
