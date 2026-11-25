@@ -39,3 +39,13 @@ class ExecutionSpeedTests(SimpleTestCase):
 
     def test_unbound_values_keep_existing_execution_path(self):
         self.assertEqual(form_execution_hint(contract_for_goal(GOAL.replace('数量各1',''))),'')
+
+    def test_positive_report_keeps_each_row_identifier_without_merchant_failure_label(self):
+        from .browser_test_runtime import report
+        state=contract_for_goal(GOAL)
+        state.update(empty_check={"passed":True},cart_readback={"http_status":200,"cart_count":2})
+        state["rows"]={r["key"]:{"result":"passed","operation_id":"batch-op","identifiers":{"cart_item_id":"item-"+r["key"]}} for r in state["expected_rows"]}
+        text=report(state)
+        self.assertIn("item-row-1",text)
+        self.assertIn("item-row-2",text)
+        self.assertNotIn("商城错误",text)

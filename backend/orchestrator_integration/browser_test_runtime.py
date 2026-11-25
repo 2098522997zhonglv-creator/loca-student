@@ -206,6 +206,7 @@ def report(state: dict) -> str:
     for expected in state["expected_rows"]:
         row = state["rows"][expected["key"]]
         evidence = f"HTTP {row.get('http_status')}；{row.get('error_code') or ''}；{row.get('message') or ''}；operation_id={row['operation_id']}"
+        evidence += "；标识：" + ("、".join(f"{k}={v}" for k,v in (row.get("identifiers") or {}).items()) or "未生成")
         evidence += "；请求选项：" + "、".join(row.get("request_values") or [])
         evidence += f"；数量：{row.get('request_quantity') if row.get('request_quantity') is not None else '接口未提供'}"
         evidence += "；预览：" + ("、".join(row.get("preview") or []) or "本行未采集，不判通过")
@@ -219,7 +220,7 @@ def report(state: dict) -> str:
     for row in state["rows"].values():
         identifiers.update(row.get("identifiers") or {})
     lines.append("真实标识：" + ("，".join(f"{k}={v}" for k, v in identifiers.items()) or "未生成 cart_id/cart_item_id；加购被拒绝，不能用示例标识补齐。"))
-    lines.append("平台执行已收敛到结果交付；商城错误单独列为业务失败。未提交订单、未支付。")
+    lines.append("平台执行已收敛到结果交付；" + ("商城错误单独列为业务失败。" if failed else "所有加购断言已核验。") + "未提交订单、未支付。")
     if state.get("invalid_attempts"):
         lines.append("参数纠正记录：" + "；".join("实际选项 " + "、".join(x.get("request_values") or []) + " 与目标不符，已另行执行目标参数行（operation_id=" + x["operation_id"] + "）" for x in state["invalid_attempts"]))
     if state.get("artifacts"):
