@@ -501,6 +501,10 @@ def request_cancel(task) -> Dict[str, Any]:
     from orchestrator_integration.models import AgentStep, AgentTask
     from orchestrator_integration.stop_signal import set_stop_signal
 
+    task.refresh_from_db()
+    if task.status in {"completed", "failed", "cancelled"}:
+        return {"status": task.status, "task_id": task.public_task_id or str(task.pk), "in_flight": []}
+
     AgentTask.objects.filter(pk=task.pk).exclude(
         status__in=("completed", "failed", "cancelled")
     ).update(status="cancelling", updated_at=timezone.now())
@@ -519,6 +523,10 @@ def request_cancel(task) -> Dict[str, Any]:
         status="cancelling",
         payload={"in_flight": in_flight},
     )
+    if not in_flight:
+        settled = finalize_cancel(task)
+        if settled.get("status") == "cancelled":
+            return {**settled, "in_flight": [], "event_id": evt.get("event_id"), "note": "无在途或未核对动作，已取消。"}
     return {
         "status": "cancelling",
         "task_id": task.public_task_id or str(task.id),
@@ -546,6 +554,8 @@ def finalize_cancel(task, *, force: bool = False) -> Dict[str, Any]:
     )[:50]:
         structured = s.get("structured_result") or {}
         data = structured.get("data") if isinstance(structured, dict) else {}
+        if isinstance(data, dict) and data.get("side_effect_possible") is False:
+            continue
         has_ext = bool(
             s.get("operation_id")
             or (isinstance(data, dict) and data.get("execution_id"))
@@ -1751,6 +1761,11 @@ class AgentRuntime:
     def accept(self, acceptance: Dict[str, Any]) -> Dict[str, Any]:
         if self.task is None:
             return {}
+        self.task.refresh_from_db()
+        from .browser_test_runtime import delivered_acceptance
+        delivered = delivered_acceptance(self.task)
+        if delivered and acceptance.get("execution_completed"):
+            return apply_acceptance(self.task, delivered)
         # 多阶段：未到末阶段不得标 completed；推进只由 maybe_advance 负责（FLOW02）
         # R11：刚进入末阶段但末阶段自身验收未通过时，也不得整任务 completed
         # 单阶段 browser_interact 同样要求阶段证据，禁止无动作 completed

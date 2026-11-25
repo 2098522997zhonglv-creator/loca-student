@@ -112,6 +112,17 @@ def finalize_task_acceptance(
     commission = session.commission
     task = session.task
     events: List[Dict[str, Any]] = []
+    if task is not None:
+        from .browser_test_runtime import delivered_acceptance
+        task.refresh_from_db()
+        delivered = delivered_acceptance(task)
+        if delivered:
+            persisted = session.runtime.accept(delivered)
+            from .runtime_progress import progress_event
+            events.append(progress_event(task.pk))
+            events.append({"type": "task_completed", "task_id": session.task_id, "status": "completed",
+                           "acceptance": delivered, "event_id": persisted.get("event_id")})
+            return delivered, events
     if commission is None:
         return {"ok": False, "reasons": ["no_commission"]}, events
 

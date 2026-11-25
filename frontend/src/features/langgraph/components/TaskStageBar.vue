@@ -72,7 +72,7 @@ const budgetLabel = computed(() => {
 
 const statusClass = computed(() => {
   const s = props.taskStatus || '';
-  if (s === 'completed' || s === 'task_completed') return 'is-ok';
+  if (s === 'completed' || s === 'task_completed') return props.acceptance?.test_result === 'failed' ? 'is-blocked' : 'is-ok';
   if (s === 'blocked' || s === 'task_blocked') return 'is-blocked';
   if (s === 'cancelling' || s === 'cancelled') return 'is-cancel';
   return 'is-running';
@@ -80,7 +80,7 @@ const statusClass = computed(() => {
 
 const statusLabel = computed(() => {
   const s = props.taskStatus || '';
-  if (s === 'completed' || s === 'task_completed') return '已验收';
+  if (s === 'completed' || s === 'task_completed') return props.acceptance?.test_result === 'failed' ? '已交付 · 用例未通过' : '已完成';
   if (s === 'blocked' || s === 'task_blocked') return '未完全完成';
   if (s === 'cancelling') return '取消中';
   if (s === 'cancelled') return '已取消';

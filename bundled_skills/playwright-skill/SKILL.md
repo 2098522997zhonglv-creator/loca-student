@@ -53,13 +53,22 @@ await page.click('button[type="submit"]');
 
 ## 使用方法
 
-通过 `execute_skill_script` 工具调用，传入 inline 代码：
+优先通过 `execute_skill_script(skill_name="playwright-skill", script="原始 JavaScript", session_id="本任务会话")` 调用。`script` 支持真实换行、引号和正则，不需要 shell 转义；不要同时传 `command`。已确认的页面结构和同一隔离游客会话在本任务内复用。
+
+兼容旧调用时可传 `command`：
 
 ```
 node run.js "your playwright code here"
 ```
 
-**重要**：代码必须写在一行，语句用分号分隔。run.js 会自动包装 async IIFE 和 require 语句。**禁止添加 --session、--inline、--eval 等参数，run.js 不支持这些参数。**
+`command` 经 shell 传输时需要正确转义；优先使用 `script` 避免 Windows 引号问题。不要添加 --session、--inline、--eval 参数。
+
+## 参数化测试的推进与收敛
+
+- 首次读取页面结构后，用稳定定位器连续完成同类参数行；可在一次 `script` 内用循环、逐行 try/catch 和 finally 截图，减少模型往返。保留每行参数、预览、响应与证据。
+- 用 `page.waitForResponse` 观察实际点击触发的请求。HTTP 400 / FAILED_PRECONDITION 等明确业务拒绝记为该行失败，继续剩余参数行；不要对同一错误反复诊断或自行切换对照商品。超时或状态未知先回读，避免重放可能已成功的写入。
+- 所有行结束后回读本会话购物车，核验商品、颜色、文本、数量、金额及真实标识。失败行没有生成标识时如实写明。交付中文逐项报告与截图；工具正常退出不等于用例通过。
+- 使用 Runtime 已提供的 `browser/context/page`，无需重复启动浏览器。保持会话到核验结束；仅当任务明确要求重建会话时替换。
 
 ## 截图路径约定
 

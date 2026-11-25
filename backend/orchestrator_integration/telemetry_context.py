@@ -26,6 +26,8 @@ class TelemetryContext:
     current_stage: str = ""
     # task-orchestrator 挂载结果（三层选择）；旧路径为 None
     orchestrator_mount: Any = None
+    active_tool_call_id: str = ""
+    budget_precharged: bool = False
 
 
 _CTX: ContextVar[Optional[TelemetryContext]] = ContextVar(

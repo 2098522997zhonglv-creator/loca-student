@@ -118,6 +118,55 @@ def _try_parse_json_blob(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def json_documents(text: str) -> List[Dict[str, Any]]:
+    """Decode successive JSON values in labelled stdout, without greedy braces."""
+    decoder = json.JSONDecoder()
+    raw, offset, documents = text or "", 0, []
+    while offset < len(raw) and len(documents) < 80:
+        match = re.search(r"[\[{]", raw[offset:])
+        if not match:
+            break
+        start = offset + match.start()
+        try:
+            value, consumed = decoder.raw_decode(raw[start:])
+        except ValueError:
+            offset = start + 1
+            continue
+        if isinstance(value, dict):
+            documents.append(value)
+        elif isinstance(value, list):
+            documents.extend(x for x in value[:40] if isinstance(x, dict))
+        offset = start + consumed
+    return documents
+
+
+def canonical_tool_result(value: Any) -> Optional[Dict[str, Any]]:
+    """Preserve an existing envelope, including legacy trailing runtime notices."""
+    notices = ""
+    if isinstance(value, str):
+        raw = value.lstrip()
+        if not raw.startswith("{"):
+            return None
+        try:
+            value, end = json.JSONDecoder().raw_decode(raw)
+        except ValueError:
+            return None
+        notices = raw[end:].strip()
+        if notices and not notices.startswith(("[核对/重试]", "[stage_advanced]", "[execution_ref]", "[cross_tool_id]")):
+            return None
+    if not isinstance(value, dict) or not isinstance(value.get("data"), dict):
+        return None
+    if not value.get("operation_id") or value.get("status") not in {
+        "succeeded", "failed", "unknown", "needs_confirmation", "skipped", "cancelled"
+    }:
+        return None
+    result = dict(value)
+    result["data"] = dict(value["data"])
+    if notices:
+        result["data"]["runtime_notices"] = list(result["data"].get("runtime_notices") or []) + [notices]
+    return result
+
+
 _PLACEHOLDER_ID_VALUES = frozenset(
     {
         "unknown",
@@ -244,7 +293,9 @@ def classify_skill_output(
     raw = (text or "").strip()
     op_id = new_operation_id()
     observed = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-    parsed = _try_parse_json_blob(raw)
+    reference_text = skill_name in {"read_skill_content", "knowledge_search"} and not raw.startswith(("{", "错误:", "错误：", "Error", "Traceback", "TimeoutError"))
+    documents = [] if reference_text else json_documents(raw)
+    parsed = None if reference_text else (_try_parse_json_blob(raw) or (documents[-1] if documents else None))
 
     # needs_confirmation JSON
     if parsed and (
@@ -299,6 +350,14 @@ def classify_skill_output(
                 structured_data.setdefault(k, v)
     if ids:
         structured_data["identifiers"] = ids
+    business_documents = [d for d in documents if _structured_business_status(d) is not None]
+    if business_documents:
+        structured_data["business_observations"] = business_documents
+    browser_observations = [d["browser_observation"] for d in documents if isinstance(d.get("browser_observation"), dict)]
+    if browser_observations:
+        structured_data["browser_observation"] = browser_observations[-1]
+        business_documents.extend(r for r in browser_observations[-1].get("responses", []) if isinstance(r, dict) and r.get("success") is not None)
+    structured_data["execution_status"] = "failed" if code not in (None, 0) else "succeeded"
 
     def _with_meta(tr: ToolResult) -> ToolResult:
         if primary_type:
@@ -328,7 +387,12 @@ def classify_skill_output(
         )
 
     # R01：先尊重结构化业务字段，再走文本启发式
-    structured_status = _structured_business_status(parsed) if parsed else None
+    statuses = [_structured_business_status(d) for d in business_documents]
+    structured_status = "failed" if "failed" in statuses else (_structured_business_status(parsed) if parsed else None)
+    if structured_status:
+        structured_data["business_status"] = structured_status
+    if structured_status == "failed":
+        parsed = next((d for d in reversed(business_documents) if _structured_business_status(d) == "failed"), parsed)
     if structured_status == "failed":
         err_msg = ""
         if parsed:
@@ -371,9 +435,6 @@ def classify_skill_output(
         )
 
     # Skill 说明/知识库原文中的 timeout 示例不能作为本次调用超时的证据。
-    reference_text = skill_name in {"read_skill_content", "knowledge_search"} and not re.match(
-        r"^(错误[:：]|Error[:：]|Traceback|TimeoutError)", raw, re.I
-    )
     if not reference_text and _TIMEOUT_RE.search(raw) and (
         "错误" in raw or "Timeout" in raw or "timeout" in raw.lower()
     ):
@@ -472,17 +533,9 @@ def adapt_mcp_tool_result(
                     texts.append(str(item))
         raw = "\n".join(texts) if texts else json.dumps(raw, ensure_ascii=False)
 
-    # 内置 Skill 已返回序列化的 ToolResult。MCP/SSE 再适配时保持幂等，
-    # 避免每经过一层都把整份 JSON 塞进 raw_text 并生成新的 operation_id。
-    if isinstance(raw, str):
-        try:
-            decoded = json.loads(raw)
-        except (ValueError, TypeError):
-            decoded = None
-        if isinstance(decoded, dict) and decoded.get("status") in {
-            "succeeded", "failed", "unknown", "needs_confirmation", "skipped", "cancelled"
-        } and isinstance(decoded.get("data"), dict):
-            raw = decoded
+    canonical = canonical_tool_result(raw)
+    if canonical is not None:
+        raw = canonical
 
     if isinstance(raw, dict) and raw.get("status") in {
         "succeeded",

@@ -20,6 +20,7 @@ const path = require('path');
 const readline = require('readline');
 const Module = require('module');
 const { execSync } = require('child_process');
+const { startObservation } = require('./browser_observation');
 
 function send(msg) {
   process.stdout.write(JSON.stringify(msg) + '\n');
@@ -313,6 +314,7 @@ async function main() {
 
   async function runUserCode(code) {
     const captured = createCapturedConsole();
+    const finishObservation = await startObservation(state.context, state.page);
     const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
     const safeProcess = Object.assign({}, process, {
@@ -325,7 +327,8 @@ async function main() {
     serverLog('[runUserCode] Code length:', code.length);
     serverLog('[runUserCode] Code preview:', code.slice(0, 200));
 
-    const fn = new AsyncFunction(
+    try {
+      const fn = new AsyncFunction(
       'console',
       'state',
       'helpers',
@@ -345,7 +348,6 @@ state.page = page;
 `
     );
 
-    try {
       await fn(
         captured.console,
         state,
@@ -363,6 +365,8 @@ state.page = page;
       const msg = e?.stack || e?.message || String(e);
       captured.stderr.push(msg);
       return { ok: false, stdout: captured.stdout, stderr: captured.stderr, error: msg };
+    } finally {
+      captured.stdout.push(JSON.stringify({ browser_observation: await finishObservation(state.page) }));
     }
   }
 

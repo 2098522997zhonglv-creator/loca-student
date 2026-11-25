@@ -100,11 +100,11 @@ export function toolEventKey(parsed: Record<string, unknown>): string {
     parsed.attempt_id ?? parsed.attemptId ?? parsed.attempt ?? parsed.retry_of;
   const tool = String(parsed.tool_name || parsed.toolName || '');
   const step = String(parsed.step ?? parsed.step_id ?? '');
-  if (typeof opId === 'string' && opId.trim()) {
-    return `op:${opId.trim()}|${tool}|${step}|a:${String(attempt ?? '1')}`;
-  }
   if (typeof toolCallId === 'string' && toolCallId.trim()) {
     return `tc:${toolCallId.trim()}|${tool}|a:${String(attempt ?? '1')}`;
+  }
+  if (typeof opId === 'string' && opId.trim()) {
+    return `op:${opId.trim()}|${tool}|${step}|a:${String(attempt ?? '1')}`;
   }
   const eid = parsed.event_id ?? parsed.eventId;
   if (typeof eid === 'string' && eid.trim()) {
@@ -256,54 +256,91 @@ function normalizeStep(value: unknown): number | undefined {
   return undefined;
 }
 
-/** 历史里连续 tool 消息合并为一张执行记录。 */
+/** Initial execution and approval resume consume the same persisted projection. */
+export function projectRuntimeProgress(stream: Record<string, any>, event: Record<string, any>): void {
+  if (event.type === 'final_answer') {
+    stream.content = String(event.content || '');
+    return;
+  }
+  if (!['task_started', 'task_status', 'task_completed', 'task_blocked', 'task_cancelling', 'step_result', 'stage_changed'].includes(event.type)) return;
+  const payload = event.payload || {};
+  const current = String(stream.taskStatus || '');
+  const status = String(event.status || '');
+  const terminal = ['completed', 'cancelled', 'failed'];
+  if (terminal.includes(current) && status && current !== status) return;
+  if (status) stream.taskStatus = status;
+  stream.taskId = event.task_id || stream.taskId;
+  stream.currentStage = payload.stage || payload.current_stage || stream.currentStage;
+  if (Array.isArray(payload.stage_plan)) stream.stagePlan = payload.stage_plan;
+  const config = event.effective_config || payload.effective_config;
+  if (config) stream.effectiveConfig = { ...(stream.effectiveConfig || {}), ...config };
+  if (payload.completed_business_steps != null) {
+    stream.effectiveConfig = { ...(stream.effectiveConfig || {}), completed_business_steps: Number(payload.completed_business_steps) };
+  }
+  if (event.acceptance || payload.acceptance) stream.acceptance = event.acceptance || payload.acceptance;
+}
+
+/** Project one execution card per user turn, including stop/reload history. */
 export function mergeHistoryToolMessages<
   T extends {
-    messageType?: string;
-    content: string;
-    toolName?: string;
-    isExpanded?: boolean;
-    isExecutionLog?: boolean;
-    toolEntries?: ToolLogEntry[];
-    time: string;
+    messageType?: string; content: string; toolName?: string; isExpanded?: boolean;
+    isExecutionLog?: boolean; toolEntries?: ToolLogEntry[]; time: string;
+    toolCallId?: string; isProgress?: boolean; progressNotes?: string[];
   },
 >(messages: T[]): T[] {
   const out: T[] = [];
-  let buf: T[] = [];
-
+  let turn: T[] = [];
+  let turnNumber = 0;
   const flush = () => {
-    if (buf.length === 0) return;
-    if (buf.length === 1) {
-      out.push({ ...buf[0], isExpanded: false });
-      buf = [];
-      return;
-    }
-    const entries: ToolLogEntry[] = buf.map((m, i) => ({
-      key: `hist-${m.time}-${i}-${simpleHash(m.content.slice(0, 80))}`,
-      toolName: m.toolName || 'tool',
-      summary: m.content.replace(/\s+/g, ' ').trim().slice(0, 100),
-      detail: m.content,
-      time: m.time,
-    }));
-    const first = buf[0];
-    out.push({
-      ...first,
-      content: formatExecutionLogContent(entries),
-      toolName: '执行记录',
-      isExpanded: false,
-      isExecutionLog: true,
-      toolEntries: entries,
-    });
-    buf = [];
-  };
-
-  for (const m of messages) {
-    if (m.messageType === 'tool' && !m.isExecutionLog) {
-      buf.push(m);
-    } else {
-      flush();
+    if (!turn.length) return;
+    const lastTool = turn.reduce((last, m, i) => m.messageType === 'tool' ? i : last, -1);
+    if (lastTool < 0) { out.push(...turn.filter(m => m.messageType !== 'step_separator')); turn = []; return; }
+    const entries: ToolLogEntry[] = [];
+    const seen = new Set<string>();
+    const notes: string[] = [];
+    let log: T | undefined;
+    let progress: T | undefined;
+    for (const [index, m] of turn.entries()) {
+      if (m.messageType === 'step_separator') continue;
+      if (m.messageType === 'tool') {
+        notes.push(...(m.progressNotes || []));
+        if (!log) {
+          log = { ...m, content: '', toolName: '执行记录', isExecutionLog: true, isExpanded: false, toolEntries: entries };
+          out.push(log);
+        }
+        let payload: Record<string, any> = {};
+        try { payload = JSON.parse(m.content); } catch { /* historical plain text */ }
+        const key = m.toolCallId ? `call:${m.toolCallId}` : payload.operation_id
+          ? `op:${payload.operation_id}` : `hist:${turnNumber}:${index}`;
+        const incoming = m.isExecutionLog && m.toolEntries?.length ? m.toolEntries : [{
+          key, toolName: m.toolName || payload.evidence?.tool_name || payload.evidence?.skill_name || 'tool',
+          summary: String(payload.summary || m.content).replace(/\s+/g, ' ').trim().slice(0, 100),
+          detail: m.content, time: m.time,
+        }];
+        for (const entry of incoming) {
+          if (!seen.has(entry.key)) { seen.add(entry.key); entries.push(entry); }
+        }
+        continue;
+      }
+      if (index < lastTool && m.messageType === 'ai' && m.content.trim()) {
+        notes.push(m.content);
+        const text = looksLikeEnglishToolNarration(m.content) ? '正在执行任务，详情见执行记录。' : m.content;
+        if (progress) { progress.content = text; progress.time = m.time; }
+        else { progress = { ...m, messageType: 'system', content: text, isProgress: true }; out.push(progress); }
+        continue;
+      }
       out.push(m);
     }
+    if (log) {
+      log.content = formatExecutionLogContent(entries);
+      Object.assign(log, { progressNotes: [...new Set(notes)] });
+    }
+    turn = [];
+    turnNumber++;
+  };
+  for (const message of messages) {
+    if (message.messageType === 'human') flush();
+    turn.push(message);
   }
   flush();
   return out;

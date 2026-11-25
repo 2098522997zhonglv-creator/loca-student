@@ -1,3 +1,4 @@
+import { projectRuntimeProgress } from '../utils/streamUiHelpers';
 import { ref } from 'vue';
 import { request } from '@/utils/request';
 import { useAuthStore } from '@/store/authStore';
@@ -654,6 +655,10 @@ export async function sendChatMessageStream(
 
         try {
           const parsed = JSON.parse(jsonData);
+          if (streamSessionId && activeStreams.value[streamSessionId]) {
+            projectRuntimeProgress(activeStreams.value[streamSessionId], parsed);
+          }
+
 
           if (parsed.type === 'error') {
             handleError(new Error(parsed.message || '流式请求失败'), streamSessionId);
@@ -850,15 +855,7 @@ export async function sendChatMessageStream(
             activeStreams.value[streamSessionId].isWaitingForApproval = true;
           }
 
-          // 工具步进时本地递增 used_tool_actions（与服务端预算对齐的粗粒度回显）
-          if (
-            parsed.type === 'step_start' &&
-            streamSessionId &&
-            activeStreams.value[streamSessionId]?.effectiveConfig
-          ) {
-            const cfg = activeStreams.value[streamSessionId].effectiveConfig!;
-            cfg.used_tool_actions = Number(cfg.used_tool_actions || 0) + 1;
-          }
+          // Tool/action counts come only from persisted runtime snapshots.
 
           // FR10：任务阶段 / 验收终态 / 租约冲突状态
           if (
@@ -1877,6 +1874,10 @@ export async function resumeAgentLoop(
 
         try {
           const parsed = JSON.parse(jsonData);
+          if (sessionId && activeStreams.value[sessionId]) {
+            projectRuntimeProgress(activeStreams.value[sessionId], parsed);
+          }
+
 
           if (parsed.type === 'error') {
             handleError(new Error(parsed.message || '恢复执行失败'));
@@ -1911,7 +1912,7 @@ export async function resumeAgentLoop(
                 ? '任务被阻塞，无法继续'
                 : '任务状态已更新');
             upsertProgressMessage(stream, hint, formatStreamTime());
-            stream.taskStatus = String(parsed.status || stream.taskStatus || '');
+            applyBusinessTaskStatus(stream, String(parsed.status || stream.taskStatus || ''));
             stream.taskEvents = [...(stream.taskEvents || []), parsed];
           }
 

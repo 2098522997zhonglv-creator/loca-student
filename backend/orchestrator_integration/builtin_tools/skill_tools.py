@@ -362,7 +362,6 @@ def prefer_url_reader_instead(
         return None
 
     # playwright：明显只是打开 URL 读 HTML 报告 → 拦
-    looks_like_nav = bool(_BROWSER_NAV_HINT_RE.search(cmd))
     is_html_report = any(
         u.lower().endswith((".html", ".htm")) or "agent-test" in u.lower() for u in urls
     )
@@ -373,7 +372,9 @@ def prefer_url_reader_instead(
         )
     )
     # screenshot / waitForTimeout 不算「交互」——纯打开 HTML 报告仍应走 url-reader
-    if urls and (is_html_report or looks_like_nav) and not has_interaction:
+    # Navigation is a necessary first step of browser execution. A URL alone
+    # does not prove that the user's task is static document reading.
+    if urls and is_html_report and not has_interaction:
         return (
             "错误: 读取静态网页/HTML 报告请使用 url-reader，不要用 playwright 打开：\n"
             f'python scripts/read_url.py "{sample_url}"\n'
@@ -755,12 +756,26 @@ def _finalize_skill_result(
             from orchestrator_integration.tool_result import classify_skill_output
 
             tr = classify_skill_output(
-                text=compact if isinstance(compact, str) else str(compact),
+                text=result_output,
                 exit_code=exit_code,
                 duration_ms=duration_ms,
                 skill_name=skill_name,
                 command=command or "",
             )
+            tr.data["raw_text"] = compact
+            for screenshot in (tr.data.get("browser_observation") or {}).get("screenshots", []):
+                payload = _build_artifact_payload(screenshot)
+                if payload and not any(a.get("url") == payload.get("url") for a in artifacts):
+                    artifacts.append(payload)
+            if len(result_output) > 4000:
+                os.makedirs(artifacts_dir, exist_ok=True)
+                full_log = os.path.join(artifacts_dir, f"tool-{tr.operation_id}.txt")
+                with open(full_log, "w", encoding="utf-8") as stream:
+                    stream.write(result_output)
+                tr.output_ref = _path_to_media_url(full_log) or full_log
+                payload = _build_artifact_payload(full_log)
+                if payload:
+                    artifacts.append(payload)
             if artifacts:
                 tr.data = dict(tr.data or {})
                 tr.data["artifacts"] = artifacts
@@ -780,7 +795,7 @@ def _finalize_skill_result(
                         commission.last_tool_results = commission.last_tool_results[
                             -20:
                         ]
-                if ctx.runtime_task_id:
+                if ctx.runtime_task_id and not ctx.active_tool_call_id:
                     try:
                         from orchestrator_integration.agent_runtime import (
                             record_step_result,
@@ -919,34 +934,29 @@ def _finalize_skill_result(
                                     consume_budget(t, retries=1)
                             except Exception:
                                 pass
-                        return (
-                            tr.to_tool_text()
-                            + f"\n\n[核对/重试] {plan.get('hint')}"
-                            + (
-                                f"\n[reconcile_action]={plan.get('reconcile_action')}"
-                                if plan.get("reconcile_action")
-                                else ""
-                            )
-                        )
+                        tr.data["reconcile"] = plan
+                        tr.data["runtime_notices"] = [plan.get("hint") or ""]
                     except Exception:
                         pass
             except Exception:
                 pass
             out_text = tr.to_tool_text()
             note = getattr(tr, "_execution_note", None)
+            notices = []
             if note:
-                out_text = f"{out_text}\n\n[execution_ref] {note}"
+                notices.append(str(note))
             cross_err = getattr(tr, "_cross_tool_error", None)
             if cross_err:
-                out_text = f"{out_text}\n\n[cross_tool_id] {cross_err}"
+                notices.append(str(cross_err))
             adv = getattr(tr, "_stage_advanced", None)
             if isinstance(adv, dict) and adv.get("advanced"):
-                out_text = (
-                    f"{out_text}\n\n[stage_advanced] "
-                    f"{adv.get('from_stage')} → {adv.get('current_stage')}; "
-                    f"remount={','.join(adv.get('remount_skills') or []) or '(none)'}"
-                )
-            return out_text
+                notices.append(f"阶段：{adv.get('from_stage')} → {adv.get('current_stage')}")
+            reconcile = getattr(tr, "_reconcile_plan", None)
+            if reconcile:
+                tr.data["reconcile"] = reconcile
+            if notices:
+                tr.data["runtime_notices"] = notices
+            return tr.to_tool_text()
         except Exception as exc:
             logger.debug("ToolResult 适配失败，回退原文: %s", exc)
 
@@ -1219,6 +1229,8 @@ def get_skill_tools(
 
             ctx = get_telemetry_context()
             commission = ctx.commission
+            if ctx.budget_precharged:
+                return None
             # 先扣持久化任务预算（FLOW03），再扣内存立项计数
             task = _persist_task()
             if task is not None:
@@ -1389,6 +1401,7 @@ def get_skill_tools(
         skill_name: str,
         command: str,
         session_id: Optional[str] = None,
+        raw_script: bool = False,
     ) -> str:
         """内部函数：执行单条 Skill 命令"""
         from skills.models import Skill
@@ -1524,7 +1537,9 @@ def get_skill_tools(
             # 持久化 Playwright 会话路径
             # 仅当 session_id 存在 + skill_name == 'playwright-skill' + 命令是 run.js 调用时启用
             if session_id and skill_name == "playwright-skill":
-                run_js_args = extract_runjs_args(exec_command)
+                run_js_args = [command] if raw_script else extract_runjs_args(command)
+                if run_js_args is None and re.match(r"\s*(?:const |let |var |await |//|/\*|(?:async )?function |page\.|context\.|helpers\.)", command):
+                    run_js_args = [command]
                 if run_js_args is not None:
                     # 调试日志
                     logger.debug(f"[execute_skill_script] run_js_args: {run_js_args}")
@@ -1712,6 +1727,7 @@ def get_skill_tools(
         parallel: bool = False,
         max_workers: int = 5,
         user_confirmed: bool = False,
+        script: Optional[str] = None,
     ) -> str:
         """
         执行 Skill 脚本命令（单个或批量）。由模型按意图决定是否调用。
@@ -1721,7 +1737,7 @@ def get_skill_tools(
 
         ## 调用顺序（重要）
         1. 先 read_skill_content(skill_name)，再本工具；禁止把 skill 名当 tool 名调用。
-        2. 有依赖的多步必须按序：读文档 → 只读查询 →（问清用户）→ 写入；不要同一轮并行打乱顺序。
+        2. 有依赖的多步按序执行；用户已经授权的动作直接执行，仅在缺少必要信息或超出授权时询问。
         3. 多条互相独立的只读命令可用 commands + parallel=true；凡含写入或有先后依赖，必须 parallel=false（默认）。
         4. 批量写入优先用一条 commands 列表串行组合，而不是多次并行单条调用。
 
@@ -1744,6 +1760,7 @@ def get_skill_tools(
             parallel: 批量是否并发；默认 False（串行）。含写入时即使传 True 也会强制串行。
             max_workers: 批量并发上限（仅 parallel=true 时生效，默认 5）
             user_confirmed: 写入类命令是否已获用户明确同意；未同意不得为 true
+            script: playwright-skill 浏览器 JavaScript。优先使用此字段，无需拼 node run.js 或 shell 引号；与 command/commands 互斥。
 
         Returns:
             单个模式返回命令输出；如执行中生成了文件，会追加可下载附件信息。
@@ -1753,6 +1770,14 @@ def get_skill_tools(
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from django.db import close_old_connections
+
+        if script is not None:
+            if skill_name != "playwright-skill" or command or commands:
+                return json.dumps({"status": "failed", "error": "script 仅适用于 playwright-skill，不能同时传 command/commands"}, ensure_ascii=False)
+            command = script
+            if not session_id:
+                from orchestrator_integration.telemetry_context import get_telemetry_context
+                session_id = f"task-{get_telemetry_context().runtime_task_id or current_chat_session_id or current_user_id}"
 
         # 部分模型会把 commands 序列化成 JSON 字符串传入
         if isinstance(commands, str):
@@ -2465,32 +2490,20 @@ def get_skill_tools(
 
         with TelemetryTimer() as timer:
             try:
-                result = _execute_single_skill_script(skill_name, command, session_id)
-                ok = not (
-                    isinstance(result, str)
-                    and result.startswith("错误")
-                )
-                # 轻量通道：失败再试 1 次
-                from orchestrator_integration.task_commission import CHANNEL_LIGHT
-
-                if not ok and _channel() == CHANNEL_LIGHT:
-                    logger.info(
-                        "[execute_skill_script] 轻量通道失败，重试 1 次 skill=%s",
-                        skill_name,
-                    )
-                    result = _execute_single_skill_script(
-                        skill_name, command, session_id
-                    )
-                    ok = not (
-                        isinstance(result, str) and result.startswith("错误")
-                    )
+                result = _execute_single_skill_script(skill_name, command, session_id, raw_script=script is not None)
+                # The canonical result includes business rejection and uncertain
+                # writes. A local retry here bypasses reconciliation and would
+                # count one model call while executing the action twice.
+                from orchestrator_integration.tool_result import adapt_mcp_tool_result
+                typed_result = adapt_mcp_tool_result(result, tool_name="execute_skill_script")
+                ok = typed_result.status == "succeeded"
                 _record_result_snippet(str(result))
                 _emit_telemetry(
                     tool_name="execute_skill_script",
                     skill_name=skill_name,
                     success=ok,
                     duration_ms=timer.elapsed_ms,
-                    error_kind="" if ok else "execute_error",
+                    error_kind="" if ok else (typed_result.error_code or "execute_error"),
                     result_text=str(result)[:800],
                 )
                 return _maybe_force_run_nudge(str(result), command=command)

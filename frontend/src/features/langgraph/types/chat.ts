@@ -57,6 +57,9 @@ export interface ChatResponseData {
  */
 export interface ChatHistoryMessage {
   type: 'human' | 'ai' | 'tool' | 'system'; // 🆕 添加 system 类型
+  tool_name?: string;
+  tool_call_id?: string;
+  message_id?: string;
   content: string;
   timestamp: string; // 消息时间戳
   image?: string; // 🆕 图片Data URL(包含完整的data:image/xxx;base64,前缀)

@@ -17,7 +17,7 @@
     "dev": "vite",
     "build": "vite build",
     "typecheck": "vue-tsc -b",
-    "test:unit": "echo 'Unit tests: install vitest to run *.test.ts (excluded from vue-tsc)'",
+    "test:unit": "node --test tests/stream-ui.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

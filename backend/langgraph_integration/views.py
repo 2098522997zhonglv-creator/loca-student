@@ -2451,6 +2451,10 @@ class ChatHistoryAPIView(APIView):
                                         "type": msg_type,
                                         "content": content,
                                     }
+                                    message_data["message_id"] = str(getattr(msg, "id", "") or "")
+                                    if msg_type == "tool":
+                                        message_data["tool_call_id"] = str(getattr(msg, "tool_call_id", "") or "")
+                                        message_data["tool_name"] = str(getattr(msg, "name", "") or "")
                                     # 如果消息包含图片，添加图片数据
                                     if msg_type == "human":
                                         if image_data_list:

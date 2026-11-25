@@ -789,6 +789,7 @@ def _tool_result_sse_events(
     step_count: int,
     session_id: str,
     thread_id: str,
+    tool_call_id: str = "",
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     生成 tool_result SSE，若输出为 needs_confirmation 则追加写库确认 interrupt。
@@ -797,13 +798,14 @@ def _tool_result_sse_events(
     content, summary = process_mcp_tool_output(content, tool_name=tool_name or "")
     import hashlib
 
-    eid_src = f"{tool_name}|{step_count}|{summary}"
+    eid_src = tool_call_id or f"{tool_name}|{step_count}|{summary}"
     event_id = "tr-" + hashlib.sha1(eid_src.encode("utf-8")).hexdigest()[:16]
     events: List[Dict[str, Any]] = [
         {
             "type": "tool_result",
             "event_id": event_id,
             "tool_name": tool_name,
+            "tool_call_id": tool_call_id,
             "tool_output": content,
             "summary": summary,
             "step": step_count,
@@ -1124,8 +1126,13 @@ class AgentLoopStreamAPIView(View):
         cache_read_tokens: int = 0, user_id=None, project_id=None,
         *,
         duration_ms: int = 0,
+        usage_already_recorded: bool = False,
     ):
         """更新会话 Token 统计，并扣减 AgentTask 持久化预算（FR07.1/7.2）。"""
+        if usage_already_recorded:
+            from django.db.models import F
+            ChatSession.objects.filter(session_id=session_id).update(request_count=F("request_count") + 1)
+            return
         try:
             from django.db.models import F
             from django.utils import timezone
@@ -2751,6 +2758,10 @@ class AgentLoopStreamAPIView(View):
                     system_prompt=effective_prompt,
                 )
 
+                if agent_runtime and agent_runtime.task is not None:
+                    from orchestrator_integration.runtime_progress import RuntimeProgressMiddleware
+                    middleware.append(RuntimeProgressMiddleware(agent_runtime.task.pk))
+
                 agent = create_agent(
                     llm,
                     tools,
@@ -3011,6 +3022,8 @@ class AgentLoopStreamAPIView(View):
                                     ):
                                         messages = node_output.get("messages", [])
                                         for msg in messages:
+                                            if (getattr(msg, "additional_kwargs", None) or {}).get("runtime_report"):
+                                                yield create_sse_data({"type": "final_answer", "content": str(msg.content or "")})
                                             if (
                                                 hasattr(msg, "tool_calls")
                                                 and msg.tool_calls
@@ -3073,6 +3086,7 @@ class AgentLoopStreamAPIView(View):
                                                         step_count=step_count,
                                                         session_id=session_id,
                                                         thread_id=thread_id,
+                                                        tool_call_id=str(getattr(tool_msg, "tool_call_id", "") or ""),
                                                     )
                                                 )
                                                 if write_confirm:
@@ -3180,6 +3194,9 @@ class AgentLoopStreamAPIView(View):
                                                     if event.get("type") == "interrupt":
                                                         interrupt_detected = True
                                                     yield create_sse_data(event)
+                                                if agent_runtime and agent_runtime.task is not None:
+                                                    from orchestrator_integration.runtime_progress import progress_event
+                                                    yield create_sse_data(await sync_to_async(progress_event)(agent_runtime.task.pk))
                                         # 步骤完成
                                         if step_count > 0:
                                             yield create_sse_data(
@@ -3338,6 +3355,7 @@ class AgentLoopStreamAPIView(View):
                             cache_read_tokens=cache_read_tokens,
                             user_id=request.user.id,
                             project_id=int(project_id) if project_id else None,
+                            usage_already_recorded=bool(agent_runtime and agent_runtime.task),
                         )
                 except Exception as e:
                     logger.warning(
@@ -5044,6 +5062,10 @@ class AgentLoopResumeAPIView(View):
                 )
 
                 # 6. 创建 agent
+                if agent_runtime and agent_runtime.task is not None:
+                    from orchestrator_integration.runtime_progress import RuntimeProgressMiddleware
+                    middleware.append(RuntimeProgressMiddleware(agent_runtime.task.pk))
+
                 agent = create_agent(
                     llm,
                     tools,
@@ -5218,6 +5240,8 @@ class AgentLoopResumeAPIView(View):
                                     ):
                                         messages = node_output.get("messages", [])
                                         for msg in messages:
+                                            if (getattr(msg, "additional_kwargs", None) or {}).get("runtime_report"):
+                                                yield create_sse_data({"type": "final_answer", "content": str(msg.content or "")})
                                             if (
                                                 hasattr(msg, "tool_calls")
                                                 and msg.tool_calls
@@ -5274,12 +5298,16 @@ class AgentLoopResumeAPIView(View):
                                                         step_count=step_count,
                                                         session_id=session_id,
                                                         thread_id=thread_id,
+                                                        tool_call_id=str(getattr(tool_msg, "tool_call_id", "") or ""),
                                                     )
                                                 )
                                                 for event in events:
                                                     if event.get("type") == "interrupt":
                                                         interrupt_detected = True
                                                     yield create_sse_data(event)
+                                                if agent_runtime and agent_runtime.task is not None:
+                                                    from orchestrator_integration.runtime_progress import progress_event
+                                                    yield create_sse_data(await sync_to_async(progress_event)(agent_runtime.task.pk))
                                                 if write_confirm:
                                                     logger.info(
                                                         "AgentLoopResumeAPI: Write confirm interrupt emitted"
@@ -5441,6 +5469,7 @@ class AgentLoopResumeAPIView(View):
                             cache_read_tokens=cache_read_tokens,
                             user_id=user.id,
                             project_id=int(project_id) if project_id else None,
+                            usage_already_recorded=bool(agent_runtime and agent_runtime.task),
                         )
                         logger.info(
                             "AgentLoopResumeAPI: Token usage - input=%d, output=%d, cache_read=%d",

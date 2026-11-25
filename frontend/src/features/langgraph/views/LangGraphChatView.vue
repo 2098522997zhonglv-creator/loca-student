@@ -352,6 +352,7 @@ interface ChatMessage {
   isLoading?: boolean;
   messageType?: 'human' | 'ai' | 'tool' | 'system' | 'agent_step' | 'step_separator';  // ⭐ 新增 step_separator 类型
   toolName?: string;
+  toolCallId?: string;
   isExpanded?: boolean;
   isStreaming?: boolean;
   imageBase64?: string;
@@ -1077,7 +1078,9 @@ const enrichMessagesWithSeparators = (rawHistory: ChatHistoryMessage[], formatHi
       content: normalizeHistoryContent(historyItem),
       isUser: historyItem.type === 'human',
       time: formatHistoryTime(historyItem.timestamp),
-      messageType: historyItem.type
+      messageType: historyItem.type,
+      toolName: historyItem.tool_name,
+      toolCallId: historyItem.tool_call_id,
     };
 
     // 工具消息默认折叠
@@ -1161,6 +1164,7 @@ const loadChatHistory = async () => {
       
       // 🎨 合并连续的思考过程消息
       messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
+      await restoreTaskProgressFromSnapshot(sessionId.value);
       
       console.log('🔍 [Debug] messages.value最终数量:', messages.value.length);
       console.log('🔍 [Debug] 最终step_separator数量:', messages.value.filter(m => m.messageType === 'step_separator').length);
@@ -1489,6 +1493,7 @@ const handleStopGeneration = async () => {
           if (response.status === 'success' && response.data?.history) {
             const tempMessages = enrichMessagesWithSeparators(response.data.history, formatHistoryTime);
             messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
+      await restoreTaskProgressFromSnapshot(sessionId.value);
             console.log('[LangGraphChatView] History reloaded after stop:', messages.value.length, 'messages');
           }
         } catch (error) {
@@ -1720,6 +1725,7 @@ const switchSession = async (id: string) => {
       
       // 🎨 合并连续的思考过程消息
       messages.value = mergeHistoryToolMessages(mergeThinkingProcessMessages(tempMessages));
+      await restoreTaskProgressFromSnapshot(sessionId.value);
 
       // 更新会话信息（不更新时间，因为这是加载历史记录）
       updateSessionInList(id, undefined, false);

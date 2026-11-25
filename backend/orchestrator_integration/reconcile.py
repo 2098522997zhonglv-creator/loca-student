@@ -75,7 +75,7 @@ def build_reconcile_plan(
         skill_name=skill_name or "",
         attempt=attempt,
         channel=channel,
-        tool_retryable=False if uncertain else None,
+        tool_retryable=False if uncertain else (structured.get("retryable") if isinstance(structured, dict) else None),
         error_text=text or status,
     )
 
@@ -115,7 +115,7 @@ def build_reconcile_plan(
             else (
                 f"请先核对（{reconcile_action}）再决定。"
                 if decision.next_action == "reconcile" and reconcile_action
-                else "不可盲目重放。"
+                else "本次错误不可重试：保存该参数行的失败证据，继续其余参数行、适用清理和结果交付；不要扩大到对照商品或重复诊断同一错误。"
             )
         ),
         "retry": {
