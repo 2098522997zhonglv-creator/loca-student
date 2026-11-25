@@ -27,6 +27,18 @@ GOAL = (f"执行真实复杂测试验收：先查询知识库，再在 {TARGET} 
 
 
 class ProtocolAndContractTests(unittest.TestCase):
+    def test_fuzzy_color_or_wrong_quantity_does_not_complete_the_requested_row(self):
+        from .browser_test_runtime import observe, directive
+        for color, quantity in [("Sky Blue", 1), ("Blue", 2)]:
+            state = contract_for_goal(GOAL)
+            result = {"operation_id": "wrong-parameters", "data": {"browser_observation": {"responses": [
+                {"action": "cart", "method": "POST", "http_status": 400, "success": False, "retryable": False,
+                 "request_values": [color, "E2E_ALPHA"], "request_quantity": quantity}]}}}
+            observed = observe(state, tool_name="execute_skill_script", result=result)
+            self.assertNotIn("row-1", observed["rows"])
+            self.assertEqual(len(observed["invalid_attempts"]), 1)
+            self.assertIn("Blue 不能匹配 Sky Blue", directive(observed))
+
     def test_cart_delivery_adapter_keeps_order_and_multiple_product_tasks_on_their_full_plan(self):
         self.assertIsNone(contract_for_goal(GOAL.replace("不提交订单", "提交订单获取订单号")))
         self.assertIsNone(contract_for_goal(GOAL + "，另测 /another-pdp-20"))
@@ -133,7 +145,7 @@ class PersistedGraphTests(TransactionTestCase):
                 value = "E2E_ALPHA" if command == "alpha" else "E2E_BETA"
                 obs.update(input_values=[value], cart_writes_started=1, previews=[f"Preview: {value}"],
                     responses=[{"action": "cart", "method": "POST", "http_status": 400, "success": False,
-                        "retryable": False, "request_values": [value], "message": "fields not exists:[attr_icon]"}])
+                        "retryable": False, "request_values": [value, "Blue" if command == "alpha" else "Red"], "request_quantity": 1, "message": "fields not exists:[attr_icon]"}])
             if command == "cart":
                 obs["responses"] = [{"action": "cart", "method": "GET", "http_status": 200, "cart_count": 0, "items_amount": "0.00"}]
             return json.dumps({"status": "succeeded", "operation_id": "op-" + command, "data": {

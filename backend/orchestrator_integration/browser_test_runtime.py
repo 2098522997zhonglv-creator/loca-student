@@ -32,6 +32,11 @@ def contract_for_goal(goal: str):
         return None  # Product-discovery tasks keep their existing planning path.
     values = list(dict.fromkeys(re.findall(r"(?:文本|text)(?:\s*[:：=]\s*|\s+)[\"'“]?([\w.-]+)", goal, re.I)))
     rows = [{"key": f"row-{i+1}", "value": value} for i, value in enumerate(values)] or [{"key": "row-1", "value": ""}]
+    colors = {value: color.strip() for color, value in re.findall(
+        r"(?:颜色|color)\s*[:：=]?\s*([\w -]+?)\s*[、,，]\s*(?:文本|text)(?:\s*[:：=]\s*|\s+)[\"'“]?([\w.-]+)", goal, re.I)}
+    quantity = re.search(r"数量\s*(?:各)?\s*(\d+)", goal)
+    for row in rows:
+        row.update(color=colors.get(row["value"], ""), quantity=int(quantity.group(1)) if quantity else None)
     return {
         "target_url": target, "expected_rows": rows, "rows": {}, "sources": [],
         "knowledge_checked": False, "page_checked": False,
@@ -73,6 +78,14 @@ def observe(state: dict, *, tool_name: str, result: dict, command: str = "") -> 
         for row in state["expected_rows"]:
             if row["value"] and row["value"] not in inputs:
                 continue
+            if ((row.get("color") and row["color"] not in inputs)
+                    or (row.get("quantity") is not None and str(response.get("request_quantity")) != str(row["quantity"]))):
+                deviation = {**response, "row_key": row["key"], "operation_id": result["operation_id"], "expected": row}
+                attempts = list(state.get("invalid_attempts") or [])
+                if not any(x.get("operation_id") == deviation["operation_id"] and x.get("row_key") == row["key"] for x in attempts):
+                    attempts.append(deviation)
+                state["invalid_attempts"] = attempts
+                continue
             # Once this row has an explicit non-retryable outcome, later
             # diagnostic calls cannot erase it or silently declare success.
             previous = state["rows"].get(row["key"])
@@ -101,13 +114,15 @@ def delivery_ready(state: dict) -> bool:
     cart = state.get("cart_readback") or {}
     # A transport success cannot finish a positive cart test with an empty cart
     # or without an observed business identifier.
-    if passed and (cart.get("cart_count", 0) < len(passed) or not any(
+    if passed and (cart.get("cart_count", 0) != len(passed) or not any(
         (x.get("identifiers") or {}).get("cart_id") or (x.get("identifiers") or {}).get("cart_item_id")
         for x in passed + [cart]
     )):
         return False
     # A positive result needs row-level cart evidence as well as a count.
-    if passed and any(not any(row.get("value") in item.get("values", []) and str(item.get("quantity")) == "1"
+    if passed and any(not any(row.get("value") in item.get("values", [])
+                              and (not row.get("color") or row["color"] in item.get("values", []))
+                              and str(item.get("quantity")) == str(row.get("quantity") or 1)
                               for item in cart.get("cart_items", []))
                       for row in state.get("expected_rows", []) if row.get("value")):
         return False
@@ -122,10 +137,13 @@ def delivery_ready(state: dict) -> bool:
 
 def directive(state: dict) -> str:
     failures = [x for x in state.get("rows", {}).values() if x.get("result") == "failed" and not x.get("retryable")]
-    if not state.get("rows"):
+    deviations = state.get("invalid_attempts") or []
+    if not state.get("rows") and not deviations:
         return ""
-    pending = [r["value"] or r["key"] for r in state["expected_rows"] if r["key"] not in state["rows"]]
+    pending = [(f"颜色 {r['color']}，" if r.get("color") else "") + f"文本 {r['value'] or r['key']}" + (f"，数量 {r['quantity']}" if r.get("quantity") else "") for r in state["expected_rows"] if r["key"] not in state["rows"]]
     if pending:
+        if deviations:
+            return "实际请求参数与目标行不一致，尚未完成目标参数行。使用精确选项匹配（exact:true 或完整文本正则，Blue 不能匹配 Sky Blue），补做：" + "；".join(pending) + "。保留偏差记录，不重放已完成的正确参数行。"
         return ("该行已有不可重试的真实业务失败。" if failures else "已有参数行完成加购。") + "保留已有证据，直接执行剩余参数行：" + "、".join(pending) + "。不要重放已完成行、查询同一错误或切换对照商品。使用稳定定位器，将剩余行用循环/try-finally 连续完成。"
     if not state.get("cart_readback"):
         return "所有参数行已有结果。现在仅回读本会话购物车并截图，随后交付中文逐项结果。不要再次加购或继续诊断。"
@@ -196,6 +214,8 @@ def report(state: dict) -> str:
         identifiers.update(row.get("identifiers") or {})
     lines.append("真实标识：" + ("，".join(f"{k}={v}" for k, v in identifiers.items()) or "未生成 cart_id/cart_item_id；加购被拒绝，不能用示例标识补齐。"))
     lines.append("平台执行已收敛到结果交付；商城错误单独列为业务失败。未提交订单、未支付。")
+    if state.get("invalid_attempts"):
+        lines.append("参数纠正记录：" + "；".join("实际选项 " + "、".join(x.get("request_values") or []) + " 与目标不符，已另行执行目标参数行（operation_id=" + x["operation_id"] + "）" for x in state["invalid_attempts"]))
     if state.get("artifacts"):
         lines += ["", "截图与证据：" + " · ".join(f"[{a.get('name') or '截图'}]({a['url']})" for a in state["artifacts"])]
     return "\n".join(lines)
