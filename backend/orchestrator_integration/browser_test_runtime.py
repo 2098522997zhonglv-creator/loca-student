@@ -152,13 +152,16 @@ def completed_nodes(state: dict) -> list[str]:
 
 
 def report(state: dict) -> str:
+    def cell(value):
+        return re.sub(r"\s+", " ", str(value)).strip().replace("|", "\\|")
+
     failed = any(row.get("result") == "failed" for row in state["rows"].values())
     lines = ["真实测试已执行并完成核验。" + ("商城加购用例未通过。" if failed else "加购断言通过。"),
              "", f"目标商品：{state['target_url']}", "知识库来源：" + "；".join(state.get("sources") or ["本轮知识库检索，详见执行记录"]), "",
              "| 检查项 | 结果 | 真实证据 |", "|---|---|---|"]
     if state.get("requires_empty_check"):
         check = state.get("empty_check") or {}
-        lines.append("| 空文本必填拦截 | " + ("通过" if check.get("passed") else "未核实") + " | " + "；".join(check.get("errors") or []) + " |")
+        lines.append("| 空文本必填拦截 | " + ("通过" if check.get("passed") else "未核实") + " | " + cell("；".join(check.get("errors") or [])) + " |")
     for expected in state["expected_rows"]:
         row = state["rows"][expected["key"]]
         evidence = f"HTTP {row.get('http_status')}；{row.get('error_code') or ''}；{row.get('message') or ''}；operation_id={row['operation_id']}"
@@ -167,7 +170,7 @@ def report(state: dict) -> str:
         evidence += "；预览：" + ("、".join(row.get("preview") or []) or "本行未采集，不判通过")
         if row.get("request_product_id") is not None:
             evidence += f"；请求商品标识：{row['request_product_id']}"
-        lines.append(f"| {expected['value'] or expected['key']} | {'通过' if row['result'] == 'passed' else '失败'} | {evidence} |")
+        lines.append(f"| {cell(expected['value'] or expected['key'])} | {'通过' if row['result'] == 'passed' else '失败'} | {cell(evidence)} |")
     cart = state["cart_readback"]
     lines += [f"| 购物车回读 | 已核验 | HTTP {cart.get('http_status')}，商品行数 {cart.get('cart_count')}，商品金额 {cart.get('items_amount', '接口未提供')} |", ""]
     identifiers = dict(cart.get("identifiers") or {})

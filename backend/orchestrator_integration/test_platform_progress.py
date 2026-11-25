@@ -27,6 +27,15 @@ GOAL = (f"执行真实复杂测试验收：先查询知识库，再在 {TARGET} 
 
 
 class ProtocolAndContractTests(unittest.TestCase):
+    def test_report_keeps_multiline_preview_inside_its_parameter_row(self):
+        from .browser_test_runtime import report
+        state = contract_for_goal(GOAL)
+        state.update(empty_check={"passed": True}, cart_readback={"http_status": 200, "cart_count": 0})
+        state["rows"] = {r["key"]: {"result": "failed", "operation_id": "observed", "preview": ["Preview:\n" + r["value"] + "|suffix"]} for r in state["expected_rows"]}
+        output = report(state)
+        self.assertEqual(len([line for line in output.splitlines() if line.startswith('|')]), 6)
+        self.assertIn('预览：Preview: E2E_ALPHA\\|suffix', output)
+
     def test_browser_task_navigation_is_not_redirected_to_document_reader(self):
         from .builtin_tools.skill_tools import prefer_url_reader_instead
         self.assertIsNone(prefer_url_reader_instead("playwright-skill", "await page.goto('http://127.0.0.1/custom-golf-pdp-174')"))

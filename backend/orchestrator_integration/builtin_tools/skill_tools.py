@@ -1464,7 +1464,10 @@ def get_skill_tools(
             if current_test_case_id:
                 case_dir_key = str(current_test_case_id)
             elif session_id:
-                case_dir_key = session_id
+                # Browser processes already isolate by chat. Artifacts must
+                # use the same scope or a model-reused session name can
+                # overwrite another test run's screenshots and full logs.
+                case_dir_key = f"{session_id}_{current_chat_session_id}" if current_chat_session_id else session_id
 
             screenshots_dir = _prepare_skill_screenshots_dir(
                 project_id=current_project_id,

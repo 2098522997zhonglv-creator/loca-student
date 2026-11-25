@@ -1,4 +1,4 @@
-import { projectRuntimeProgress } from '../utils/streamUiHelpers';
+import { projectRuntimeProgress, clearedStreamSnapshot } from '../utils/streamUiHelpers';
 import { ref } from 'vue';
 import { request } from '@/utils/request';
 import { useAuthStore } from '@/store/authStore';
@@ -245,9 +245,10 @@ export const activeStreams = ref<Record<string, StreamState>>({});
 export const latestContextUsage = ref<Record<string, ContextUsageSnapshot>>({});
 
 export const clearStreamState = (sessionId: string) => {
-  if (activeStreams.value[sessionId]) {
-    delete activeStreams.value[sessionId];
-  }
+  const stream = activeStreams.value[sessionId];
+  const snapshot = stream && clearedStreamSnapshot(stream);
+  if (snapshot) activeStreams.value[sessionId] = snapshot as StreamState;
+  else delete activeStreams.value[sessionId];
   // 注意：不清除 latestContextUsage，保留最后的Token使用信息
 };
 // --- 全局流式状态管理结束 ---
@@ -965,7 +966,7 @@ export async function sendChatMessageStream(
               const st = String(parsed.status || stream.taskStatus || '');
               let label =
                 parsed.type === 'task_completed'
-                  ? '任务已验收完成'
+                  ? (stream.acceptance?.test_result === 'failed' ? '测试执行已交付，业务用例未通过' : '任务已验收完成')
                   : `任务未完全完成${reasons ? `：${reasons}` : ''}`;
               if (st === 'cancelled' || st === 'cancelling') {
                 label = st === 'cancelling' ? '任务取消中' : '任务已取消';

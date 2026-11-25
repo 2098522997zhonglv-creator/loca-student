@@ -11,7 +11,7 @@ else {
   const ts = createRequire(import.meta.url)('typescript');
   javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
 }
-const { mergeHistoryToolMessages, projectRuntimeProgress, absorbToolResultEvent, toolEventKey } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
+const { mergeHistoryToolMessages, projectRuntimeProgress, clearedStreamSnapshot, absorbToolResultEvent, toolEventKey } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
 const tool = (id, extra = {}) => ({ content: JSON.stringify({ status: 'succeeded', operation_id: `op-${id}`, data: {}, summary: '已观察' }), messageType: 'tool', toolName: 'execute_skill_script', toolCallId: id, time: '10:00', ...extra });
 
 test('one history card contains all 37 real calls across steps and narration', () => {
@@ -26,6 +26,8 @@ test('one history card contains all 37 real calls across steps and narration', (
   assert.equal(history.filter(x => x.isProgress).length, 1);
   assert.equal(history.at(-1).content, '已完成报告，商城加购失败。');
   assert.equal(mergeHistoryToolMessages(history).find(x => x.isExecutionLog).toolEntries.length, 37);
+  history.find(x => x.isExecutionLog).isExpanded = true;
+  assert.equal(mergeHistoryToolMessages(history).find(x => x.isExecutionLog).isExpanded, true);
 });
 
 test('distinct user turns retain their own execution records', () => {
@@ -71,4 +73,17 @@ test('canonical final reports replace once and cancelled state cannot revive', (
   const report = { type: 'final_answer', content: '真实测试报告' };
   projectRuntimeProgress(stream, report); projectRuntimeProgress(stream, report);
   assert.equal(stream.content, '真实测试报告');
+});
+
+test('solidifying a completed stream retains progress without replaying messages', () => {
+  const snapshot = clearedStreamSnapshot({ taskId: 't1', taskStatus: 'completed', content: '最终报告', messages: [tool('a')],
+    currentStage: 'verify_deliver', effectiveConfig: { used_tool_actions: 10, completed_business_steps: 4 },
+    acceptance: { test_result: 'failed' }, isWaitingForApproval: true });
+  assert.equal(snapshot.taskStatus, 'completed');
+  assert.equal(snapshot.effectiveConfig.used_tool_actions, 10);
+  assert.equal(snapshot.effectiveConfig.completed_business_steps, 4);
+  assert.equal(snapshot.acceptance.test_result, 'failed');
+  assert.equal(snapshot.snapshotIdle, true); assert.equal(snapshot.liveGeneration, false);
+  assert.equal(snapshot.content, ''); assert.deepEqual(snapshot.messages, []);
+  assert.equal(snapshot.isWaitingForApproval, undefined);
 });

@@ -257,6 +257,15 @@ function normalizeStep(value: unknown): number | undefined {
 }
 
 /** Initial execution and approval resume consume the same persisted projection. */
+export function clearedStreamSnapshot(stream: Record<string, any>): Record<string, any> | undefined {
+  if (!stream.taskId) return undefined;
+  const snapshot: Record<string, any> = { content: '', messages: [], isComplete: true, liveGeneration: false, snapshotIdle: true };
+  for (const key of ['taskId', 'taskStatus', 'currentStage', 'stagePlan', 'acceptance', 'effectiveConfig', 'taskEvents', 'responseLocale']) {
+    if (stream[key] !== undefined) snapshot[key] = stream[key];
+  }
+  return snapshot;
+}
+
 export function projectRuntimeProgress(stream: Record<string, any>, event: Record<string, any>): void {
   if (event.type === 'final_answer') {
     stream.content = String(event.content || '');
@@ -305,7 +314,7 @@ export function mergeHistoryToolMessages<
       if (m.messageType === 'tool') {
         notes.push(...(m.progressNotes || []));
         if (!log) {
-          log = { ...m, content: '', toolName: '执行记录', isExecutionLog: true, isExpanded: false, toolEntries: entries };
+          log = { ...m, content: '', toolName: '执行记录', isExecutionLog: true, isExpanded: Boolean(m.isExpanded), toolEntries: entries };
           out.push(log);
         }
         let payload: Record<string, any> = {};
