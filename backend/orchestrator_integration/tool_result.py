@@ -294,6 +294,14 @@ def classify_skill_output(
     op_id = new_operation_id()
     observed = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     reference_text = skill_name in {"read_skill_content", "knowledge_search"} and not raw.startswith(("{", "错误:", "错误：", "Error", "Traceback", "TimeoutError"))
+    if reference_text and exit_code in (None, 0):
+        # Retrieved procedures contain conditions such as “ID 不存在”, failure
+        # examples and historical IDs. They are reference data, never evidence
+        # that this search executed or rejected a business operation.
+        return ToolResult(status="succeeded", operation_id=op_id,
+            data={"raw_text": raw, "execution_status": "succeeded", "reference_content": True},
+            evidence={"skill_name": skill_name}, exit_code=exit_code, duration_ms=duration_ms,
+            summary=raw[:280] + ("…" if len(raw) > 280 else ""), observed_at=observed)
     documents = [] if reference_text else json_documents(raw)
     parsed = None if reference_text else (_try_parse_json_blob(raw) or (documents[-1] if documents else None))
 

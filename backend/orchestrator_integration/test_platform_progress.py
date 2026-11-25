@@ -27,6 +27,14 @@ GOAL = (f"执行真实复杂测试验收：先查询知识库，再在 {TARGET} 
 
 
 class ProtocolAndContractTests(unittest.TestCase):
+    def test_knowledge_conditions_and_example_ids_are_reference_not_business_outcomes(self):
+        text = '[结果1] (来源: 商品中心操作要点xmind)\n判断站点基础id，基础id不存在；进入新商品列表，需要手动采纳。\n示例 cart_id=12345；exit code: 1；超时；权限不足。'
+        for name in ["knowledge_search", "read_skill_content"]:
+            result = classify_skill_output(text=text, skill_name=name)
+            self.assertEqual(result.status, "succeeded")
+            self.assertFalse(result.resource_id)
+            self.assertNotIn("identifiers", result.data)
+
     def test_fuzzy_color_or_wrong_quantity_does_not_complete_the_requested_row(self):
         from .browser_test_runtime import observe, directive
         for color, quantity in [("Sky Blue", 1), ("Blue", 2)]:
