@@ -113,3 +113,21 @@ test('deferred-executor and exhausted-budget details do not create duplicate cha
     type: 'task_status', status: 'ambiguous',
   }), true);
 });
+
+test('resuming a blocked task clears its stale acceptance from the live progress card', () => {
+  const stream = {
+    taskStatus: 'blocked',
+    acceptance: {
+      ok: false,
+      reasons: ['工具调用预算已耗尽（220/220）'],
+      blockers: [{ blocker_code: 'execution_budget_exhausted_no_progress' }],
+    },
+  };
+  projectRuntimeProgress(stream, {
+    type: 'task_started', status: 'running',
+    effective_config: { max_tool_actions: 248, used_tool_actions: 221 },
+  });
+  assert.equal(stream.taskStatus, 'running');
+  assert.equal(stream.acceptance, undefined);
+  assert.equal(stream.effectiveConfig.max_tool_actions, 248);
+});

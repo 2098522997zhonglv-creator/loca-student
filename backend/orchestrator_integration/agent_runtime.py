@@ -175,8 +175,39 @@ def topup_budget_for_user_continuation(
     from orchestrator_integration.action_auth import expand_budget_only
     from orchestrator_integration.models import AgentTask
     from orchestrator_integration.task_execution_config import SERVER_HARD_CAPS
+    from orchestrator_integration.task_orchestrator.budget_presets import (
+        build_layer_budget_preset,
+        infer_plan_kind,
+        topup_add_for_plan_kind,
+    )
 
     budget = dict(task.budget or {})
+    task_scope = dict(getattr(task, "task_scope", None) or {})
+    auth_scope = dict(getattr(task, "auth_scope", None) or {})
+    stage_plan = list(getattr(task, "stage_plan", None) or [])
+    node_ids = [
+        str(stage.get("stage_id") or "")
+        for stage in stage_plan
+        if isinstance(stage, dict) and stage.get("stage_id")
+    ]
+    saved_preset = auth_scope.get("budget_preset")
+    if not isinstance(saved_preset, dict):
+        saved_preset = {}
+    persisted_kind = str(
+        auth_scope.get("plan_kind")
+        or saved_preset.get("plan_kind")
+        or ""
+    )
+    plan_kind = infer_plan_kind(
+        node_ids=node_ids,
+        playbook_id=persisted_kind or playbook_id,
+        message=str(task_scope.get("raw_goal") or getattr(task, "goal", "") or ""),
+    )
+    preset = build_layer_budget_preset(
+        plan_kind=plan_kind,
+        estimated_nodes=len(stage_plan),
+        message=str(task_scope.get("raw_goal") or getattr(task, "goal", "") or ""),
+    )
     used = int(
         budget.get("used_tool_actions") or budget.get("used_tool_steps") or 0
     )
@@ -191,21 +222,19 @@ def topup_budget_for_user_continuation(
         "remaining_before": remaining,
     }
 
-    if remaining <= 0:
-        pb = (playbook_id or "").strip()
-        if tool_add > 0:
-            add = int(tool_add)
-        elif pb == "browser_act" or "browser" in pb:
-            add = 28
-        elif pb in {"testcase_execute", "task_orchestrator"} or "execute" in pb:
-            from orchestrator_integration.task_orchestrator.budget_presets import (
-                PLAN_KIND_TESTCASE,
-                topup_add_for_plan_kind,
-            )
-
-            add = topup_add_for_plan_kind(PLAN_KIND_TESTCASE)
-        else:
-            add = 8
+    if tool_add > 0:
+        add = int(tool_add)
+    else:
+        add = topup_add_for_plan_kind(plan_kind)
+    if remaining <= add:
+        # Existing tasks may have been created under a smaller/incorrect profile.
+        # Rebase to the persisted goal's current profile before adding a new tranche.
+        planned_max = preset.total_tool_actions()
+        target_max = min(
+            max(max_a + add, planned_max),
+            int(SERVER_HARD_CAPS.get("max_tool_actions") or 1000),
+        )
+        add = max(1, target_max - max_a)
         expanded = expand_budget_only(
             task,
             add_tool_actions=add,
@@ -219,38 +248,46 @@ def topup_budget_for_user_continuation(
                 add,
                 expanded.get("max_tool_actions"),
             )
+        out["plan_kind"] = plan_kind
+        out["planned_tool_actions"] = planned_max
 
-    # token 预算同样可能在长浏览器轮打满，补充指令时一并抬额
+    # Migrate older tasks to the workload-sized resource profile on explicit resume.
     used_tok = int(budget.get("used_tokens") or 0)
     max_tok = int(budget.get("max_tokens") or 0)
+    hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 2_000_000)
+    token_target = max(max_tok, int(preset.max_tokens or 0))
     if max_tok > 0 and used_tok >= max_tok and token_add > 0:
-        hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 2_000_000)
-        new_tok = min(max_tok + int(token_add), hard_tok)
-        if new_tok > max_tok:
-            fresh = dict(task.budget or {})
-            fresh["max_tokens"] = new_tok
-            fresh["last_token_expand"] = {
-                "from": max_tok,
-                "to": new_tok,
-                "reason": "user_continuation_auto_topup",
-                "used_tokens_at_expand": used_tok,
-                "completed_business_steps_at_expand": int(
-                    budget.get("completed_business_steps") or 0
-                ),
-                "at": timezone.now().isoformat(),
-            }
-            AgentTask.objects.filter(pk=task.pk).update(
-                budget=fresh,
-                updated_at=timezone.now(),
-            )
-            task.budget = fresh
-            out["token_topup"] = {"ok": True, "max_tokens": new_tok}
-            logger.info(
-                "AgentTask user continuation token batch task=%s %s→%s",
-                getattr(task, "public_task_id", None) or task.pk,
-                max_tok,
-                new_tok,
-            )
+        token_target = max(token_target, max_tok + int(token_add))
+    token_target = min(token_target, hard_tok)
+
+    fresh = dict(task.budget or {})
+    changed = False
+    if token_target > max_tok:
+        fresh["max_tokens"] = token_target
+        fresh["last_token_expand"] = {
+            "from": max_tok,
+            "to": token_target,
+            "reason": "user_continuation_workload_rebase",
+            "used_tokens_at_expand": used_tok,
+            "plan_kind": plan_kind,
+            "at": timezone.now().isoformat(),
+        }
+        out["token_topup"] = {"ok": True, "max_tokens": token_target}
+        changed = True
+    for key, value in (
+        ("max_model_calls", preset.max_model_calls),
+        ("max_duration_seconds", preset.max_duration_seconds),
+        ("max_duration_ms", preset.max_duration_seconds * 1000),
+    ):
+        if int(fresh.get(key) or 0) < int(value or 0):
+            fresh[key] = int(value)
+            changed = True
+    if changed:
+        AgentTask.objects.filter(pk=task.pk).update(
+            budget=fresh,
+            updated_at=timezone.now(),
+        )
+        task.budget = fresh
     return out
 
 

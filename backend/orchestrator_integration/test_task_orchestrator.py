@@ -95,6 +95,26 @@ class BudgetPresetTests(unittest.TestCase):
         self.assertGreater(browser.total_tool_actions(), 80)
         self.assertGreater(browser.max_tokens, 120_000)
 
+    def test_regression_task_continuation_is_classified_from_original_goal(self):
+        from orchestrator_integration.intent_router import (
+            looks_like_testcase_execute_keywords,
+        )
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_TESTCASE,
+            infer_plan_kind,
+        )
+
+        goal = "执行常规品功能回归测试 451-486"
+        self.assertTrue(looks_like_testcase_execute_keywords(goal))
+        self.assertFalse(looks_like_testcase_execute_keywords("常规品功能回归测试有哪些标准？"))
+        self.assertEqual(
+            infer_plan_kind(
+                node_ids=["fetch_conditions", "check_executable", "verify_deliver"],
+                message=goal,
+            ),
+            PLAN_KIND_TESTCASE,
+        )
+
     def test_execute_plan_attaches_budget_and_commission(self):
         from orchestrator_integration.playbooks import PLAYBOOK_TESTCASE_EXECUTE, Playbook
         from orchestrator_integration.skill_zones import ZONE_EXECUTE, SkillZone

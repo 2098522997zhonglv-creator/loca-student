@@ -143,6 +143,11 @@ def infer_plan_kind(
         or "run_or_browser" in ids
         or any(k in text for k in ("执行用例", "执行测试", "跑用例", "testcase"))
         or (
+            "回归" in text
+            and any(cue in text for cue in ("测试", "功能", "用例", "常规品", "模块", "商品"))
+            and re.search(r"执行|开始|运行|跑|验证|复测|开展|帮我|请你", text)
+        )
+        or (
             ("执行" in text or "运行" in text or "跑" in text)
             and ("用例" in text or "模块" in text)
         )

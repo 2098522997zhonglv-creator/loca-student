@@ -2683,7 +2683,9 @@ class AuditFlowRegressionTests(TestCase):
             session=chat,
             user=user,
             project_id=None,
-            goal="所见即所得传图加购",
+            # Simulate an old task whose browser playbook/step cap was too small
+            # for the persisted regression goal.
+            goal="执行常规品功能回归测试 451-486",
             commission=c,
             lease_owner="w1",
         )

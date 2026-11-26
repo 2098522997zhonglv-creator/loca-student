@@ -305,6 +305,14 @@ export function projectRuntimeProgress(stream: Record<string, any>, event: Recor
   const status = String(event.status || '');
   const terminal = ['completed', 'cancelled', 'failed'];
   if (terminal.includes(current) && status && current !== status) return;
+  // A resumed task starts a new execution attempt. Do not keep the previous
+  // attempt's blocker/reason on the live progress card while fresh work runs.
+  if (
+    !event.acceptance
+    && (event.type === 'task_started' || (status === 'running' && current === 'blocked'))
+  ) {
+    stream.acceptance = undefined;
+  }
   if (status) stream.taskStatus = status;
   stream.taskId = event.task_id || stream.taskId;
   stream.currentStage = payload.stage || payload.current_stage || stream.currentStage;

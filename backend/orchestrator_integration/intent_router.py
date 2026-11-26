@@ -481,6 +481,14 @@ def looks_like_testcase_execute_keywords(message: str) -> bool:
         return False
     if _PLATFORM_RUN_RE.search(text):
         return True
+    # Regression requests often name the product/type and say "功能回归" without
+    # spelling out "执行用例". Route those through the testcase long-flow planner.
+    if (
+        "回归" in text
+        and any(cue in text for cue in ("测试", "功能", "用例", "常规品", "模块", "商品"))
+        and re.search(r"执行|开始|运行|跑|验证|复测|开展|帮我|请你", text)
+    ):
+        return True
     if _EXECUTE_APPROVAL_RE.search(text) and (
         "用例" in text or "自动化" in text or "套件" in text or "testcase" in text.lower()
     ):
