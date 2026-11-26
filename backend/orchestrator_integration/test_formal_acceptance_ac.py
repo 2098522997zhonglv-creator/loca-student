@@ -620,7 +620,9 @@ class FormalAcceptanceAC16to30Tests(TestCase):
         from orchestrator_integration.execution_policy import evaluate_delivery_evidence
 
         delivery = evaluate_delivery_evidence(
-            tool_results=["另一商品属性区为空，所见所得标题类似"],
+            tool_results=[
+                "status=succeeded cart_id=other123 source_url=https://a.callie.cc/p2"
+            ],
             target_url="https://a.callie.cc/p1",
         )
         self.assertFalse(delivery["ok"])

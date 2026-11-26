@@ -135,6 +135,30 @@ class Rc21ReadyStageTests(SimpleTestCase):
 
 
 class Rc22DeliveryTests(SimpleTestCase):
+    def test_historical_product_mentions_do_not_trigger_wrong_product_gate(self):
+        r = evaluate_delivery_evidence(
+            tool_results=[
+                "继续执行常规品回归测试。知识库里有其他商品/所见所得的历史说明，"
+                "当前阶段正在读取任务条件，尚未进入商品验证。"
+            ],
+            auth_scope={"allow_actions": ["browser"]},
+            target_url="https://example.test/",
+        )
+        codes = {b.get("blocker_code") for b in r.get("blockers") or []}
+        self.assertNotIn("wrong_product_evidence", codes)
+
+    def test_explicit_product_url_mismatch_still_blocks(self):
+        r = evaluate_delivery_evidence(
+            tool_results=[
+                "status=succeeded cart_id=abc999 source_url=https://example.test/product/other"
+            ],
+            auth_scope={"allow_actions": ["add_to_cart"]},
+            target_url="https://example.test/product/target",
+        )
+        self.assertFalse(r["ok"])
+        codes = {b.get("blocker_code") for b in r.get("blockers") or []}
+        self.assertIn("evidence_url_mismatch", codes)
+
     def test_input_only_claimed_complete_hard_fail(self):
         r = evaluate_delivery_evidence(
             tool_results=["已整理的输入：目标 URL=https://x 已完成加购"],

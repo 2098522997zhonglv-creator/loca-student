@@ -445,13 +445,9 @@ def evaluate_delivery_evidence(
             reasons.append("环境支持范围须核对目标商品实际配置，不能仅凭域名命名断言")
             blockers.append({"blocker_code": "env_inference_unverified", "step": "kb"})
 
-    # AC30 / R30：其他商品观察或证据 URL 与目标不一致均不得过关
-    if re.search(r"(另一|其他).{0,6}商品|所见所得", joined) and target_url:
-        if target_url.rstrip("/") not in joined.replace(target_url, "", 1):
-            if "同一商品" not in joined and "等价样本" not in joined:
-                ok = False
-                reasons.append("其他商品观察不能替代当前目标商品验证，禁止静默换商品")
-                blockers.append({"blocker_code": "wrong_product_evidence", "step": "verify"})
+    # AC30 / R30：只根据本轮结构化来源 URL / 商品标识判定证据错商品。
+    # 历史对话、知识库摘录和计划文本里经常会出现“所见所得/其他商品”等词，
+    # 不能仅凭这些词把当前任务拦成 wrong_product_evidence。
 
     if target_url:
         from orchestrator_integration.tool_result import extract_source_url
