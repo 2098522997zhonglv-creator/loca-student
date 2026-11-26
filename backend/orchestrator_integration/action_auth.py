@@ -222,7 +222,7 @@ def expand_budget_only(
     cur_max = int(
         budget.get("max_tool_actions") or budget.get("max_tool_steps") or 30
     )
-    hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 200)
+    hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 1000)
     new_max = min(cur_max + int(add_tool_actions), hard)
     if new_max <= cur_max:
         return {

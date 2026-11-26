@@ -49,6 +49,7 @@ class TaskCommission:
     max_light_retries: int = 1
     max_tokens: int = 0
     max_duration_ms: int = 0
+    max_model_calls: int = 0
     escape_used: int = 0
     tool_steps_used: int = 0
     granted_auxiliary: Set[str] = field(default_factory=set)
@@ -195,11 +196,25 @@ def commission_task(
             PLAYBOOK_TICKET_KB,
         }
     )
-    # 浏览器 / 用例执行路径工具步数远高于普通短路（实测+重试+二层备用）
+    # 长流程按任务类型与规模分配工具、Token、模型调用和时长预算。
+    token_cap_override = 0
+    duration_cap_override = 0
+    model_call_cap_override = 0
     if pb_id == PLAYBOOK_BROWSER_ACT:
-        step_cap_override = 28
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_BROWSER,
+            build_layer_budget_preset,
+        )
+
+        _bp = build_layer_budget_preset(
+            plan_kind=PLAN_KIND_BROWSER, message=message or ""
+        )
+        step_cap_override = _bp.total_tool_actions()
+        token_cap_override = _bp.max_tokens
+        duration_cap_override = _bp.max_duration_seconds * 1000
+        model_call_cap_override = _bp.max_model_calls
     elif pb_id == PLAYBOOK_TESTCASE_EXECUTE or zone.zone_id == ZONE_EXECUTE:
-        # 与 task_orchestrator budget_presets 基线对齐；编排开启时还会再抬到三层合计
+        # 即使 task orchestrator feature flag 关闭，也保留按用例数扩大的长流程预算。
         from orchestrator_integration.task_orchestrator.budget_presets import (
             PLAN_KIND_TESTCASE,
             build_layer_budget_preset,
@@ -209,6 +224,9 @@ def commission_task(
             plan_kind=PLAN_KIND_TESTCASE, message=message or ""
         )
         step_cap_override = _bp.total_tool_actions()
+        token_cap_override = _bp.max_tokens
+        duration_cap_override = _bp.max_duration_seconds * 1000
+        model_call_cap_override = _bp.max_model_calls
     else:
         step_cap_override = None
     # 工单沉淀入库 / 平台写入：短路提示仍开，但走重量通道 + 草稿写
@@ -239,6 +257,9 @@ def commission_task(
         draft_writes=draft,
         channel=channel,
         max_tool_steps=step_cap,
+        max_tokens=token_cap_override,
+        max_duration_ms=duration_cap_override,
+        max_model_calls=model_call_cap_override,
         post_condition=_post_condition(playbook, zone),
     )
 
@@ -255,6 +276,13 @@ def commission_hint(commission: TaskCommission) -> str:
         f"- 步数预算: {commission.tool_steps_used}/{commission.max_tool_steps}；"
         f"扩权最多 {commission.max_escape_hatches} 次；轻量失败重试≤{commission.max_light_retries}",
     ]
+    if commission.max_model_calls or commission.max_tokens or commission.max_duration_ms:
+        lines.append(
+            "- 长流程预算: "
+            f"模型调用≤{commission.max_model_calls or '默认'}；"
+            f"Token≤{commission.max_tokens or '默认'}；"
+            f"时长≤{commission.max_duration_ms // 1000 if commission.max_duration_ms else '默认'}秒"
+        )
     if commission.playbook_id == PLAYBOOK_TESTCASE_EXECUTE or commission.zone_id == ZONE_EXECUTE:
         lines.append(
             "- 用例执行路径已按三层步数预设抬高工具预算："

@@ -2897,9 +2897,19 @@ class AgentLoopStreamAPIView(View):
                     pass
 
                 # 13. 配置调用参数
+                from orchestrator_integration.task_execution_config import (
+                    graph_recursion_limit_for_budget,
+                )
+
+                _tool_budget = (runtime_task.budget or {}).get(
+                    "max_tool_actions",
+                    (runtime_task.budget or {}).get("max_tool_steps", 30),
+                ) if runtime_task is not None else 30
                 invoke_config = {
                     "configurable": {"thread_id": _invoke_thread_id},
-                    "recursion_limit": 1000,  # 支持约500次工具调用
+                    "recursion_limit": graph_recursion_limit_for_budget(
+                        _tool_budget
+                    ),
                 }
                 input_messages = {"messages": [user_msg]}
 
@@ -5250,9 +5260,19 @@ class AgentLoopResumeAPIView(View):
                             )
                     except Exception:
                         pass
+                from orchestrator_integration.task_execution_config import (
+                    graph_recursion_limit_for_budget,
+                )
+
+                _tool_budget = (runtime_task.budget or {}).get(
+                    "max_tool_actions",
+                    (runtime_task.budget or {}).get("max_tool_steps", 30),
+                ) if runtime_task is not None else 30
                 config = {
                     "configurable": {"thread_id": thread_id},
-                    "recursion_limit": 1000,
+                    "recursion_limit": graph_recursion_limit_for_budget(
+                        _tool_budget
+                    ),
                 }
 
                 # 6.1 恢复执行前，先修复历史消息（配对错误 + 风险工具输出）

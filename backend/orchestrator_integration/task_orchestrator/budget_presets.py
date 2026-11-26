@@ -43,7 +43,7 @@ class LayerBudgetPreset:
     max_model_calls: int = 30
 
     def total_tool_actions(self) -> int:
-        hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 200)
+        hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 1000)
         raw = self.max_tool_actions or (
             self.layer1_preset + self.layer2_reserve + self.layer3_reserve
         )
@@ -64,15 +64,15 @@ class LayerBudgetPreset:
             "max_tool_actions": self.total_tool_actions(),
             "max_tokens": min(
                 int(self.max_tokens),
-                int(SERVER_HARD_CAPS.get("max_tokens") or 500_000),
+                int(SERVER_HARD_CAPS.get("max_tokens") or 2_000_000),
             ),
             "max_duration_seconds": min(
                 int(self.max_duration_seconds),
-                int(SERVER_HARD_CAPS.get("max_duration_seconds") or 7200),
+                int(SERVER_HARD_CAPS.get("max_duration_seconds") or 14_400),
             ),
             "max_model_calls": min(
                 int(self.max_model_calls),
-                int(SERVER_HARD_CAPS.get("max_model_calls") or 80),
+                int(SERVER_HARD_CAPS.get("max_model_calls") or 400),
             ),
         }
 
@@ -86,16 +86,22 @@ _BASE_PRESETS: Dict[str, Dict[str, int]] = {
         "max_tokens": 120_000,
         "max_duration_seconds": 2400,
         "max_model_calls": 40,
+        "per_case_tokens": 20_000,
+        "per_case_model_calls": 4,
+        "per_case_duration_seconds": 60,
         "per_case_layer1": 12,
         "per_case_layer2": 8,
     },
     PLAN_KIND_BROWSER: {
-        "layer1_preset": 28,
-        "layer2_reserve": 16,
-        "layer3_reserve": 8,
-        "max_tokens": 80_000,
-        "max_duration_seconds": 1200,
-        "max_model_calls": 24,
+        "layer1_preset": 40,
+        "layer2_reserve": 24,
+        "layer3_reserve": 12,
+        "max_tokens": 120_000,
+        "max_duration_seconds": 1800,
+        "max_model_calls": 40,
+        "per_node_tokens": 30_000,
+        "per_node_model_calls": 8,
+        "per_node_duration_seconds": 300,
         "per_case_layer1": 0,
         "per_case_layer2": 0,
     },
@@ -202,10 +208,11 @@ def build_layer_budget_preset(
     l1 = int(base["layer1_preset"]) + extra * int(base.get("per_case_layer1") or 0)
     l2 = int(base["layer2_reserve"]) + extra * int(base.get("per_case_layer2") or 0)
     l3 = int(base["layer3_reserve"])
-    # 业务节点多时略增一层（每多 1 节点 +2，封顶 +20）
-    node_bonus = min(20, max(0, int(estimated_nodes) - 3) * 2)
+    # 多阶段浏览器流程需要按业务节点放大，不再只给几个额外调用。
+    node_extra = max(0, int(estimated_nodes) - 3)
+    node_bonus = min(160, node_extra * 12)
     l1 += node_bonus
-    hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 200)
+    hard = int(SERVER_HARD_CAPS.get("max_tool_actions") or 1000)
     total = min(l1 + l2 + l3, hard)
     # 若被硬上限裁切，按比例收缩但保留三层非零
     if l1 + l2 + l3 > hard:
@@ -213,6 +220,27 @@ def build_layer_budget_preset(
         l2 = max(8, min(l2, (hard - l3) // 3))
         l1 = max(8, hard - l2 - l3)
         total = l1 + l2 + l3
+    workload_extra = (
+        max(0, int(scale_cases) - 1)
+        if kind == PLAN_KIND_TESTCASE
+        else node_extra if kind == PLAN_KIND_BROWSER else 0
+    )
+    workload_unit = "case" if kind == PLAN_KIND_TESTCASE else "node"
+    max_tokens = min(
+        int(base["max_tokens"])
+        + workload_extra * int(base.get(f"per_{workload_unit}_tokens") or 0),
+        int(SERVER_HARD_CAPS.get("max_tokens") or 2_000_000),
+    )
+    max_model_calls = min(
+        int(base["max_model_calls"])
+        + workload_extra * int(base.get(f"per_{workload_unit}_model_calls") or 0),
+        int(SERVER_HARD_CAPS.get("max_model_calls") or 400),
+    )
+    max_duration_seconds = min(
+        int(base["max_duration_seconds"])
+        + workload_extra * int(base.get(f"per_{workload_unit}_duration_seconds") or 0),
+        int(SERVER_HARD_CAPS.get("max_duration_seconds") or 14_400),
+    )
     return LayerBudgetPreset(
         plan_kind=kind,
         layer1_preset=l1,
@@ -221,9 +249,9 @@ def build_layer_budget_preset(
         estimated_nodes=int(estimated_nodes or 0),
         case_count=int(n_cases or scale_cases if kind == PLAN_KIND_TESTCASE else n_cases),
         max_tool_actions=total,
-        max_tokens=int(base["max_tokens"]),
-        max_duration_seconds=int(base["max_duration_seconds"]),
-        max_model_calls=int(base["max_model_calls"]),
+        max_tokens=max_tokens,
+        max_duration_seconds=max_duration_seconds,
+        max_model_calls=max_model_calls,
     )
 
 

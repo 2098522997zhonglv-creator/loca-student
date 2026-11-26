@@ -2746,7 +2746,7 @@ class AuditFlowRegressionTests(TestCase):
             int(b3.get("max_tokens") or 0),
             int(topped_budget.get("max_tokens") or 0),
         )
-        self.assertLessEqual(next_max, 200)
+        self.assertLessEqual(next_max, 1000)
         self.assertEqual(
             (b3.get("last_budget_expand") or {}).get("reason"),
             "user_continuation_auto_topup",

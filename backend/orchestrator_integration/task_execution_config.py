@@ -13,11 +13,14 @@ SCHEMA_VERSION = 1
 
 # 服务端硬上限（不可被用户/模型抬高）
 SERVER_HARD_CAPS = {
-    "max_tool_actions": 200,
+    # Long testcase batches routinely need hundreds of UI/API calls. Keep a
+    # server-side ceiling, but do not truncate the planner's case-scaled budget
+    # at the old 200-action limit.
+    "max_tool_actions": 1000,
     "max_attempts_per_step": 10,
-    "max_model_calls": 80,
-    "max_tokens": 500_000,
-    "max_duration_seconds": 7200,
+    "max_model_calls": 400,
+    "max_tokens": 2_000_000,
+    "max_duration_seconds": 14_400,
     "max_no_progress_repeats": 10,
     "max_replans": 5,
 }
@@ -41,6 +44,17 @@ def _as_pos_int(value: Any, default: int, *, hard_cap: int) -> int:
     if n <= 0:
         n = default
     return min(n, hard_cap)
+
+
+def graph_recursion_limit_for_budget(max_tool_actions: Any) -> int:
+    """Keep LangGraph's internal step ceiling above the persisted tool budget."""
+    try:
+        tool_budget = max(1, int(max_tool_actions or 1))
+    except (TypeError, ValueError):
+        tool_budget = 1
+    # A tool action normally needs model + tool graph transitions; retries and
+    # routing add overhead. This is an internal ceiling, not extra tool quota.
+    return min(5000, max(1000, tool_budget * 3 + 100))
 
 
 def expected_business_steps_from_plan(stage_plan: Sequence[Any]) -> int:
@@ -92,6 +106,9 @@ def build_effective_config(
         tok = int(getattr(commission, "max_tokens", 0) or 0)
         if tok:
             tmpl["max_tokens"] = tok
+        model_calls = int(getattr(commission, "max_model_calls", 0) or 0)
+        if model_calls:
+            tmpl["max_model_calls"] = model_calls
         dur = int(getattr(commission, "max_duration_ms", 0) or 0)
         if dur:
             tmpl["max_duration_seconds"] = max(1, dur // 1000)

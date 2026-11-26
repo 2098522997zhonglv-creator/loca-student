@@ -5,6 +5,15 @@ from langgraph_integration.models import ChatSession
 
 
 class TaskConfigAndEventTests(TestCase):
+    def test_graph_recursion_ceiling_scales_with_long_tool_budget(self):
+        from orchestrator_integration.task_execution_config import (
+            graph_recursion_limit_for_budget,
+        )
+
+        self.assertEqual(graph_recursion_limit_for_budget(30), 1000)
+        self.assertEqual(graph_recursion_limit_for_budget(820), 2560)
+        self.assertEqual(graph_recursion_limit_for_budget(5000), 5000)
+
     def test_single_chat_turn_has_no_fake_business_checkpoint(self):
         from orchestrator_integration.task_execution_config import build_effective_config
 
@@ -37,7 +46,7 @@ class TaskConfigAndEventTests(TestCase):
         self.assertFalse(bad["ok"])
         capped = validate_config_overrides({"max_tool_actions": 9999})
         self.assertTrue(capped["ok"])
-        self.assertEqual(capped["overrides"]["max_tool_actions"], 200)
+        self.assertEqual(capped["overrides"]["max_tool_actions"], 1000)
 
     def test_append_event_includes_time_fields(self):
         from orchestrator_integration.agent_runtime import (

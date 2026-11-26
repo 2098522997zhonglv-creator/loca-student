@@ -224,7 +224,7 @@ def topup_budget_for_user_continuation(
     used_tok = int(budget.get("used_tokens") or 0)
     max_tok = int(budget.get("max_tokens") or 0)
     if max_tok > 0 and used_tok >= max_tok and token_add > 0:
-        hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 500_000)
+        hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 2_000_000)
         new_tok = min(max_tok + int(token_add), hard_tok)
         if new_tok > max_tok:
             fresh = dict(task.budget or {})

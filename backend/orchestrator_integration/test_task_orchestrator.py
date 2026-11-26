@@ -66,6 +66,35 @@ class BudgetPresetTests(unittest.TestCase):
         self.assertEqual(layers["2_fallback"], bp.layer2_reserve)
         self.assertEqual(layers["3_pending_auth"], bp.layer3_reserve)
 
+    def test_long_testcase_budget_scales_past_old_global_cap(self):
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_TESTCASE,
+            build_layer_budget_preset,
+        )
+
+        bp = build_layer_budget_preset(
+            plan_kind=PLAN_KIND_TESTCASE,
+            message="执行测试用例 451-486",
+            estimated_nodes=5,
+        )
+        self.assertEqual(bp.case_count, 36)
+        self.assertGreater(bp.total_tool_actions(), 200)
+        self.assertGreater(bp.max_model_calls, 80)
+        self.assertGreater(bp.max_tokens, 500_000)
+        self.assertLessEqual(bp.total_tool_actions(), 1000)
+        self.assertLessEqual(bp.max_model_calls, 400)
+        self.assertLessEqual(bp.max_tokens, 2_000_000)
+
+        from orchestrator_integration.task_orchestrator.budget_presets import (
+            PLAN_KIND_BROWSER,
+        )
+
+        browser = build_layer_budget_preset(
+            plan_kind=PLAN_KIND_BROWSER, estimated_nodes=8
+        )
+        self.assertGreater(browser.total_tool_actions(), 80)
+        self.assertGreater(browser.max_tokens, 120_000)
+
     def test_execute_plan_attaches_budget_and_commission(self):
         from orchestrator_integration.playbooks import PLAYBOOK_TESTCASE_EXECUTE, Playbook
         from orchestrator_integration.skill_zones import ZONE_EXECUTE, SkillZone
@@ -101,6 +130,8 @@ class BudgetPresetTests(unittest.TestCase):
         )
         c = commission_task(message=text2, zone=z, playbook=pb, decision=_dec())
         self.assertGreaterEqual(c.max_tool_steps, 48)
+        self.assertGreater(c.max_tokens, 0)
+        self.assertGreater(c.max_model_calls, 0)
 
 
 class TaskOrchestratorFlagTests(unittest.TestCase):
