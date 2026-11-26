@@ -12,6 +12,7 @@ from orchestrator_integration.stage_plan import StageSpec, advance_stage, ready_
 from orchestrator_integration.task_commission import TaskCommission
 from orchestrator_integration.turn_context import (
     TURN_AMBIGUOUS,
+    TURN_CONTINUE,
     TURN_CORRECT,
     classify_turn_relation,
     extract_goal_correction,
@@ -223,3 +224,56 @@ class Rc20DbTests(TestCase):
         self.assertEqual(t2.facts.get("evidence_epoch"), 1)
         self.assertIn("old123", t2.facts.get("stale_typed_ids") or [])
         self.assertNotIn("cart_id", t2.facts)
+
+    def test_resume_counts_only_executable_open_tasks(self):
+        from orchestrator_integration.models import AgentTask
+
+        zombie = create_or_resume_task(
+            session=self.chat,
+            user=self.user,
+            project_id=None,
+            goal="查询知识库规则",
+            commission=_commission("kb-shell"),
+            auth_scope={},
+            stage_plan=[{"stage_id": "fetch_conditions"}],
+            lease_owner="kb-worker",
+            turn_relation="new_question",
+        )
+        AgentTask.objects.filter(pk=zombie.pk).update(
+            status="blocked", lease_owner=""
+        )
+        executable = create_or_resume_task(
+            session=self.chat,
+            user=self.user,
+            project_id=None,
+            goal="执行加购回归",
+            commission=_commission("browser-task"),
+            auth_scope={"allow_actions": ["add_to_cart"]},
+            stage_plan=[
+                {"stage_id": "fetch_conditions"},
+                {"stage_id": "check_executable"},
+                {"stage_id": "add_to_cart"},
+                {"stage_id": "verify_deliver"},
+            ],
+            lease_owner="browser-worker",
+            turn_relation="new_question",
+        )
+        AgentTask.objects.filter(pk=executable.pk).update(
+            status="blocked", current_stage="fetch_conditions", lease_owner=""
+        )
+
+        resumed = create_or_resume_task(
+            session=self.chat,
+            user=self.user,
+            project_id=None,
+            goal="继续执行回归全部内容",
+            commission=_commission("continuation"),
+            auth_scope={},
+            stage_plan=[],
+            lease_owner="resume-worker",
+            turn_relation=TURN_CONTINUE,
+        )
+
+        self.assertEqual(resumed.pk, executable.pk)
+        self.assertFalse((resumed.task_scope or {}).get("ambiguous_resume"))
+        self.assertEqual(resumed.status, "running")

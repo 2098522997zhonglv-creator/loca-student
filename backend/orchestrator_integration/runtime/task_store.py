@@ -41,16 +41,28 @@ class TaskStore:
     def resolve_existing(
         self, session, *, resume_task_id: str = ""
     ) -> Tuple[Any, Optional[Any], int]:
-        """返回 (existing_open_or_none, terminal_if_resume_hit, open_count)。"""
+        """返回 (existing_open_or_none, terminal_if_resume_hit, executable_open_count)。"""
         from orchestrator_integration.models import AgentTask
+        from orchestrator_integration.turn_context import (
+            _task_to_prior,
+            executable_open_tasks,
+        )
 
         open_qs = self.open_queryset(session)
-        open_count = open_qs.count()
+        rows = list(open_qs.order_by("-updated_at"))
+        executable = executable_open_tasks(
+            [_task_to_prior(row) for row in rows]
+        )
+        executable_ids = {item.task_pk for item in executable}
+        open_count = len(executable_ids)
         existing = None
         terminal = None
         if resume_task_id:
             existing = (
-                open_qs.filter(public_task_id=resume_task_id).first()
+                next(
+                    (row for row in rows if str(row.public_task_id) == str(resume_task_id)),
+                    None,
+                )
                 or AgentTask.objects.filter(
                     pk=resume_task_id, status__in=OPEN_STATUSES
                 ).first()
@@ -63,7 +75,12 @@ class TaskStore:
                 if terminal is not None and str(terminal.status) not in TERMINAL_STATUSES:
                     terminal = None
         else:
-            existing = open_qs.order_by("-updated_at").first()
+            # Prefer the most recent actionable task. A newer KB-only shell
+            # must not mask the single resumable browser/test task.
+            existing = next(
+                (row for row in rows if int(row.pk) in executable_ids),
+                rows[0] if rows else None,
+            )
         return existing, terminal, open_count
 
     def mark_ambiguous(self, task, *, open_count: int) -> Any:
