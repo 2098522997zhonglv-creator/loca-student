@@ -17,6 +17,7 @@ import {
   buildProgressText,
   looksLikeEnglishToolNarration,
   upsertProgressMessage,
+  shouldAppendTaskTerminalMessage,
   type ToolLogEntry,
 } from '@/features/langgraph/utils/streamUiHelpers';
 
@@ -977,12 +978,14 @@ export async function sendChatMessageStream(
                   String(parsed.message || '') ||
                   '当前会话有多个未完成任务，请指定要继续哪一个（task_id）。';
               }
-              stream.messages.push({
-                content: label,
-                type: 'system',
-                time: formatStreamTime(),
-                isExpanded: false,
-              });
+              if (shouldAppendTaskTerminalMessage(parsed)) {
+                stream.messages.push({
+                  content: label,
+                  type: 'system',
+                  time: formatStreamTime(),
+                  isExpanded: false,
+                });
+              }
             }
           }
 

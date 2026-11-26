@@ -117,14 +117,42 @@ def finalize_task_acceptance(
     from .final_response_policy import requests_user_to_remount_executor
 
     if requests_user_to_remount_executor(session.final_response):
+        if task is not None:
+            try:
+                task.refresh_from_db(fields=["budget"])
+            except Exception:
+                pass
+        budget = dict(getattr(task, "budget", None) or {}) if task is not None else {}
+        used_tools = int(
+            budget.get("used_tool_actions") or budget.get("used_tool_steps") or 0
+        )
+        max_tools = int(
+            budget.get("max_tool_actions") or budget.get("max_tool_steps") or 0
+        )
+        completed_business = int(budget.get("completed_business_steps") or 0)
+        expected_business = int(budget.get("expected_business_steps") or 0)
+        exhausted_without_progress = (
+            session.executor_mounted
+            and max_tools > 0
+            and used_tools >= max_tools
+            and expected_business > completed_business
+        )
+        if exhausted_without_progress:
+            blocker_code = "execution_budget_exhausted_no_progress"
+            reason = (
+                f"工具调用预算已耗尽（{used_tools}/{max_tools}），"
+                f"业务检查点完成 {completed_business}/{expected_business}；"
+                "任务未完成，需排查工具循环并恢复执行。"
+            )
+        else:
+            blocker_code = "assistant_deferred_executor_mount"
+            reason = "执行能力未就绪，本轮未完成业务执行；任务保持未完成，由服务端恢复执行。"
         acceptance = {
             "ok": False,
-            "reasons": [
-                "最终回复要求用户重新挂载执行工具；该动作由服务端负责，且本轮不得标记完成"
-            ],
+            "reasons": [reason],
             "blockers": [
                 {
-                    "blocker_code": "assistant_deferred_executor_mount",
+                    "blocker_code": blocker_code,
                     "step": "autonomy",
                 }
             ],

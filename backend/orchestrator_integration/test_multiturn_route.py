@@ -245,6 +245,13 @@ class KnownTaskFollowupTests(TestCase):
         user, chat, task = _seed_browser_task(
             username="mt-remount-guard", session_id="sess-mt-remount-guard"
         )
+        task.budget = {
+            "max_tool_actions": 80,
+            "used_tool_actions": 80,
+            "expected_business_steps": 3,
+            "completed_business_steps": 0,
+        }
+        task.save(update_fields=["budget", "updated_at"])
         commission = TaskCommission(
             task_id=task.public_task_id,
             zone_id="browser",
@@ -269,8 +276,10 @@ class KnownTaskFollowupTests(TestCase):
             )
         )
         self.assertFalse(acceptance["ok"])
+        self.assertIn("80/80", acceptance["reasons"][0])
+        self.assertIn("0/3", acceptance["reasons"][0])
         self.assertIn(
-            "assistant_deferred_executor_mount",
+            "execution_budget_exhausted_no_progress",
             {b.get("blocker_code") for b in acceptance.get("blockers") or []},
         )
 

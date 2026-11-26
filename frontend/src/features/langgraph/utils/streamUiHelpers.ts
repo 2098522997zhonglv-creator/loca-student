@@ -44,6 +44,19 @@ export function isNoopCompletedTask(
     && Number(config.used_tool_actions || 0) === 0;
 }
 
+/** Terminal execution policy details belong in the task card, not a duplicate chat bubble. */
+export function shouldAppendTaskTerminalMessage(event: Record<string, any>): boolean {
+  const blockers = event.acceptance?.blockers
+    || event.payload?.acceptance?.blockers
+    || [];
+  const codes = Array.isArray(blockers)
+    ? blockers.map((b: Record<string, unknown>) => String(b?.blocker_code || ''))
+    : [];
+  if (codes.includes('assistant_deferred_executor_mount')
+      || codes.includes('execution_budget_exhausted_no_progress')) return false;
+  return true;
+}
+
 export interface StreamUiState {
   content: string;
   messages: StreamUiMessage[];
