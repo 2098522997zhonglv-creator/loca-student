@@ -2714,11 +2714,12 @@ class AuditFlowRegressionTests(TestCase):
         remaining = new_max - int(b2.get("used_tool_actions") or 0)
         self.assertGreater(remaining, 0)
         self.assertGreater(int(b2.get("max_tokens") or 0), max_tok)
+        self.assertEqual(cont.auth_scope, task.auth_scope)
         self.assertEqual(cont.status, "running")
         self.assertIn("continuation_budget_topup", cont.task_scope or {})
 
-        # A repeated continuation with no tool action after the top-up must not
-        # keep inflating the budget or restarting an empty loop.
+        # An explicit user continuation unlocks the next bounded budget batch,
+        # even if the previous batch produced no completed business checkpoint.
         topped_max = new_max
         topped_budget = dict(cont.budget or {})
         topped_budget["used_tool_actions"] = topped_max
@@ -2736,16 +2737,19 @@ class AuditFlowRegressionTests(TestCase):
             turn_relation=TURN_SUPPLEMENT,
         )
         b3 = cont_again.budget or {}
-        self.assertEqual(
-            int(b3.get("max_tool_actions") or b3.get("max_tool_steps") or 0),
-            topped_max,
+        next_max = int(b3.get("max_tool_actions") or b3.get("max_tool_steps") or 0)
+        self.assertGreater(next_max, topped_max)
+        self.assertGreater(
+            next_max - int(b3.get("used_tool_actions") or 0), 0
         )
+        self.assertGreater(
+            int(b3.get("max_tokens") or 0),
+            int(topped_budget.get("max_tokens") or 0),
+        )
+        self.assertLessEqual(next_max, 200)
         self.assertEqual(
-            (cont_again.task_scope or {})
-            .get("continuation_budget_topup", {})
-            .get("tool_topup", {})
-            .get("error_code"),
-            "no_progress_since_last_topup",
+            (b3.get("last_budget_expand") or {}).get("reason"),
+            "user_continuation_auto_topup",
         )
 
     def test_token_budget_enforced(self):

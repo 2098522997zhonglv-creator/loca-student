@@ -167,9 +167,10 @@ def topup_budget_for_user_continuation(
     tool_add: int = 0,
     token_add: int = 50_000,
 ) -> Dict[str, Any]:
-    """续跑预算耗尽时只在业务阶段前进后自动续额，不改 deny/allow。
+    """每次用户明确续跑且预算耗尽时分配下一预算批次，不改 deny/allow。
 
-    首次续额避免 0 步死锁；无业务阶段进展的重复续额会被拦截，避免工具空转。
+    用户续跑是显式的新执行请求；不能用“上一批次没有业务进展”拒绝它。
+    自动循环仍由当前轮的工具硬上限、任务时长和服务端总硬上限约束。
     """
     from orchestrator_integration.action_auth import expand_budget_only
     from orchestrator_integration.models import AgentTask
@@ -191,91 +192,65 @@ def topup_budget_for_user_continuation(
     }
 
     if remaining <= 0:
-        previous_expand = budget.get("last_budget_expand") or {}
-        if (
-            previous_expand.get("reason") == "user_continuation_auto_topup"
-            and int(budget.get("completed_business_steps") or 0)
-            <= int(previous_expand.get("completed_business_steps_at_expand") or 0)
-        ):
-            out["tool_topup"] = {
-                "ok": False,
-                "error_code": "no_progress_since_last_topup",
-                "message": "上次续额后没有完成新的业务检查点，暂停自动续额以避免空转。",
-                "max_tool_actions": max_a,
-            }
-        else:
-            pb = (playbook_id or "").strip()
-            if tool_add > 0:
-                add = int(tool_add)
-            elif pb == "browser_act" or "browser" in pb:
-                add = 28
-            elif pb in {"testcase_execute", "task_orchestrator"} or "execute" in pb:
-                from orchestrator_integration.task_orchestrator.budget_presets import (
-                    PLAN_KIND_TESTCASE,
-                    topup_add_for_plan_kind,
-                )
-
-                add = topup_add_for_plan_kind(PLAN_KIND_TESTCASE)
-            else:
-                add = 8
-            expanded = expand_budget_only(
-                task,
-                add_tool_actions=add,
-                reason="user_continuation_auto_topup",
+        pb = (playbook_id or "").strip()
+        if tool_add > 0:
+            add = int(tool_add)
+        elif pb == "browser_act" or "browser" in pb:
+            add = 28
+        elif pb in {"testcase_execute", "task_orchestrator"} or "execute" in pb:
+            from orchestrator_integration.task_orchestrator.budget_presets import (
+                PLAN_KIND_TESTCASE,
+                topup_add_for_plan_kind,
             )
-            out["tool_topup"] = expanded
-            if expanded.get("ok"):
-                logger.info(
-                    "AgentTask auto top-up tools task=%s +%s → max=%s",
-                    getattr(task, "public_task_id", None) or task.pk,
-                    add,
-                    expanded.get("max_tool_actions"),
-                )
+
+            add = topup_add_for_plan_kind(PLAN_KIND_TESTCASE)
+        else:
+            add = 8
+        expanded = expand_budget_only(
+            task,
+            add_tool_actions=add,
+            reason="user_continuation_auto_topup",
+        )
+        out["tool_topup"] = expanded
+        if expanded.get("ok"):
+            logger.info(
+                "AgentTask user continuation budget batch task=%s +%s → max=%s",
+                getattr(task, "public_task_id", None) or task.pk,
+                add,
+                expanded.get("max_tool_actions"),
+            )
 
     # token 预算同样可能在长浏览器轮打满，补充指令时一并抬额
     used_tok = int(budget.get("used_tokens") or 0)
     max_tok = int(budget.get("max_tokens") or 0)
     if max_tok > 0 and used_tok >= max_tok and token_add > 0:
-        previous_token_expand = budget.get("last_token_expand") or {}
-        if (
-            previous_token_expand.get("reason") == "user_continuation_auto_topup"
-            and int(budget.get("completed_business_steps") or 0)
-            <= int(previous_token_expand.get("completed_business_steps_at_expand") or 0)
-        ):
-            out["token_topup"] = {
-                "ok": False,
-                "error_code": "no_progress_since_last_topup",
-                "message": "上次续额后没有完成新的业务检查点，暂停自动续额以避免空转。",
-                "max_tokens": max_tok,
+        hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 500_000)
+        new_tok = min(max_tok + int(token_add), hard_tok)
+        if new_tok > max_tok:
+            fresh = dict(task.budget or {})
+            fresh["max_tokens"] = new_tok
+            fresh["last_token_expand"] = {
+                "from": max_tok,
+                "to": new_tok,
+                "reason": "user_continuation_auto_topup",
+                "used_tokens_at_expand": used_tok,
+                "completed_business_steps_at_expand": int(
+                    budget.get("completed_business_steps") or 0
+                ),
+                "at": timezone.now().isoformat(),
             }
-        else:
-            hard_tok = int(SERVER_HARD_CAPS.get("max_tokens") or 500_000)
-            new_tok = min(max_tok + int(token_add), hard_tok)
-            if new_tok > max_tok:
-                fresh = dict(task.budget or {})
-                fresh["max_tokens"] = new_tok
-                fresh["last_token_expand"] = {
-                    "from": max_tok,
-                    "to": new_tok,
-                    "reason": "user_continuation_auto_topup",
-                    "used_tokens_at_expand": used_tok,
-                    "completed_business_steps_at_expand": int(
-                        budget.get("completed_business_steps") or 0
-                    ),
-                    "at": timezone.now().isoformat(),
-                }
-                AgentTask.objects.filter(pk=task.pk).update(
-                    budget=fresh,
-                    updated_at=timezone.now(),
-                )
-                task.budget = fresh
-                out["token_topup"] = {"ok": True, "max_tokens": new_tok}
-                logger.info(
-                    "AgentTask auto top-up tokens task=%s %s→%s",
-                    getattr(task, "public_task_id", None) or task.pk,
-                    max_tok,
-                    new_tok,
-                )
+            AgentTask.objects.filter(pk=task.pk).update(
+                budget=fresh,
+                updated_at=timezone.now(),
+            )
+            task.budget = fresh
+            out["token_topup"] = {"ok": True, "max_tokens": new_tok}
+            logger.info(
+                "AgentTask user continuation token batch task=%s %s→%s",
+                getattr(task, "public_task_id", None) or task.pk,
+                max_tok,
+                new_tok,
+            )
     return out
 
 
