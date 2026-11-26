@@ -141,6 +141,65 @@ def delivery_ready(state: dict) -> bool:
     )
 
 
+def plan_precondition_error(state: dict, plan: dict) -> str:
+    """Reject an incomplete write plan before it can mutate the cart.
+
+    Read-only knowledge retrieval and page inspection may run independently,
+    but the batched cart action must consume their verified outputs and cover
+    every still-pending parameter row in the current task contract.
+    """
+    if not isinstance(plan, dict) or plan.get("action") != "run_form_test":
+        return ""
+    if not state.get("knowledge_checked"):
+        return "前置条件未满足：先查询并记录本任务需要的知识库规则，再执行加购。"
+    if not state.get("page_checked"):
+        return "前置条件未满足：先检查本任务目标商品页及表单，再执行加购。"
+
+    target = urlparse(state.get("target_url") or "")
+    if not plan.get("url"):
+        return "加购计划缺少目标商品页；请绑定本任务已检查的 URL。"
+    candidate = urlparse(
+        urljoin(state.get("target_url") or "", str(plan.get("url") or ""))
+    )
+    if not target.netloc or (
+        candidate.netloc,
+        candidate.path.rstrip("/"),
+    ) != (target.netloc, target.path.rstrip("/")):
+        return "计划目标与本任务已确认的商品页不一致；请修正目标页后再执行。"
+
+    if (
+        state.get("requires_empty_check")
+        and not (state.get("empty_check") or {}).get("passed")
+        and not plan.get("empty_check")
+    ):
+        return "本任务要求先验证必填项为空时的拦截；请在同一批次计划中包含 empty_check。"
+    if state.get("no_extras") and not plan.get("no_extras"):
+        return "本任务要求不选额外配件/包装；请在计划中明确 no_extras。"
+
+    expected = {row["key"]: row for row in state.get("expected_rows", [])}
+    completed = state.get("rows", {})
+    pending = {
+        key
+        for key in expected
+        if key not in completed or completed[key].get("retryable")
+    }
+    if not pending:
+        return "所有参数行都已有终态；不要再次运行加购计划，继续缺失的核验或结果交付。"
+    planned = plan.get("rows") or []
+    planned_keys = [row.get("key") for row in planned if isinstance(row, dict)]
+    if len(planned_keys) != len(planned) or len(planned_keys) != len(set(planned_keys)):
+        return "参数计划缺少唯一行标识；请按任务参数行重新生成批量计划。"
+    if set(planned_keys) != pending:
+        return "批量计划未覆盖全部未完成参数行，或包含已完成行；请仅提交所有待执行行一次。"
+    if any(
+        row != expected.get(row.get("key"))
+        for row in planned
+        if isinstance(row, dict)
+    ):
+        return "参数计划与用户确认的颜色/文本/数量不一致；请按原任务参数修正。"
+    return ""
+
+
 def directive(state: dict) -> str:
     failures = [x for x in state.get("rows", {}).values() if x.get("result") == "failed" and not x.get("retryable")]
     deviations = state.get("invalid_attempts") or []

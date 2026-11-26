@@ -13,8 +13,8 @@ import uuid
 from dataclasses import replace
 
 from asgiref.sync import sync_to_async
-from django.db import transaction
-from django.db.models import F
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import F, Max
 from django.utils import timezone
 from langchain.agents.middleware import AgentMiddleware, ModelResponse
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
@@ -64,7 +64,7 @@ def _sync_test_progress(task, state):
 
 
 @transaction.atomic
-def start_call(task_id, call_id, name, args):
+def _start_call_once(task_id, call_id, name, args):
     from .models import AgentTask, AgentStep
     from .agent_runtime import consume_budget, append_event
 
@@ -74,18 +74,29 @@ def start_call(task_id, call_id, name, args):
         return {"replay": previous.structured_result or {"status": previous.status}, "precharged": False}
     if task.status in {"completed", "failed", "cancelled", "cancelling"}:
         return {"reject": "任务已结束或正在取消，不启动新的动作。", "precharged": False}
+    latest_step = AgentStep.objects.filter(task=task).aggregate(value=Max("step_number"))["value"] or 0
+    # `current_step` can lag after an interrupted write or be advanced by
+    # budget accounting. The persisted ledger is authoritative for numbering.
+    number = max(int(task.current_step or 0), int(latest_step)) + 1
     state = (task.facts or {}).get("browser_test") or browser_tests.contract_for_goal(task.goal)
     plan_rejection = ""
     plan_arg = args.get("browser_plan") or {}
     if state and plan_arg.get("action") == "run_form_test":
+        plan_rejection = browser_tests.plan_precondition_error(state, plan_arg)
         expected = {row["key"]: row for row in state["expected_rows"]}
         # The compiled path shares the existing call ledger and row identity.
         # Never replay a completed or uncertain write through a new plan call.
         prior_plans = AgentStep.objects.filter(task=task, tool_name=name, tool_input__browser_plan__action="run_form_test")
         unresolved = prior_plans.filter(status__in=["running", "unknown"]).exists()
         completed = state.get("rows", {})
-        invalid = unresolved or any(row != expected.get(row.get("key")) or row.get("key") in completed for row in plan_arg.get("rows", []))
-        if invalid:
+        plan_rows = plan_arg.get("rows") if isinstance(plan_arg.get("rows"), list) else []
+        invalid = unresolved or any(
+            not isinstance(row, dict)
+            or row != expected.get(row.get("key"))
+            or row.get("key") in completed
+            for row in plan_rows
+        )
+        if invalid and not plan_rejection:
             plan_rejection = "计划含已执行、未知状态或不匹配的参数行；先核验已有结果，仅修复剩余节点。"
     rejected = plan_rejection or (browser_tests.guard_command(state, _command(args)) if state and name == "execute_skill_script" else "")
     precharged = not bool(args.get("commands"))
@@ -93,15 +104,38 @@ def start_call(task_id, call_id, name, args):
         ok, reason = consume_budget(task, tool_steps=1)
         if not ok:
             rejected = reason
-    number = int(task.current_step or 0) + 1
     AgentStep.objects.create(task=task, step_number=number, step_id=call_id, operation_id=call_id,
                              status="running", tool_name=name, tool_input=args, stage_id=task.current_stage or "")
-    task.current_step = number
+    task.current_step = max(int(task.current_step or 0), number)
     if state:
         facts = dict(task.facts or {}); facts["browser_test"] = state; task.facts = facts
     task.save(update_fields=["current_step", "facts", "updated_at"])
     append_event(task, "step_started", step_id=call_id, status="running", payload={"tool_name": name})
     return {"reject": rejected, "precharged": precharged, "stage": task.current_stage}
+
+
+def _is_step_allocation_conflict(exc):
+    message = str(exc).lower()
+    unique_step = (
+        "unique constraint failed: agent_step.task_id, agent_step.step_number" in message
+        or ("agent_step" in message and "step_number" in message
+            and ("unique" in message or "duplicate" in message))
+    )
+    sqlite_busy = "locked" in message or "database is busy" in message
+    return unique_step or sqlite_busy
+
+
+def start_call(task_id, call_id, name, args):
+    """Allocate a per-task step safely when parallel calls share SQLite."""
+    for attempt in range(4):
+        try:
+            return _start_call_once(task_id, call_id, name, args)
+        except (IntegrityError, OperationalError) as exc:
+            if attempt >= 3 or not _is_step_allocation_conflict(exc):
+                raise
+            # The failed atomic transaction has rolled back, so re-read the
+            # task and the maximum persisted step on the next attempt.
+            time.sleep(0.02 * (attempt + 1))
 
 
 @transaction.atomic

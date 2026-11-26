@@ -84,6 +84,24 @@ class ProtocolAndContractTests(unittest.TestCase):
         self.assertEqual([r["value"] for r in state["expected_rows"]], ["E2E_ALPHA", "E2E_BETA"])
         self.assertTrue(state["requires_empty_check"])
 
+    def test_cart_plan_requires_verified_predecessors_and_all_pending_rows(self):
+        from .browser_test_runtime import plan_precondition_error
+
+        state = contract_for_goal(GOAL)
+        plan = {
+            "action": "run_form_test",
+            "url": TARGET,
+            "empty_check": True,
+            "no_extras": True,
+            "rows": list(state["expected_rows"]),
+        }
+        self.assertIn("先查询", plan_precondition_error(state, plan))
+
+        state.update(knowledge_checked=True, page_checked=True)
+        self.assertEqual(plan_precondition_error(state, plan), "")
+        plan["rows"] = plan["rows"][:1]
+        self.assertIn("未覆盖全部", plan_precondition_error(state, plan))
+
     def test_multiline_stdout_retains_later_rejection(self):
         raw = 'STATE: {"active":["Red"]}\nPREVIEW: {"success":true}\nBODY: {"success":false,"error":{"message":"fields not exists:[attr_icon]"}}'
         result = classify_skill_output(text=raw, skill_name="playwright-skill", exit_code=0)
@@ -203,10 +221,39 @@ class PersistedGraphTests(TransactionTestCase):
         await graph.ainvoke({"messages": [HumanMessage(content="并行查询")]})
         snapshot = await sync_to_async(progress_event)(self.task.pk)
         self.assertEqual(snapshot["effective_config"]["used_tool_actions"], 3)
+        step_numbers = await sync_to_async(list)(
+            AgentStep.objects.filter(task_id=self.task.pk)
+            .order_by("step_number")
+            .values_list("step_number", flat=True)
+        )
+        self.assertEqual(step_numbers, [1, 2, 3])
         from .runtime_progress import start_call
         replay = await sync_to_async(start_call)(self.task.pk, "parallel-0", "knowledge_search", {"query": "0"})
         self.assertTrue(replay.get("replay")); self.assertEqual(len(calls), 3)
         self.assertEqual((await sync_to_async(progress_event)(self.task.pk))["effective_config"]["used_tool_actions"], 3)
+
+    async def test_start_call_repairs_stale_step_counter_from_persisted_ledger(self):
+        self.task.current_step = 1
+        await sync_to_async(self.task.save)(update_fields=["current_step"])
+        await AgentStep.objects.acreate(
+            task=self.task,
+            step_number=4,
+            step_id="existing-step-4",
+            tool_name="knowledge_search",
+            status="succeeded",
+        )
+
+        from .runtime_progress import start_call
+
+        result = await sync_to_async(start_call)(
+            self.task.pk,
+            "after-stale-counter",
+            "knowledge_search",
+            {"query": "continue"},
+        )
+        self.assertFalse(result.get("reject"))
+        step = await AgentStep.objects.aget(task_id=self.task.pk, step_id="after-stale-counter")
+        self.assertEqual(step.step_number, 5)
 
     async def test_stop_waits_for_inflight_then_settles_without_starting_another_tool(self):
         entered, finish = asyncio.Event(), asyncio.Event()
