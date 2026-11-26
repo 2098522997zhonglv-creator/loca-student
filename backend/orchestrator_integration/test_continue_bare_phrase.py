@@ -8,6 +8,7 @@ from orchestrator_integration.turn_context import (
     TURN_AMBIGUOUS,
     TURN_CONTINUE,
     TURN_NONE,
+    TURN_NEW,
     PriorTaskContext,
     classify_turn_relation,
     executable_open_tasks,
@@ -80,6 +81,40 @@ class BareContinuePhraseTests(unittest.TestCase):
         rel = classify_turn_relation("继续", prior, open_count=1)
         self.assertEqual(rel, TURN_CONTINUE)
         self.assertTrue(should_preserve_execution(prior, rel))
+
+    def test_blocked_fetch_conditions_with_action_plan_is_resumable(self):
+        prior = PriorTaskContext(
+            task_pk=3,
+            public_task_id="blocked-browser-task",
+            goal="在测试站完成加购并核对购物车",
+            current_stage="fetch_conditions",
+            stage_plan=[
+                {"stage_id": "fetch_conditions"},
+                {"stage_id": "check_executable"},
+                {"stage_id": "add_to_cart"},
+                {"stage_id": "verify_deliver"},
+            ],
+            status="blocked",
+        )
+        resumable = executable_open_tasks([prior])
+        self.assertEqual(resumable, [prior])
+        rel = classify_turn_relation("继续执行", prior, open_count=len(resumable))
+        self.assertEqual(rel, TURN_CONTINUE)
+        self.assertTrue(should_preserve_execution(prior, rel))
+
+    def test_blocked_kb_shell_without_action_plan_is_not_resumable(self):
+        prior = PriorTaskContext(
+            task_pk=4,
+            public_task_id="blocked-kb-shell",
+            goal="查询商品中心规则",
+            current_stage="fetch_conditions",
+            stage_plan=[{"stage_id": "fetch_conditions"}],
+            status="blocked",
+        )
+        self.assertEqual(executable_open_tasks([prior]), [])
+        self.assertEqual(
+            classify_turn_relation("继续执行", prior, open_count=0), TURN_NEW
+        )
 
 
 if __name__ == "__main__":

@@ -64,6 +64,25 @@ _EXEC_STAGES = frozenset(
         "generate_draft",
     }
 )
+# A task can be durably blocked before its first executable node starts (for
+# example, tool budget exhaustion while ``fetch_conditions`` is current).  In
+# that case current_stage alone is not enough to decide whether a bare
+# continuation should restore the execution route.  Require a concrete
+# executable node in the persisted plan so old KB/QA shells stay excluded.
+_EXECUTABLE_PLAN_STAGES = frozenset(
+    {
+        "browser_interact",
+        "check_executable",
+        "customize_upload",
+        "add_to_cart",
+        "submit_order",
+        "verify_deliver",
+        "execute",
+        "execute_testcase",
+        "persist",
+        "generate_draft",
+    }
+)
 BROWSER_ACTIONS = frozenset(
     {"upload", "add_to_cart", "submit_order", "checkout", "pay"}
 )
@@ -97,7 +116,20 @@ class PriorTaskContext:
     def is_executable_stage(self) -> bool:
         if self.current_stage in _EXEC_STAGES:
             return True
-        return bool(self.allow_actions)
+        if self.allow_actions:
+            return True
+        if self.status not in {"blocked", "paused"}:
+            return False
+        # A blocked task may still be resumable when progress accounting left
+        # it on a planning node.  Only restore it when its persisted plan has
+        # a real business/action node; a blocked KB-only task remains a zombie
+        # and will not capture a generic "continue" message.
+        return any(
+            isinstance(stage, dict)
+            and str(stage.get("stage_id") or stage.get("node_id") or "")
+            in _EXECUTABLE_PLAN_STAGES
+            for stage in (self.stage_plan or [])
+        )
 
 
 def _task_to_prior(task, session_id: str = "") -> PriorTaskContext:
