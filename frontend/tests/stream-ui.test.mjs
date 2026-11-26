@@ -11,7 +11,7 @@ else {
   const ts = createRequire(import.meta.url)('typescript');
   javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText;
 }
-const { mergeHistoryToolMessages, projectRuntimeProgress, clearedStreamSnapshot, absorbToolResultEvent, toolEventKey } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
+const { mergeHistoryToolMessages, projectRuntimeProgress, clearedStreamSnapshot, absorbToolResultEvent, toolEventKey, isNoopCompletedTask } = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`);
 const tool = (id, extra = {}) => ({ content: JSON.stringify({ status: 'succeeded', operation_id: `op-${id}`, data: {}, summary: '已观察' }), messageType: 'tool', toolName: 'execute_skill_script', toolCallId: id, time: '10:00', ...extra });
 
 test('one history card contains all 37 real calls across steps and narration', () => {
@@ -86,4 +86,16 @@ test('solidifying a completed stream retains progress without replaying messages
   assert.equal(snapshot.snapshotIdle, true); assert.equal(snapshot.liveGeneration, false);
   assert.equal(snapshot.content, ''); assert.deepEqual(snapshot.messages, []);
   assert.equal(snapshot.isWaitingForApproval, undefined);
+});
+
+test('a completed single chat turn with zero work is not shown as a completed task', () => {
+  assert.equal(isNoopCompletedTask('completed', [{ stage_id: 'single' }], {
+    expected_business_steps: 0, completed_business_steps: 0, used_tool_actions: 0,
+  }), true);
+  assert.equal(isNoopCompletedTask('completed', [{ stage_id: 'single' }], {
+    expected_business_steps: 1, completed_business_steps: 0, used_tool_actions: 0,
+  }), true);
+  assert.equal(isNoopCompletedTask('running', [{ stage_id: 'single' }], {
+    expected_business_steps: 0, completed_business_steps: 0, used_tool_actions: 0,
+  }), false);
 });

@@ -29,6 +29,8 @@ class RuntimeSession:
     commission: Any = None
     stage_specs: List[Any] = field(default_factory=list)
     auth_scope: Dict[str, Any] = field(default_factory=dict)
+    final_response: str = ""
+    executor_mounted: bool = False
 
     @property
     def task(self):
@@ -112,6 +114,41 @@ def finalize_task_acceptance(
     commission = session.commission
     task = session.task
     events: List[Dict[str, Any]] = []
+    from .final_response_policy import requests_user_to_remount_executor
+
+    if requests_user_to_remount_executor(session.final_response):
+        acceptance = {
+            "ok": False,
+            "reasons": [
+                "最终回复要求用户重新挂载执行工具；该动作由服务端负责，且本轮不得标记完成"
+            ],
+            "blockers": [
+                {
+                    "blocker_code": "assistant_deferred_executor_mount",
+                    "step": "autonomy",
+                }
+            ],
+        }
+        if task is not None:
+            persisted = session.runtime.accept(acceptance)
+            events.append(
+                {
+                    "type": persisted.get("type") or "task_blocked",
+                    "task_id": session.task_id,
+                    "status": persisted.get("status") or "blocked",
+                    "acceptance": acceptance,
+                }
+            )
+        else:
+            events.append(
+                {
+                    "type": "task_blocked",
+                    "task_id": session.task_id,
+                    "status": "blocked",
+                    "acceptance": acceptance,
+                }
+            )
+        return acceptance, events
     if task is not None:
         from .browser_test_runtime import delivered_acceptance
         task.refresh_from_db()

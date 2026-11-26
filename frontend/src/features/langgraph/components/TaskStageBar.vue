@@ -28,6 +28,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue';
+import { isNoopCompletedTask } from '../utils/streamUiHelpers';
 
 export interface StageItem {
   stage_id: string;
@@ -54,9 +55,14 @@ const props = defineProps<{
 const stages = computed(() => props.stagePlan || []);
 
 const visible = computed(
-  () =>
+  () => !isNoopCompletedTask(
+    props.taskStatus,
+    stages.value,
+    (props.effectiveConfig || {}) as Record<string, unknown>,
+  ) && (
     Boolean(props.taskStatus) ||
     (Boolean(props.currentStage) && stages.value.length > 0)
+  )
 );
 
 const budgetLabel = computed(() => {

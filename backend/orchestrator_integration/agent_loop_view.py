@@ -986,6 +986,70 @@ async def _sanitize_history_before_model_call(
     return {"removed_count": fix_count, "sanitized": True}
 
 
+async def _persist_corrected_final_message(
+    agent: Any,
+    invoke_config: Dict[str, Any],
+    original_text: str,
+    corrected_text: str,
+    log_prefix: str,
+) -> bool:
+    """Persist a server-side correction so a refresh cannot resurrect a bad final answer."""
+    if not original_text or not corrected_text:
+        return False
+    try:
+        state = await agent.aget_state(invoke_config)
+        values = state.values if getattr(state, "values", None) else {}
+        messages = list(values.get("messages", [])) if isinstance(values, dict) else []
+        target_index = None
+        for index in range(len(messages) - 1, -1, -1):
+            msg = messages[index]
+            if not isinstance(msg, AIMessage) or getattr(msg, "tool_calls", None):
+                continue
+            content = msg.content
+            if isinstance(content, list):
+                content = "".join(
+                    item.get("text", "") if isinstance(item, dict)
+                    else (item if isinstance(item, str) else "")
+                    for item in content
+                )
+            if str(content or "").strip() == original_text:
+                target_index = index
+                break
+        if target_index is None:
+            logger.warning("%s: corrected final message not found in checkpoint", log_prefix)
+            return False
+
+        try:
+            replacement = messages[target_index].model_copy(
+                update={"content": corrected_text}
+            )
+        except Exception:
+            replacement = AIMessage(content=corrected_text)
+        messages[target_index] = replacement
+        payload = [RemoveMessage(id="__remove_all__"), *messages]
+        nodes = list(getattr(agent, "nodes", {}).keys())
+        preferred = [node for node in ("model", "agent", "tools") if node in nodes]
+        if nodes and nodes[0] not in preferred:
+            preferred.append(nodes[0])
+        preferred.append(None)
+        for as_node in preferred:
+            try:
+                if as_node is None:
+                    await agent.aupdate_state(invoke_config, {"messages": payload})
+                else:
+                    await agent.aupdate_state(
+                        invoke_config, {"messages": payload}, as_node=as_node
+                    )
+                logger.info("%s: persisted corrected final answer in checkpoint", log_prefix)
+                return True
+            except Exception:
+                continue
+        logger.error("%s: failed to persist corrected final answer", log_prefix)
+    except Exception as exc:
+        logger.warning("%s: failed to load/persist corrected final answer: %s", log_prefix, exc)
+    return False
+
+
 def calculate_context_tokens(
     messages: List[Any],
     model_name: str = "gpt-4o",
@@ -2529,6 +2593,43 @@ class AgentLoopStreamAPIView(View):
                 # Execution still queries the KB once, with a focused tool query.
                 # Avoid embedding the full test prompt and then repeating it.
                 _skip_prefetch = True
+            # A bare continuation is not a useful retrieval query. Reuse the
+            # persisted goal while the task is still collecting conditions;
+            # later stages already have those conditions and should not rerun
+            # generic KB retrieval on words like "继续跑".
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.turn_context import (
+                        is_bare_continue_phrase,
+                    )
+
+                    if is_bare_continue_phrase(user_message or ""):
+                        _prior_stage = str(
+                            getattr(_prior_task, "current_stage", "") or ""
+                        )
+                        if _prior_stage in {"fetch_conditions", "kb_research"}:
+                            _prior_scope = getattr(_prior_task, "task_scope", None) or {}
+                            _prefetch_query = sanitize_prefetch_query(
+                                str(
+                                    _prior_scope.get("raw_goal")
+                                    or getattr(_prior_task, "goal", "")
+                                    or ""
+                                )
+                            )
+                            _skip_prefetch = False
+                        else:
+                            _skip_prefetch = True
+                        logger.info(
+                            "AgentLoopStreamAPI: continuation KB policy stage=%s skip=%s query_len=%s",
+                            _prior_stage,
+                            _skip_prefetch,
+                            len(_prefetch_query or ""),
+                        )
+                except Exception as _continue_kb_err:
+                    logger.warning(
+                        "AgentLoopStreamAPI: continuation KB policy fallback: %s",
+                        _continue_kb_err,
+                    )
             try:
                 from orchestrator_integration.behavior_memory import (
                     prefetch_user_behavior_context,
@@ -3376,6 +3477,61 @@ class AgentLoopStreamAPIView(View):
                         f"AgentLoopStreamAPI: Failed to calculate token count: {e}"
                     )
 
+                final_ai_text = ""
+                for msg in reversed(all_messages or []):
+                    if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
+                        content = msg.content
+                        if isinstance(content, list):
+                            content = "".join(
+                                c.get("text", "") if isinstance(c, dict)
+                                else (c if isinstance(c, str) else "")
+                                for c in content
+                            )
+                        final_ai_text = str(content or "").strip()
+                        if final_ai_text:
+                            break
+
+                executor_mounted = any(
+                    getattr(t, "name", "") == "execute_skill_script"
+                    for t in (tools or [])
+                )
+                final_response_corrected = False
+                from orchestrator_integration.final_response_policy import (
+                    correction_for_executor_deferral,
+                    requests_user_to_remount_executor,
+                )
+
+                original_final_ai_text = final_ai_text
+                if requests_user_to_remount_executor(final_ai_text):
+                    final_response_corrected = True
+                    final_ai_text = correction_for_executor_deferral(
+                        executor_mounted=executor_mounted
+                    )
+                    await _persist_corrected_final_message(
+                        agent,
+                        invoke_config,
+                        original_final_ai_text,
+                        final_ai_text,
+                        "AgentLoopStreamAPI",
+                    )
+                    # final_answer replaces the provisional streamed text in the UI.
+                    yield create_sse_data(
+                        {
+                            "type": "final_answer",
+                            "content": final_ai_text,
+                            "response_locale": (
+                                _response_locale
+                                if "_response_locale" in locals()
+                                else "zh-CN"
+                            ),
+                        }
+                    )
+                    logger.warning(
+                        "AgentLoopStreamAPI: suppressed executor-remount deferral mounted=%s session=%s",
+                        executor_mounted,
+                        session_id,
+                    )
+
                 # AI 自动总结会话标题
                 if chat_session.title.startswith("新对话") and "llm" in locals() and llm:
                     try:
@@ -3397,6 +3553,7 @@ class AgentLoopStreamAPIView(View):
                     and use_knowledge_base
                     and _should_record_qa_cache
                     and not _kb_cache_hit
+                    and not final_response_corrected
                 ):
                     try:
                         from orchestrator_integration.qa_answer_cache import (
@@ -3404,24 +3561,6 @@ class AgentLoopStreamAPIView(View):
                             record_kb_qa_answer,
                         )
 
-                        final_ai_text = ""
-                        for msg in reversed(all_messages or []):
-                            if isinstance(msg, AIMessage) and not getattr(
-                                msg, "tool_calls", None
-                            ):
-                                content = msg.content
-                                if isinstance(content, list):
-                                    content = "".join(
-                                        (
-                                            c.get("text", "")
-                                            if isinstance(c, dict)
-                                            else (c if isinstance(c, str) else "")
-                                        )
-                                        for c in content
-                                    )
-                                final_ai_text = str(content or "").strip()
-                                if final_ai_text:
-                                    break
                         if final_ai_text:
                             await sync_to_async(record_kb_qa_answer)(
                                 request.user.id,
@@ -3462,6 +3601,8 @@ class AgentLoopStreamAPIView(View):
                             )
                         if sess is not None:
                             sess.commission = task_commission
+                            sess.final_response = original_final_ai_text
+                            sess.executor_mounted = executor_mounted
                             acceptance, fin_events = await sync_to_async(
                                 finalize_task_acceptance
                             )(sess)
@@ -5449,6 +5590,47 @@ class AgentLoopResumeAPIView(View):
                         if current_state.values
                         else []
                     )
+                    resume_final_text = ""
+                    for msg in reversed(all_messages or []):
+                        if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
+                            content = msg.content
+                            if isinstance(content, list):
+                                content = "".join(
+                                    c.get("text", "") if isinstance(c, dict)
+                                    else (c if isinstance(c, str) else "")
+                                    for c in content
+                                )
+                            resume_final_text = str(content or "").strip()
+                            if resume_final_text:
+                                break
+                    resume_executor_mounted = any(
+                        getattr(t, "name", "") == "execute_skill_script"
+                        for t in (tools or [])
+                    )
+                    resume_original_final_text = resume_final_text
+                    from orchestrator_integration.final_response_policy import (
+                        correction_for_executor_deferral,
+                        requests_user_to_remount_executor,
+                    )
+
+                    if requests_user_to_remount_executor(resume_final_text):
+                        resume_final_text = correction_for_executor_deferral(
+                            executor_mounted=resume_executor_mounted
+                        )
+                        await _persist_corrected_final_message(
+                            agent,
+                            config,
+                            resume_original_final_text,
+                            resume_final_text,
+                            "AgentLoopResumeAPI",
+                        )
+                        yield create_sse_data(
+                            {
+                                "type": "final_answer",
+                                "content": resume_final_text,
+                                "response_locale": "zh-CN",
+                            }
+                        )
 
                     # 获取当前上下文 token 使用量（优先 usage_metadata，回退估算）
                     input_tokens, output_tokens, total_tokens = (
@@ -5515,6 +5697,8 @@ class AgentLoopResumeAPIView(View):
                                     agent_runtime.task, "auth_scope", None
                                 )
                                 or {},
+                                final_response=resume_original_final_text,
+                                executor_mounted=resume_executor_mounted,
                             )
                             # commission 缺失时用任务元数据构造最小收尾
                             class _TmpCommission:

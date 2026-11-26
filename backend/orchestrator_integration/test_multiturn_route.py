@@ -234,6 +234,46 @@ class KnownTaskFollowupTests(TestCase):
             and acceptance.get("ok")
         )
 
+    def test_assistant_cannot_finish_by_asking_user_to_remount_executor(self):
+        from orchestrator_integration.agent_loop_finalize import (
+            RuntimeSession,
+            finalize_task_acceptance,
+        )
+        from orchestrator_integration.agent_runtime import AgentRuntime
+        from orchestrator_integration.task_commission import TaskCommission
+
+        user, chat, task = _seed_browser_task(
+            username="mt-remount-guard", session_id="sess-mt-remount-guard"
+        )
+        commission = TaskCommission(
+            task_id=task.public_task_id,
+            zone_id="browser",
+            playbook_id="browser_act",
+            primary_skills=frozenset({"playwright-skill"}),
+            auxiliary_skills=frozenset(),
+            short_circuit=True,
+            draft_writes=False,
+            channel="light",
+            post_condition="加购完成",
+        )
+        commission.last_tool_results = []
+        runtime = AgentRuntime(lease_owner="w-remount-guard")
+        runtime.task = task
+        acceptance, _ = finalize_task_acceptance(
+            RuntimeSession(
+                runtime=runtime,
+                commission=commission,
+                auth_scope=dict(task.auth_scope),
+                final_response="需要你做的一件事：重新挂载执行类工具 execute_skill_script。",
+                executor_mounted=True,
+            )
+        )
+        self.assertFalse(acceptance["ok"])
+        self.assertIn(
+            "assistant_deferred_executor_mount",
+            {b.get("blocker_code") for b in acceptance.get("blockers") or []},
+        )
+
 
 class MultiturnPositiveControlTests(TestCase):
     def test_full_goal_with_url_routes_browser(self):

@@ -5,6 +5,12 @@ from langgraph_integration.models import ChatSession
 
 
 class TaskConfigAndEventTests(TestCase):
+    def test_single_chat_turn_has_no_fake_business_checkpoint(self):
+        from orchestrator_integration.task_execution_config import build_effective_config
+
+        cfg = build_effective_config(stage_plan=[{"stage_id": "single"}])
+        self.assertEqual(cfg["expected_business_steps"], 0)
+
     def test_effective_config_separates_business_and_tool_budget(self):
         from orchestrator_integration.task_execution_config import (
             build_effective_config,

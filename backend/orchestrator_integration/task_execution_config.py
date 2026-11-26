@@ -59,7 +59,9 @@ def expected_business_steps_from_plan(stage_plan: Sequence[Any]) -> int:
                 n += 1
             continue
         n += 1
-    return max(n, 1) if stage_plan else 0
+    # A conversation-only ``single`` plan has no business checkpoint. Do not
+    # fabricate 0/1 progress for turns that did not create executable work.
+    return n
 
 
 def build_effective_config(

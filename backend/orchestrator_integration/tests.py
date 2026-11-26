@@ -2717,6 +2717,37 @@ class AuditFlowRegressionTests(TestCase):
         self.assertEqual(cont.status, "running")
         self.assertIn("continuation_budget_topup", cont.task_scope or {})
 
+        # A repeated continuation with no tool action after the top-up must not
+        # keep inflating the budget or restarting an empty loop.
+        topped_max = new_max
+        topped_budget = dict(cont.budget or {})
+        topped_budget["used_tool_actions"] = topped_max
+        topped_budget["used_tool_steps"] = topped_max
+        topped_budget["used_tokens"] = int(topped_budget.get("max_tokens") or 0)
+        cont.budget = topped_budget
+        cont.save(update_fields=["budget", "updated_at"])
+        cont_again = create_or_resume_task(
+            session=chat,
+            user=user,
+            project_id=None,
+            goal="继续",
+            commission=c,
+            lease_owner="w1",
+            turn_relation=TURN_SUPPLEMENT,
+        )
+        b3 = cont_again.budget or {}
+        self.assertEqual(
+            int(b3.get("max_tool_actions") or b3.get("max_tool_steps") or 0),
+            topped_max,
+        )
+        self.assertEqual(
+            (cont_again.task_scope or {})
+            .get("continuation_budget_topup", {})
+            .get("tool_topup", {})
+            .get("error_code"),
+            "no_progress_since_last_topup",
+        )
+
     def test_token_budget_enforced(self):
         from django.contrib.auth import get_user_model
         from langgraph_integration.models import ChatSession

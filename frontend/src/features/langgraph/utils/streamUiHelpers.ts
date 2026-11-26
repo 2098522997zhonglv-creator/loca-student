@@ -29,6 +29,21 @@ export interface StreamUiMessage {
   stepStatus?: 'start' | 'complete' | 'error';
 }
 
+export function isNoopCompletedTask(
+  status: unknown,
+  stages: Array<{ stage_id?: string }> = [],
+  config: Record<string, unknown> = {},
+): boolean {
+  const terminal = ['completed', 'task_completed'].includes(String(status || ''));
+  if (!terminal || stages.length === 0) return false;
+  const nonBusinessStages = stages.every((s) =>
+    ['single', 'summarize', ''].includes(String(s?.stage_id || '')),
+  );
+  return nonBusinessStages
+    && Number(config.completed_business_steps || 0) === 0
+    && Number(config.used_tool_actions || 0) === 0;
+}
+
 export interface StreamUiState {
   content: string;
   messages: StreamUiMessage[];

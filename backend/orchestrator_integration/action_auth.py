@@ -239,6 +239,12 @@ def expand_budget_only(
         "from": cur_max,
         "to": new_max,
         "reason": (reason or "")[:200],
+        "used_tool_actions_at_expand": int(
+            budget.get("used_tool_actions") or budget.get("used_tool_steps") or 0
+        ),
+        "completed_business_steps_at_expand": int(
+            budget.get("completed_business_steps") or 0
+        ),
         "at": timezone.now().isoformat(),
     }
     # 明确不碰 auth
