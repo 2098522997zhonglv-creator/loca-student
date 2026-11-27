@@ -148,11 +148,25 @@ class TaskStore:
                     merge_auth_scope_for_continue,
                 )
 
+                prior_auth = dict(task.auth_scope or {})
                 task.auth_scope = merge_auth_scope_for_continue(
-                    task.auth_scope or {},
+                    prior_auth,
                     auth_scope,
                     require_l3_for_new_allows=True,
                 )
+                try:
+                    from orchestrator_integration.production_observability import (
+                        audit_auth_changed,
+                    )
+
+                    audit_auth_changed(
+                        task,
+                        prior_scope=prior_auth,
+                        new_scope=task.auth_scope,
+                        source="continue_merge",
+                    )
+                except Exception:
+                    pass
             except Exception:
                 merged = dict(task.auth_scope or {})
                 allow = set(merged.get("allow_actions") or [])

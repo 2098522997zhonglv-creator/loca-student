@@ -983,10 +983,12 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
     ok = bool(acceptance.get("ok"))
     status = "completed" if ok else "blocked"
     terminal = ("completed", "failed", "cancelled")
+    prior_status = ""
     with transaction.atomic():
         row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
         if row is None:
             return {"type": "error", "error_code": "task_missing"}
+        prior_status = str(row.status or "")
         # RC10：取消中/已终态不得被迟到验收复活为 completed/blocked
         if row.status in terminal or row.status == "cancelling":
             return {
@@ -1031,6 +1033,28 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
         status=status,
         payload={"acceptance": acceptance},
     )
+    # 阶段5：状态迁移 + 最终交付审计
+    try:
+        from orchestrator_integration.production_observability import (
+            audit_final_delivery,
+            audit_status_transition,
+        )
+
+        audit_status_transition(
+            task,
+            from_status=prior_status,
+            to_status=status,
+            reason="apply_acceptance",
+            blocker_code=""
+            if ok
+            else str(
+                ((acceptance.get("blockers") or [{}])[0] or {}).get("blocker_code")
+                or ""
+            ),
+        )
+        audit_final_delivery(task, acceptance=acceptance)
+    except Exception as audit_err:
+        logger.debug("acceptance audit skipped: %s", audit_err)
     # 统一时间字段
     if "time" not in evt:
         evt["time"] = timezone.now().isoformat()
@@ -2019,6 +2043,19 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
             reconfirm_events += 1
     # R26：遥测按用户过滤，与任务列表范围一致
     telem = aggregate_telemetry(limit=2000, user_id=user_id)
+    # 阶段5：运营可观测指标
+    ops = {}
+    try:
+        from orchestrator_integration.production_observability import (
+            compute_ops_metrics,
+            detect_anomalies,
+        )
+
+        ops = compute_ops_metrics(user_id=user_id, limit=limit)
+        anomalies = detect_anomalies(user_id=user_id)
+    except Exception as ops_err:
+        logger.debug("ops metrics skipped: %s", ops_err)
+        anomalies = {"ok": True, "alerts": []}
     return {
         "tasks_sampled": len(recent),
         "status_counts": by_status,
@@ -2035,6 +2072,12 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
             "playbook_hits": telem.get("playbook_hits"),
             "total_tool_events": telem.get("total"),
         },
+        "ops": ops,
+        "anomalies": anomalies,
+        "hanging_task_count": ops.get("hanging_task_count"),
+        "resume_success_rate": ops.get("resume_success_rate"),
+        "duplicate_op_rate": ops.get("duplicate_op_rate"),
+        "avg_duration_ms": ops.get("avg_duration_ms"),
     }
 
 
