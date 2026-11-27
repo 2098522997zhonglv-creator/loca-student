@@ -331,32 +331,40 @@ def assert_task_access(
 
 
 def resume_preflight(task) -> Dict[str, Any]:
-    """恢复前核对：不确定步骤必须先 reconcile（FR04.4 / AC09）。"""
-    from orchestrator_integration.models import AgentStep
-    from orchestrator_integration.reconcile import collect_uncertain_steps
+    """恢复前核对：不确定步骤必须先 reconcile；附带续跑幂等计划（阶段2）。"""
+    try:
+        from orchestrator_integration.resume_execution import resume_preflight_v2
 
-    steps = list(
-        AgentStep.objects.filter(task=task)
-        .order_by("step_number")
-        .values(
-            "step_id",
-            "tool_name",
-            "status",
-            "tool_output_summary",
-            "structured_result",
-            "operation_id",
-        )[:100]
-    )
-    uncertain = collect_uncertain_steps(steps)
-    return {
-        "must_reconcile": bool(uncertain),
-        "uncertain_steps": uncertain,
-        "hint": (
-            "存在未核对的副作用步骤：先查询原动作状态，禁止盲目重放。"
-            if uncertain
-            else ""
-        ),
-    }
+        return resume_preflight_v2(task)
+    except Exception:
+        from orchestrator_integration.models import AgentStep
+        from orchestrator_integration.reconcile import collect_uncertain_steps
+
+        steps = list(
+            AgentStep.objects.filter(task=task)
+            .order_by("step_number")
+            .values(
+                "step_id",
+                "tool_name",
+                "status",
+                "tool_output_summary",
+                "structured_result",
+                "operation_id",
+                "evidence",
+                "param_fingerprint",
+                "tool_input",
+            )[:100]
+        )
+        uncertain = collect_uncertain_steps(steps)
+        return {
+            "must_reconcile": bool(uncertain),
+            "uncertain_steps": uncertain,
+            "hint": (
+                "存在未核对的副作用步骤：先查询原动作状态，禁止盲目重放。"
+                if uncertain
+                else ""
+            ),
+        }
 
 
 def _budget_remaining(budget: Dict[str, Any]) -> Tuple[int, int, int, int]:
@@ -745,6 +753,39 @@ def record_step_result(
             pass
     if structured.get("idempotency_key"):
         evidence["idempotency_key"] = structured.get("idempotency_key")
+    # 阶段2：保存输入摘要与副作用前后态，供续跑跳过/核对
+    try:
+        from orchestrator_integration.resume_execution import _input_summary
+
+        evidence.setdefault(
+            "input_summary",
+            _input_summary(
+                tool_input if isinstance(tool_input, dict) else {"raw": tool_input}
+            ),
+        )
+    except Exception:
+        pass
+    if not evidence.get("idempotency_key"):
+        try:
+            from orchestrator_integration.idempotency import build_idempotency_key
+
+            cmd = ""
+            if isinstance(tool_input, dict):
+                cmd = str(
+                    tool_input.get("command")
+                    or tool_input.get("script")
+                    or tool_input.get("raw")
+                    or ""
+                )
+            evidence["idempotency_key"] = build_idempotency_key(
+                task_id=str(task.public_task_id or task.pk),
+                skill_name=tool_name or "",
+                command=cmd,
+            )
+            structured = dict(structured)
+            structured["idempotency_key"] = evidence["idempotency_key"]
+        except Exception:
+            pass
 
     step = AgentStep.objects.create(
         task=task,

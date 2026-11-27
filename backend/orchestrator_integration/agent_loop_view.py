@@ -2124,6 +2124,21 @@ class AgentLoopStreamAPIView(View):
                     intent_hint = (
                         f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
                     )
+            # 阶段2：续跑注入幂等计划（跳过已完成、未知先核对）
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.resume_execution import (
+                        build_resume_plan,
+                    )
+
+                    _rplan = build_resume_plan(_prior_task)
+                    _rhint = (_rplan or {}).get("hint") or ""
+                    if _rhint:
+                        intent_hint = (
+                            f"{intent_hint}\n\n{_rhint}" if intent_hint else _rhint
+                        )
+                except Exception as _rplan_err:
+                    logger.debug("resume plan hint skipped: %s", _rplan_err)
             # FR04.5：探测经 finalize 模块统一构造
             try:
                 from orchestrator_integration.agent_loop_finalize import (
