@@ -1107,30 +1107,76 @@ def get_skill_tools(
         name = (skill_name or "").strip()
         if not name:
             return None
-        # 任务立项主/辅授权（优先于工具创建时的静态分区白名单）
-        # Escape Hatch 动态扩权写在 commission.granted_auxiliary，必须在此直接放行，
-        # 否则会落到下方 closed-over allowed_names 仍被拒。
+        # 有效授权 = commission 主/辅 ∪ telemetry 获批 ∪ 任务 auth_scope/facts 持久化
+        # Escape Hatch / 二层备用必须在此直接放行，否则会落到创建时 closed-over 白名单仍被拒。
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
             ctx = get_telemetry_context()
+            live: set[str] = set(ctx.granted_skills or [])
             commission = ctx.commission
+            primary: set[str] = set()
+            auxiliary: set[str] = set()
             if commission is not None:
+                primary = set(commission.primary_skills or [])
+                auxiliary = set(commission.auxiliary_skills or [])
                 granted = commission.effective_allowlist()
                 if granted is not None:
-                    if name not in granted:
-                        if name in commission.auxiliary_skills:
-                            return (
-                                f"Skill「{name}」属于辅类，尚未授权。"
-                                "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
-                                "禁止要求用户点名 Skill 或重写指令。"
-                            )
-                        return (
-                            f"Skill「{name}」不在本任务主类授权内。"
-                            f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
-                            "请改用主类 skill 自愈；禁止要求用户重写指令。"
-                        )
+                    live |= set(granted)
+                else:
+                    live |= primary | set(commission.granted_auxiliary or [])
+            # 任务持久化授权（扩权后同轮/跨轮）
+            try:
+                from orchestrator_integration.models import AgentTask
+
+                task = None
+                if getattr(ctx, "runtime_task_id", None):
+                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+                if task is not None:
+                    auth = dict(getattr(task, "auth_scope", None) or {})
+                    facts = dict(getattr(task, "facts", None) or {})
+                    live |= {
+                        str(s).strip()
+                        for s in (auth.get("allowed_skills") or [])
+                        if s
+                    }
+                    live |= {
+                        str(s).strip()
+                        for s in (facts.get("granted_auxiliary") or [])
+                        if s
+                    }
+                    live |= {
+                        str(s).strip()
+                        for s in (facts.get("activated_fallbacks") or [])
+                        if s
+                    }
+            except Exception:
+                pass
+
+            if live:
+                if name in live:
                     return None
+                if name in auxiliary:
+                    return (
+                        f"Skill「{name}」属于辅类，尚未授权。"
+                        "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
+                        "禁止要求用户点名 Skill 或重写指令。"
+                    )
+                return (
+                    f"Skill「{name}」不在本任务主类授权内。"
+                    f"主类: {', '.join(sorted(primary)) or '(无)'}。"
+                    f"已获批: {', '.join(sorted(live)) or '(无)'}。"
+                    "请改用已授权 skill 或 request_tool_expansion；禁止要求用户重写指令。"
+                )
+            if commission is not None:
+                # commission 存在但有效白名单为空：显式拒绝执行类 Skill
+                granted = commission.effective_allowlist()
+                if granted is not None and name not in granted:
+                    return (
+                        f"Skill「{name}」不在本任务主类授权内。"
+                        f"主类: {', '.join(sorted(primary)) or '(无)'}。"
+                        "请改用主类 skill 自愈；禁止要求用户重写指令。"
+                    )
         except Exception:
             pass
         if allowed_names is None:

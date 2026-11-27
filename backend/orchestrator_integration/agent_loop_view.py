@@ -1770,11 +1770,26 @@ class AgentLoopStreamAPIView(View):
                         prior_facts=_prior_facts if _preserve_exec else None,
                         auth_scope=_auth_scope0,
                     )
-                _activated_fb = set(
-                    (_prior_facts.get("activated_fallbacks") or [])
-                    if _preserve_exec
-                    else []
-                )
+                _activated_fb = set()
+                if _preserve_exec:
+                    _activated_fb |= set(
+                        _prior_facts.get("activated_fallbacks") or []
+                    )
+                    _activated_fb |= set(
+                        _prior_facts.get("granted_auxiliary") or []
+                    )
+                    try:
+                        _prior_auth = dict(
+                            getattr(_prior_task, "auth_scope", None) or {}
+                        )
+                        _activated_fb |= {
+                            str(s).strip()
+                            for s in (_prior_auth.get("allowed_skills") or [])
+                            if s
+                        }
+                    except Exception:
+                        pass
+                    _activated_fb = {s for s in _activated_fb if s}
                 _orch_mount = apply_orchestrator_mount(
                     _orch_plan, activated_fallbacks=_activated_fb
                 )
@@ -1830,6 +1845,11 @@ class AgentLoopStreamAPIView(View):
                     task_commission.granted_auxiliary = set(
                         task_commission.granted_auxiliary or []
                     ) | set(_activated_fb)
+                    if _activated_fb and hasattr(task_commission, "grant_skills"):
+                        task_commission.grant_skills(_activated_fb)
+                        skill_allowlist = set(skill_allowlist or []) | set(
+                            task_commission.effective_allowlist() or []
+                        )
                 except Exception:
                     pass
                 # 执行用例话术：禁止主类为空 / 卸掉 execute（防标题过长未命中旧正则）
@@ -2259,6 +2279,26 @@ class AgentLoopStreamAPIView(View):
                 )
             except Exception as _adv_err:
                 logger.debug("bound-tools advertise skipped: %s", _adv_err)
+            # 跨轮恢复：任务已持久化的获批 Skill 必须进入 telemetry / commission
+            _restored_grants = set()
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        restore_granted_skills_from_task,
+                    )
+
+                    _restored_grants = set(
+                        restore_granted_skills_from_task(
+                            _prior_task, commission=task_commission
+                        )
+                        or []
+                    )
+                    if _restored_grants:
+                        skill_allowlist = set(skill_allowlist or []) | _restored_grants
+                except Exception as _restore_err:
+                    logger.debug(
+                        "restore granted skills skipped: %s", _restore_err
+                    )
             set_telemetry_context(
                 TelemetryContext(
                     zone=skill_zone.zone_id,
@@ -2276,7 +2316,7 @@ class AgentLoopStreamAPIView(View):
                         else ""
                     ),
                     commission=task_commission,
-                    granted_skills=set(skill_allowlist or []),
+                    granted_skills=set(skill_allowlist or []) | _restored_grants,
                     short_circuit=task_commission.short_circuit,
                     draft_writes=task_commission.draft_writes,
                     current_stage=_current_stage_id,
@@ -2755,11 +2795,18 @@ class AgentLoopStreamAPIView(View):
                                 enabled=True,
                             )
                             facts["task_plan"] = _orch_plan.to_dict()
-                            facts["activated_fallbacks"] = sorted(
-                                _orch_mount.activated_fallbacks
-                                if _orch_mount
-                                else []
+                            # 并入已有获批，避免覆盖 request_tool_expansion 写入的授权
+                            prev_fb = set(facts.get("activated_fallbacks") or [])
+                            prev_g = set(facts.get("granted_auxiliary") or [])
+                            mount_fb = set(
+                                (_orch_mount.activated_fallbacks if _orch_mount else [])
+                                or []
                             )
+                            facts["activated_fallbacks"] = sorted(
+                                prev_fb | prev_g | mount_fb
+                            )
+                            if prev_g:
+                                facts["granted_auxiliary"] = sorted(prev_g)
                             runtime_task.facts = facts
                             if _orch_plan.current_node:
                                 runtime_task.current_stage = _orch_plan.current_node

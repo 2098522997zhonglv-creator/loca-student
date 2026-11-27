@@ -55,22 +55,63 @@ def get_meta_tools() -> list:
             )
             if ok:
                 ctx.orchestrator_mount = new_mount
-                allow = set(new_mount.skill_allowlist)
-                ctx.granted_skills = set(allow)
+                allow = set(new_mount.skill_allowlist) | {skill_name}
+                # 并入而非覆盖：保留已有主类/获批 Skill
+                ctx.granted_skills = set(ctx.granted_skills or []) | allow
                 if commission is not None:
                     try:
-                        commission.granted_auxiliary = set(
-                            commission.granted_auxiliary or []
-                        ) | {skill_name}
-                        commission.primary_skills = frozenset(
-                            set(commission.primary_skills or []) | allow
-                        )
+                        if hasattr(commission, "grant_skills"):
+                            allow = set(commission.grant_skills(allow) or allow)
+                        else:
+                            commission.granted_auxiliary = set(
+                                commission.granted_auxiliary or []
+                            ) | {skill_name}
+                            commission.primary_skills = frozenset(
+                                set(commission.primary_skills or []) | allow
+                            )
+                            allow = set(commission.effective_allowlist() or allow)
                     except Exception:
                         pass
+                # 同轮重绑定：commission + mount + 任务有效授权一并更新
+                try:
+                    from orchestrator_integration.task_orchestrator.node_runtime import (
+                        apply_remount_to_context,
+                    )
+
+                    apply_remount_to_context(allow | {skill_name})
+                    allow = set(ctx.granted_skills or []) | allow | {skill_name}
+                except Exception as remount_err:
+                    logger.warning(
+                        "[request_tool_expansion] remount/persist failed: %s",
+                        remount_err,
+                    )
+                    # 兜底：至少写任务有效授权
+                    try:
+                        from orchestrator_integration.models import AgentTask
+                        from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                            persist_granted_skills,
+                        )
+
+                        task = None
+                        if getattr(ctx, "runtime_task_id", None):
+                            task = AgentTask.objects.filter(
+                                pk=ctx.runtime_task_id
+                            ).first()
+                        if task is not None:
+                            persisted = persist_granted_skills(
+                                task, allow | {skill_name}, commission=commission
+                            )
+                            allow = set(persisted.get("allowed_skills") or allow)
+                    except Exception as persist_err:
+                        logger.warning(
+                            "[request_tool_expansion] persist grant failed: %s",
+                            persist_err,
+                        )
                 logger.info(
-                    "[request_tool_expansion] orch L2 skill=%s reason=%s",
+                    "[request_tool_expansion] orch L2 skill=%s reason=%s allow=%s",
                     skill_name,
                     (reason or "")[:120],
+                    sorted(allow),
                 )
                 return json.dumps(
                     {
@@ -79,7 +120,12 @@ def get_meta_tools() -> list:
                         "message": detail,
                         "skill_name": skill_name,
                         "effective_allowlist": sorted(allow),
-                        "note": "二层自动备用（已有授权内），非 Escape Hatch 扩权",
+                        "note": (
+                            "二层备用已写入任务有效授权；请立即重试刚才被拦截的 "
+                            "read_skill_content / execute_skill_script 步骤，"
+                            "无需用户发送「继续」。"
+                        ),
+                        "retry_blocked_step": True,
                     },
                     ensure_ascii=False,
                 )
@@ -124,9 +170,42 @@ def get_meta_tools() -> list:
             user_id=ctx.user_id,
         )
         if ok:
-            # 同步 allowlist 到上下文，供后续 execute 校验
+            # 同步 allowlist 到上下文 + 任务持久化，供后续 execute 校验
             allow = commission.effective_allowlist() or set()
-            ctx.granted_skills = set(allow)
+            ctx.granted_skills = set(ctx.granted_skills or []) | set(allow)
+            try:
+                from orchestrator_integration.task_orchestrator.node_runtime import (
+                    apply_remount_to_context,
+                )
+
+                apply_remount_to_context({skill_name} | set(allow))
+                allow = set(ctx.granted_skills or []) | set(allow) | {skill_name}
+            except Exception as remount_err:
+                logger.warning(
+                    "[request_tool_expansion] escape remount failed: %s",
+                    remount_err,
+                )
+                try:
+                    from orchestrator_integration.models import AgentTask
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        persist_granted_skills,
+                    )
+
+                    task = None
+                    if getattr(ctx, "runtime_task_id", None):
+                        task = AgentTask.objects.filter(
+                            pk=ctx.runtime_task_id
+                        ).first()
+                    if task is not None:
+                        persisted = persist_granted_skills(
+                            task, {skill_name} | set(allow), commission=commission
+                        )
+                        allow = set(persisted.get("allowed_skills") or allow)
+                except Exception as persist_err:
+                    logger.warning(
+                        "[request_tool_expansion] persist escape grant failed: %s",
+                        persist_err,
+                    )
             logger.info(
                 "[request_tool_expansion] granted skill=%s task=%s escape=%s reason=%s",
                 skill_name,
@@ -141,6 +220,11 @@ def get_meta_tools() -> list:
                     "skill_name": skill_name,
                     "effective_allowlist": sorted(allow),
                     "escape_used": commission.escape_used,
+                    "note": (
+                        "授权已持久化；请立即重试刚才被拦截的步骤，"
+                        "无需用户发送「继续」。"
+                    ),
+                    "retry_blocked_step": True,
                 },
                 ensure_ascii=False,
             )
@@ -249,6 +333,32 @@ def get_meta_tools() -> list:
         if commission is not None:
             allowed = set(commission.effective_allowlist() or set())
         allowed |= set(ctx.granted_skills or set())
+        # 与 skill 门禁一致：读任务持久化授权（扩权后同轮/跨轮）
+        try:
+            if getattr(ctx, "runtime_task_id", None):
+                task_for_auth = AgentTask.objects.filter(
+                    pk=ctx.runtime_task_id
+                ).first()
+                if task_for_auth is not None:
+                    auth = dict(getattr(task_for_auth, "auth_scope", None) or {})
+                    facts = dict(getattr(task_for_auth, "facts", None) or {})
+                    allowed |= {
+                        str(s).strip()
+                        for s in (auth.get("allowed_skills") or [])
+                        if s
+                    }
+                    allowed |= {
+                        str(s).strip()
+                        for s in (facts.get("granted_auxiliary") or [])
+                        if s
+                    }
+                    allowed |= {
+                        str(s).strip()
+                        for s in (facts.get("activated_fallbacks") or [])
+                        if s
+                    }
+        except Exception:
+            pass
         resolved = resolve_equivalent_executor(
             current=from_skill,
             candidates=[to_skill],

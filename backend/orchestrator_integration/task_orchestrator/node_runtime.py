@@ -818,7 +818,10 @@ def advance_orchestrator_on_task(
 
 
 def apply_remount_to_context(remount_skills: List[str] | Set[str]) -> None:
-    """同轮扩权：更新 commission + telemetry（execute_skill_script 以 commission 为准）。"""
+    """同轮扩权：更新 commission + telemetry（execute_skill_script 以 commission 为准）。
+
+    同时持久化到任务 auth_scope/facts，避免同轮 granted 后门禁仍读空主类。
+    """
     skills = {s for s in (remount_skills or []) if s}
     if not skills:
         return
@@ -833,7 +836,25 @@ def apply_remount_to_context(remount_skills: List[str] | Set[str]) -> None:
                 ctx.orchestrator_mount.skill_allowlist = set(
                     ctx.orchestrator_mount.skill_allowlist or []
                 ) | skills
+                ctx.orchestrator_mount.activated_fallbacks = set(
+                    getattr(ctx.orchestrator_mount, "activated_fallbacks", None)
+                    or []
+                ) | skills
             except Exception:
                 pass
+        # 写入任务有效授权（同轮后续调用 + 跨轮恢复）
+        try:
+            from orchestrator_integration.models import AgentTask
+            from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                persist_granted_skills,
+            )
+
+            task = None
+            if getattr(ctx, "runtime_task_id", None):
+                task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+            if task is not None:
+                persist_granted_skills(task, skills, commission=ctx.commission)
+        except Exception:
+            pass
     except Exception:
         pass
