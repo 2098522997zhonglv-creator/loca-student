@@ -239,6 +239,18 @@ def finalize_task_acceptance(
             acceptance["reasons"] = reasons
             acceptance["stage_verdict"] = verdict
 
+    # 阶段4：交付报告 + 证据门禁（缺失/矛盾禁止 completed）
+    if task is not None:
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                gate_completion_on_evidence,
+            )
+
+            gated = gate_completion_on_evidence(task, acceptance)
+            acceptance = gated.get("acceptance") or acceptance
+        except Exception:
+            pass
+
     evt_payload: Dict[str, Any] = {
         "type": "task_completed" if acceptance.get("ok") else "task_blocked",
         "task_id": session.task_id or getattr(commission, "task_id", ""),

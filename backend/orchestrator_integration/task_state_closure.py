@@ -278,6 +278,27 @@ def close_task_after_stream(
                     recovery="发送「继续」保留原任务与授权，完成剩余检查点后再交付。",
                     acceptance=acceptance,
                 )
+            # 阶段4：证据门禁（缺失/矛盾 → blocked）
+            try:
+                from orchestrator_integration.result_evidence_delivery import (
+                    gate_completion_on_evidence,
+                )
+
+                gated = gate_completion_on_evidence(task, acceptance)
+                acceptance = gated.get("acceptance") or acceptance
+                if not acceptance.get("ok"):
+                    return _block_task(
+                        task,
+                        blocker_code="evidence_gate_failed",
+                        reasons=list(acceptance.get("reasons") or ["证据门禁未通过"]),
+                        recovery=str(
+                            acceptance.get("recovery")
+                            or "补齐可追溯证据或消除矛盾后发送「继续」。"
+                        ),
+                        acceptance=acceptance,
+                    )
+            except Exception:
+                pass
             evt = apply_acceptance(task, acceptance)
             try:
                 append_event(

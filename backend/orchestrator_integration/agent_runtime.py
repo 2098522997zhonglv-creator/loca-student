@@ -815,6 +815,21 @@ def record_step_result(
             full_text = structured.get("summary") or ""
         else:
             full_text = summary or ""
+        # 阶段4：区分已执行/已观察/已验证
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                classify_claim_level,
+            )
+
+            _claim = classify_claim_level(
+                tool_name=tool_name or "",
+                step_status=step_status,
+                structured=structured,
+                evidence=evidence,
+            )
+        except Exception:
+            _claim = "executed"
+        evidence["claim_level"] = _claim
         stored = store_tool_output_evidence(
             task,
             step=step,
@@ -822,7 +837,7 @@ def record_step_result(
             summary=summary or structured.get("summary") or "",
             full_text=full_text,
             structured=structured,
-            claim_type="observation",
+            claim_type=_claim,
         )
         if stored.get("ok"):
             evidence["output_ref"] = stored.get("output_ref")
@@ -830,6 +845,7 @@ def record_step_result(
             evidence["content_hash"] = stored.get("content_hash")
             structured = dict(structured)
             structured["output_ref"] = stored.get("output_ref")
+            structured["claim_level"] = _claim
             AgentStep.objects.filter(pk=step.pk).update(
                 evidence=evidence, structured_result=structured
             )
@@ -951,6 +967,18 @@ def record_step_result(
 def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
     """终态条件更新：不可逆；完成事件唯一（R20）。"""
     from orchestrator_integration.models import AgentTask, TaskEvent
+
+    # 阶段4：证据缺失或矛盾禁止 completed
+    if acceptance and acceptance.get("ok"):
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                gate_completion_on_evidence,
+            )
+
+            gated = gate_completion_on_evidence(task, acceptance)
+            acceptance = gated.get("acceptance") or acceptance
+        except Exception as gate_err:
+            logger.warning("evidence gate skipped: %s", gate_err)
 
     ok = bool(acceptance.get("ok"))
     status = "completed" if ok else "blocked"
