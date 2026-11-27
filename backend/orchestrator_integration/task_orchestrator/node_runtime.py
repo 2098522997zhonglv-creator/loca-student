@@ -821,11 +821,15 @@ def apply_remount_to_context(remount_skills: List[str] | Set[str]) -> None:
     """同轮扩权：更新 commission + telemetry（execute_skill_script 以 commission 为准）。
 
     同时持久化到任务 auth_scope/facts，避免同轮 granted 后门禁仍读空主类。
+    若原分区为 kb_qa，获批执行类 Skill 后提升 zone，使分区越权门与白名单一致放行。
     """
     skills = {s for s in (remount_skills or []) if s}
     if not skills:
         return
     try:
+        from orchestrator_integration.skill_governance import (
+            elevate_zone_for_authorized_execute,
+        )
         from orchestrator_integration.telemetry_context import get_telemetry_context
 
         ctx = get_telemetry_context()
@@ -842,6 +846,18 @@ def apply_remount_to_context(remount_skills: List[str] | Set[str]) -> None:
                 ) | skills
             except Exception:
                 pass
+        # kb_qa → browser/execute：否则同轮重试仍被「禁止 execute」硬拦
+        try:
+            live = set(ctx.granted_skills or [])
+            if ctx.commission is not None:
+                live |= set(ctx.commission.effective_allowlist() or [])
+            ctx.zone = elevate_zone_for_authorized_execute(
+                ctx.zone or "",
+                authorized_skills=live,
+                mount_execute=True,
+            )
+        except Exception:
+            pass
         # 写入任务有效授权（同轮后续调用 + 跨轮恢复）
         try:
             from orchestrator_integration.models import AgentTask
@@ -854,6 +870,15 @@ def apply_remount_to_context(remount_skills: List[str] | Set[str]) -> None:
                 task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
             if task is not None:
                 persist_granted_skills(task, skills, commission=ctx.commission)
+                # 标记：扩权后下一跳若仍被分区/授权门拒，应停预算并报平台阻塞
+                try:
+                    facts = dict(getattr(task, "facts", None) or {})
+                    facts["expansion_awaiting_retry"] = True
+                    facts["auth_gate_reject_streak"] = 0
+                    task.facts = facts
+                    type(task).objects.filter(pk=task.pk).update(facts=facts)
+                except Exception:
+                    pass
         except Exception:
             pass
     except Exception:

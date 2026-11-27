@@ -2312,9 +2312,26 @@ class AgentLoopStreamAPIView(View):
                     logger.debug(
                         "restore granted skills skipped: %s", _restore_err
                     )
+            # 执行通道已挂载时，telemetry zone 不得停在 kb_qa（否则越权门硬拦 execute）
+            _telem_zone = skill_zone.zone_id
+            try:
+                from orchestrator_integration.skill_governance import (
+                    elevate_zone_for_authorized_execute as _elevate_z,
+                )
+                from orchestrator_integration.skill_zones import ZONE_KB_QA as _ZKB
+
+                if mount_execute and _telem_zone == _ZKB:
+                    _telem_zone = _elevate_z(
+                        _telem_zone,
+                        authorized_skills=set(skill_allowlist or [])
+                        | _restored_grants,
+                        mount_execute=True,
+                    )
+            except Exception:
+                pass
             set_telemetry_context(
                 TelemetryContext(
-                    zone=skill_zone.zone_id,
+                    zone=_telem_zone,
                     playbook=(
                         "task_orchestrator"
                         if _orch_mount is not None
