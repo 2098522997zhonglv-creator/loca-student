@@ -221,3 +221,49 @@ class Phase3ToolAuthAcceptance(TestCase):
             and task.status == "running",
             f"probe_ok={probe.get('ok')} action={result.get('action')} status={task.status}",
         )
+
+    def test_v6_fallback_skills_do_not_hard_block(self):
+        """fallback 缺失不硬拦；仅 primary 缺失才 blocked。"""
+        from orchestrator_integration.task_orchestrator.env_readiness import (
+            probe_required_capabilities,
+            required_primary_skills_for_probe,
+        )
+
+        manifest = {
+            "steps": [
+                {
+                    "step_id": "run_or_browser",
+                    "tools": ["loca-stude", "playwright-cli", "url-reader"],
+                }
+            ]
+        }
+        plan = {
+            "nodes": [
+                {
+                    "node_id": "run_or_browser",
+                    "primary_candidates": ["loca-stude"],
+                    "fallback_candidates": ["playwright-cli", "url-reader"],
+                }
+            ]
+        }
+        split = required_primary_skills_for_probe(
+            manifest,
+            current_stage="run_or_browser",
+            task_plan=plan,
+        )
+        probe = probe_required_capabilities(
+            required_skills=split["primary"],
+            optional_skills=split["optional"],
+            mount_execute=True,
+            executor_mounted=True,
+            skill_names_available=["loca-stude"],  # fallback 都不在
+        )
+        self._record(
+            "P3-V6-fallback-soft",
+            split["primary"] == ["loca-stude"]
+            and set(split["optional"]) >= {"playwright-cli", "url-reader"}
+            and probe.get("ok") is True
+            and len(probe.get("optional_missing") or []) >= 2,
+            f"primary={split['primary']} optional={split['optional']} "
+            f"ok={probe.get('ok')} opt_miss={probe.get('optional_missing')}",
+        )

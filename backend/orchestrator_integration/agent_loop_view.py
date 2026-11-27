@@ -2385,23 +2385,25 @@ class AgentLoopStreamAPIView(View):
                         from orchestrator_integration.task_orchestrator.env_readiness import (
                             block_task_for_missing_env,
                             probe_required_capabilities,
-                            required_skills_from_manifest,
+                            required_primary_skills_for_probe,
+                            resolve_available_skill_names,
                         )
                         from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
                             build_step_tool_manifest,
                         )
 
+                        _task_plan = (
+                            (getattr(runtime_task, "facts", None) or {}).get(
+                                "task_plan"
+                            )
+                        )
                         _m3 = build_step_tool_manifest(
                             stage_plan=stages,
-                            task_plan=(
-                                (getattr(runtime_task, "facts", None) or {}).get(
-                                    "task_plan"
-                                )
-                            ),
+                            task_plan=_task_plan
+                            if isinstance(_task_plan, dict)
+                            else None,
                             auth_scope=auth_scope,
                         )
-                        _need = required_skills_from_manifest(_m3)
-                        # 只探测真实 Skill 名（排除 builtin）
                         _builtins = {
                             "knowledge_search",
                             "read_skill_content",
@@ -2411,7 +2413,29 @@ class AgentLoopStreamAPIView(View):
                             "assert_task_postcondition",
                             "report_task_blocked",
                         }
-                        _need_skills = [n for n in _need if n not in _builtins]
+                        # 只硬依赖当前未完成步骤的 primary；fallback 不拦启动
+                        _facts0 = dict(getattr(runtime_task, "facts", None) or {})
+                        _need_split = required_primary_skills_for_probe(
+                            _m3,
+                            current_stage=str(
+                                getattr(runtime_task, "current_stage", "") or ""
+                            ),
+                            completed_stage_ids=_facts0.get("completed_stage_ids")
+                            or [],
+                            task_plan=_task_plan
+                            if isinstance(_task_plan, dict)
+                            else None,
+                        )
+                        _need_skills = [
+                            n
+                            for n in (_need_split.get("primary") or [])
+                            if n not in _builtins
+                        ]
+                        _optional_skills = [
+                            n
+                            for n in (_need_split.get("optional") or [])
+                            if n not in _builtins
+                        ]
                         _browser_needed = any(
                             n
                             in {
@@ -2422,8 +2446,15 @@ class AgentLoopStreamAPIView(View):
                             }
                             for n in _need_skills
                         )
+                        _avail = resolve_available_skill_names(
+                            auth_scope=auth_scope,
+                            mounted_tool_names=[
+                                getattr(t, "name", "") for t in (tools or [])
+                            ],
+                        )
                         _probe = probe_required_capabilities(
                             required_skills=_need_skills,
+                            optional_skills=_optional_skills,
                             mount_execute=bool(mount_execute),
                             executor_mounted=bool(
                                 any(
@@ -2431,6 +2462,7 @@ class AgentLoopStreamAPIView(View):
                                     for t in (tools or [])
                                 )
                             ),
+                            skill_names_available=sorted(_avail),
                             browser_required=_browser_needed,
                             browser_alive=None,  # 未探测时不因浏览器误杀
                         )
