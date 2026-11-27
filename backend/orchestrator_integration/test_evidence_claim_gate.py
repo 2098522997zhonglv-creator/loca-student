@@ -80,9 +80,12 @@ class EvidenceClaimGateTests(SimpleTestCase):
             acceptance={"reasons": ["声明已验证但缺少可追溯证据引用"]},
             completed_business_steps=0,
             expected_business_steps=0,
+            executor_mounted=True,
+            budget_remaining=True,
         )
         self.assertIn("不能据此声称", corr)
         self.assertIn("历史截图", corr)
+        self.assertIn("自动续跑", corr)
 
     def test_historical_screenshot_claim_is_hard_fail(self):
         from orchestrator_integration.evidence_integrity import (

@@ -608,6 +608,49 @@ def gate_completion_on_evidence(
                 }
             )
 
+    # 推断本轮是否仍有执行通道与预算（用于 recovery 归因，不改变门禁结论）
+    try:
+        from orchestrator_integration.task_state_closure import (
+            budget_remaining as _budget_remaining_fn,
+        )
+
+        _has_budget = bool(_budget_remaining_fn(task))
+    except Exception:
+        snap_b = dict(getattr(task, "budget", None) or {})
+        used = int(snap_b.get("used_tool_actions") or 0)
+        mx = int(snap_b.get("max_tool_actions") or 0)
+        _has_budget = mx <= 0 or used < mx
+    _facts_for_mount = dict(getattr(task, "facts", None) or {})
+    if "executor_mounted" in _facts_for_mount:
+        _executor_mounted = bool(_facts_for_mount.get("executor_mounted"))
+    else:
+        # 默认按已挂载处理：缺证据优先归因「应续跑」，仅显式标记未挂载才报挂载阻塞
+        _executor_mounted = True
+        for _b in blockers:
+            if str((_b or {}).get("blocker_code") or "") in {
+                "executor_bind_mismatch",
+                "missing_capability",
+            } and "execute" in str(
+                (_b or {}).get("capability")
+                or (_b or {}).get("detail")
+                or (_b or {})
+            ).lower():
+                _executor_mounted = False
+                break
+    try:
+        from orchestrator_integration.final_response_policy import (
+            recovery_for_missing_evidence,
+        )
+
+        _evidence_recovery = recovery_for_missing_evidence(
+            executor_mounted=_executor_mounted,
+            budget_remaining=_has_budget,
+        )
+    except Exception:
+        _evidence_recovery = (
+            "服务端将在预算内自动续跑采集本轮证据；禁止要求用户代为提供执行证据。"
+        )
+
     # 有明确验收条件时，必须全部 claim_ok
     if bindings and delivery.get("incomplete_items"):
         allow_complete = False
@@ -618,10 +661,14 @@ def gate_completion_on_evidence(
             )
             blockers.append(
                 {
-                    "blocker_code": "missing_evidence",
+                    "blocker_code": (
+                        "executor_bind_mismatch"
+                        if not _executor_mounted
+                        else "missing_evidence"
+                    ),
                     "step": "evidence_gate",
                     "criterion_id": item.get("criterion_id"),
-                    "recovery": "补齐工具/页面/DB/文件证据后发送「继续」；勿仅凭模型措辞完成。",
+                    "recovery": _evidence_recovery,
                 }
             )
 
@@ -636,14 +683,14 @@ def gate_completion_on_evidence(
         acceptance["reasons"] = list(dict.fromkeys(reasons))
         acceptance["blockers"] = blockers
         acceptance["recovery"] = (
-            "证据缺失或互相矛盾，禁止标记完成；"
-            "核对实际页面/DB/文件状态后补证或修复，再发送「继续」。"
+            "证据缺失或互相矛盾，禁止标记完成；" + _evidence_recovery
         )
         acceptance["delivery"] = delivery
         acceptance["evidence_gate"] = {
             "ok": False,
             "contradictions": contradictions,
             "incomplete": delivery.get("incomplete_items") or [],
+            "auto_continue_eligible": bool(_executor_mounted and _has_budget),
         }
     elif allow_complete:
         acceptance = dict(acceptance)
@@ -657,8 +704,12 @@ def gate_completion_on_evidence(
             "证据门禁未通过"
         ]
         acceptance["blockers"] = blockers
+        acceptance["recovery"] = _evidence_recovery
         acceptance["delivery"] = delivery
-        acceptance["evidence_gate"] = {"ok": False}
+        acceptance["evidence_gate"] = {
+            "ok": False,
+            "auto_continue_eligible": bool(_executor_mounted and _has_budget),
+        }
 
     # 持久化交付快照
     try:
