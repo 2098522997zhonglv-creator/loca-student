@@ -136,7 +136,7 @@ function Wait-ChatIdleBeforeRestart {
     $marker = Join-Path $script:LogDir "chat_active.ts"
     if (-not (Test-Path $marker)) {
         Write-UpdateLog "No chat_active marker, restart immediately"
-        return
+        return $true
     }
     $deadline = (Get-Date).AddSeconds($MaxWaitSec)
     while ((Get-Date) -lt $deadline) {
@@ -147,16 +147,17 @@ function Wait-ChatIdleBeforeRestart {
             $age = [double]($nowUnix - $ts)
             if ($age -ge $IdleSec) {
                 Write-UpdateLog ("Chat idle for {0:N1}s (>= {1}s), safe to restart" -f $age, $IdleSec)
-                return
+                return $true
             }
             Write-UpdateLog ("Chat active {0:N1}s ago, waiting before restart..." -f $age)
         } catch {
-            Write-UpdateLog "chat_active unreadable, restart immediately: $($_.Exception.Message)"
-            return
+            Write-UpdateLog "chat_active unreadable, deferring restart for safety: $($_.Exception.Message)"
+            return $false
         }
         Start-Sleep -Seconds 3
     }
-    Write-UpdateLog "Chat still active after ${MaxWaitSec}s, proceeding with forced restart"
+    Write-UpdateLog "Chat still active after ${MaxWaitSec}s, deferring restart; next scheduled run will retry"
+    return $false
 }
 
 function Stop-KnowledgeCenter {

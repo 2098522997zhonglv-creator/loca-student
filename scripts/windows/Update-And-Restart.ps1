@@ -85,7 +85,12 @@ Sync-BundledSkills
 
 if ($changed) {
     Write-UpdateLog "Code changed, restarting Django, worker and beat..."
-    Wait-ChatIdleBeforeRestart -IdleSec 12 -MaxWaitSec 90
+    $chatIdle = Wait-ChatIdleBeforeRestart -IdleSec 12 -MaxWaitSec 90
+    if (-not $chatIdle) {
+        Write-UpdateLog "Active chat detected; keeping current services alive and deferring restart"
+        Write-UpdateLog "==== auto-update deferred ===="
+        exit 0
+    }
     Stop-CeleryBeat
     Stop-ReviewWorker
     Stop-KnowledgeCenter

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -24,6 +25,11 @@ from .telemetry_context import get_telemetry_context, set_telemetry_context
 from .tool_result import ToolResult, adapt_mcp_tool_result
 
 _BACKGROUND_CALLS: set = set()
+_NOOP_SCREENSHOT_DIR_READ = re.compile(
+    r"\s*(?:(?:const|let|var)\s+[\w$]+\s*=\s*)?"
+    r"process\.env\.SCREENSHOT_DIR\s*;?\s*",
+    re.I,
+)
 
 
 def _command(args):
@@ -72,8 +78,9 @@ def _start_call_once(task_id, call_id, name, args):
     previous = AgentStep.objects.filter(task=task, step_id=call_id).first()
     if previous:
         return {"replay": previous.structured_result or {"status": previous.status}, "precharged": False}
-    if task.status in {"completed", "failed", "cancelled", "cancelling"}:
-        return {"reject": "任务已结束或正在取消，不启动新的动作。", "precharged": False}
+    if task.status in {"completed", "failed", "cancelled", "cancelling", "blocked"}:
+        reason = "任务已阻塞" if task.status == "blocked" else "任务已结束或正在取消"
+        return {"reject": f"{reason}，不启动新的动作。", "precharged": False}
     latest_step = AgentStep.objects.filter(task=task).aggregate(value=Max("step_number"))["value"] or 0
     # `current_step` can lag after an interrupted write or be advanced by
     # budget accounting. The persisted ledger is authoritative for numbering.
@@ -157,6 +164,43 @@ def finish_call(task_id, call_id, name, args, result, duration_ms):
         data["side_effect_possible"] = bool(writes > len(responses))
     result["data"] = data
     facts = dict(task.facts or {})
+    script = str(args.get("script") or args.get("command") or "").strip()
+    noop_probe = bool(
+        name == "execute_skill_script"
+        and not args.get("commands")
+        and _NOOP_SCREENSHOT_DIR_READ.fullmatch(script)
+    )
+    loop_guard_blocked = False
+    previous_probe = facts.get("last_noop_screenshot_dir_probe") or {}
+    if noop_probe:
+        same_probe = (
+            previous_probe.get("command") == script
+        )
+        repeat_count = int(previous_probe.get("repeat_count") or 0) + 1 if same_probe else 1
+        facts["last_noop_screenshot_dir_probe"] = {
+            "command": script,
+            "repeat_count": repeat_count,
+        }
+        if repeat_count >= 2:
+            data["loop_guard"] = "repeated_no_progress_probe"
+            data["next_action"] = (
+                "SCREENSHOT_DIR 已读取过；复用第一次结果，禁止再次调用同一查询，继续页面验证。"
+            )
+            result["data"] = data
+            result["summary"] = (
+                "重复的 SCREENSHOT_DIR 查询已被识别；复用第一次结果并继续任务。"
+            )
+        if repeat_count >= 3:
+            loop_guard_blocked = True
+            result["status"] = "failed"
+            result["error_code"] = "no_progress_repeated_probe"
+            result["summary"] = (
+                "同一 SCREENSHOT_DIR 只读探测已连续执行三次。任务已阻塞；"
+                "用户继续后复用第一次结果，不要再次读取该变量。"
+            )
+    else:
+        facts.pop("last_noop_screenshot_dir_probe", None)
+
     state = facts.get("browser_test")
     if state:
         state = browser_tests.observe(state, tool_name=name, result=result, command=_command(args))
@@ -164,9 +208,12 @@ def finish_call(task_id, call_id, name, args, result, duration_ms):
         if notice:
             data["next_action"] = notice
         _sync_test_progress(task, state)
-    else:
+    elif not loop_guard_blocked:
         # Existing UI/API plans still use the existing acceptance predicates.
         advance_task_stage(task, tool_results=[json.dumps(result, ensure_ascii=False)])
+    if loop_guard_blocked:
+        task.status = "blocked"
+        task.error_message = "no_progress_loop: repeated SCREENSHOT_DIR probe"
     task.save(update_fields=["facts", "budget", "current_stage", "plan_version", "updated_at"])
     if state and task.current_stage != "fetch_conditions":
         from .task_orchestrator.node_runtime import apply_remount_to_context
@@ -180,6 +227,17 @@ def finish_call(task_id, call_id, name, args, result, duration_ms):
     step.save()
     append_event(task, "step_result", step_id=call_id, status=step.status,
                  payload={"tool_name": name, "operation_id": step.operation_id, "stage": task.current_stage})
+    if loop_guard_blocked:
+        AgentTask.objects.filter(pk=task.pk).update(
+            status="blocked", error_message=task.error_message
+        )
+        append_event(
+            task,
+            "task_blocked",
+            status="blocked",
+            step_id=call_id,
+            payload={"blocker_code": "no_progress_repeated_probe"},
+        )
     if task.status == "cancelling":
         finalize_cancel(task)
     return result

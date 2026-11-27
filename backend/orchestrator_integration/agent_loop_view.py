@@ -483,6 +483,15 @@ _MAX_SAFE_TOOL_MESSAGE_CHARS = _get_env_int(
 )
 
 
+async def _keep_chat_activity_fresh(session_id: str, interval_seconds: float = 5.0):
+    """Refresh the updater marker for the full lifetime of a streaming agent turn."""
+    from orchestrator_integration.chat_activity import touch_chat_active
+
+    while True:
+        touch_chat_active(session_id=session_id, reason="agent_loop_heartbeat")
+        await asyncio.sleep(max(1.0, interval_seconds))
+
+
 def _extract_linked_image_urls(text: str) -> List[str]:
     """从用户消息中提取图片 URL（支持 Markdown 图片语法和纯 URL）。"""
     if not text:
@@ -1308,6 +1317,7 @@ class AgentLoopStreamAPIView(View):
         similarity_threshold, top_k = _normalize_kb_search_params(
             similarity_threshold, top_k
         )
+        chat_activity_task = None
 
         # 尽早推送 start，避免知识库预检索/Rerank 阻塞导致前端长时间无任何 SSE
         yield create_sse_data(
@@ -1322,6 +1332,9 @@ class AgentLoopStreamAPIView(View):
             }
         )
 
+        chat_activity_task = asyncio.create_task(
+            _keep_chat_activity_fresh(session_id)
+        )
         try:
             attached_files = await sync_to_async(validate_file_ids)(file_ids, project, request.user)
             llm_attachment_context = await sync_to_async(build_llm_attachment_context)(attached_files)
@@ -3951,6 +3964,14 @@ class AgentLoopStreamAPIView(View):
                     {"type": "error", "message": f"执行错误: {str(e)}"}
                 )
         finally:
+            if chat_activity_task is not None:
+                chat_activity_task.cancel()
+                try:
+                    await chat_activity_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as heartbeat_err:
+                    logger.debug("chat activity heartbeat cleanup failed: %s", heartbeat_err)
             # RC08：非审批停放态释放租约；已 park / 终态清空均为幂等
             try:
                 if agent_runtime is not None and getattr(
