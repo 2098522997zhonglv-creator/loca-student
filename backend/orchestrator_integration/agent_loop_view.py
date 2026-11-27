@@ -3705,6 +3705,7 @@ class AgentLoopStreamAPIView(View):
                 from orchestrator_integration.final_response_policy import (
                     correction_for_executor_deferral,
                     requests_user_to_remount_executor,
+                    should_attempt_checkpoint_continue,
                     should_attempt_executor_recovery,
                 )
 
@@ -3712,12 +3713,14 @@ class AgentLoopStreamAPIView(View):
                 # even though the executor is present. Do one bounded server-side
                 # continuation when the task has unfinished business and tool budget;
                 # correcting that answer and blocking the task would strand it here.
+                # Phase 1 also continues once when the model early-finals with
+                # unfinished checkpoints (e.g. 1/3 done) while budget remains.
                 deferred_execution_recovered = False
+                checkpoint_continue_attempted = False
                 if (
                     not user_stopped
                     and not interrupt_detected
                     and executor_mounted
-                    and requests_user_to_remount_executor(final_ai_text)
                     and runtime_task is not None
                 ):
                     try:
@@ -3746,7 +3749,7 @@ class AgentLoopStreamAPIView(View):
                     _retry_expected = int(
                         _retry_budget.get("expected_business_steps") or 0
                     )
-                    if should_attempt_executor_recovery(
+                    _do_remount_continue = should_attempt_executor_recovery(
                         response_text=final_ai_text,
                         executor_mounted=executor_mounted,
                         user_stopped=user_stopped,
@@ -3756,14 +3759,34 @@ class AgentLoopStreamAPIView(View):
                         max_tool_actions=_retry_max,
                         completed_business_steps=_retry_completed,
                         expected_business_steps=_retry_expected,
-                    ):
+                    )
+                    _do_checkpoint_continue = should_attempt_checkpoint_continue(
+                        response_text=final_ai_text,
+                        executor_mounted=executor_mounted,
+                        user_stopped=user_stopped,
+                        interrupt_detected=interrupt_detected,
+                        used_tool_actions=_retry_used,
+                        reserved_tool_actions=_retry_reserved,
+                        max_tool_actions=_retry_max,
+                        completed_business_steps=_retry_completed,
+                        expected_business_steps=_retry_expected,
+                        acceptance_ok=None,
+                    )
+                    if _do_remount_continue or _do_checkpoint_continue:
+                        checkpoint_continue_attempted = bool(_do_checkpoint_continue)
+                        _retry_reason = (
+                            "模型提前终答但业务检查点未齐"
+                            if _do_checkpoint_continue and not _do_remount_continue
+                            else "执行工具已挂载且仍有工具预算"
+                        )
                         _retry_instruction = SystemMessage(
                             id=f"deferred-execution-retry-{uuid.uuid4().hex}",
                             content=(
-                                "服务端检测到当前任务尚未完成，而本轮执行工具已挂载且仍有工具预算。"
+                                f"服务端检测到当前任务尚未完成（{_retry_reason}）。"
                                 "这是一次受控续跑：继续完成原用户目标和当前未完成阶段，不要要求用户重新挂载、重发或确认；"
                                 "先检查已有执行记录/当前状态，跳过已经完成的业务动作，不要重复提交或重复写入。"
                                 "按原授权边界执行；若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
+                                "禁止在业务检查点未齐时宣称任务完成。"
                             ),
                         )
                         try:
@@ -4076,7 +4099,11 @@ class AgentLoopStreamAPIView(View):
                         )
 
                         _auto_ok = bool(deferred_execution_recovered)
-                        _auto_attempted = bool(deferred_execution_recovered) or (
+                        _auto_attempted = bool(deferred_execution_recovered) or bool(
+                            checkpoint_continue_attempted
+                            if "checkpoint_continue_attempted" in locals()
+                            else False
+                        ) or (
                             bool(executor_mounted)
                             and requests_user_to_remount_executor(
                                 original_final_ai_text or ""
