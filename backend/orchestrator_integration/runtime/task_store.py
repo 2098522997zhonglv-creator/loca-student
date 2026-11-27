@@ -142,18 +142,30 @@ class TaskStore:
                 scope["constraints"] = constraints
         task.task_scope = scope
         if auth_scope:
-            merged = dict(task.auth_scope or {})
-            allow = set(merged.get("allow_actions") or [])
-            deny = set(merged.get("deny_actions") or [])
-            allow |= set(auth_scope.get("allow_actions") or [])
-            deny |= set(auth_scope.get("deny_actions") or [])
-            allow -= deny
-            merged["allow_actions"] = sorted(allow)
-            merged["deny_actions"] = sorted(deny)
-            for k, v in auth_scope.items():
-                if k not in {"allow_actions", "deny_actions"} and k not in merged:
-                    merged[k] = v
-            task.auth_scope = merged
+            # 阶段3：继续不静默扩权；新 allow 进入 pending
+            try:
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    merge_auth_scope_for_continue,
+                )
+
+                task.auth_scope = merge_auth_scope_for_continue(
+                    task.auth_scope or {},
+                    auth_scope,
+                    require_l3_for_new_allows=True,
+                )
+            except Exception:
+                merged = dict(task.auth_scope or {})
+                allow = set(merged.get("allow_actions") or [])
+                deny = set(merged.get("deny_actions") or [])
+                allow |= set(auth_scope.get("allow_actions") or [])
+                deny |= set(auth_scope.get("deny_actions") or [])
+                allow -= deny
+                merged["allow_actions"] = sorted(allow)
+                merged["deny_actions"] = sorted(deny)
+                for k, v in auth_scope.items():
+                    if k not in {"allow_actions", "deny_actions"} and k not in merged:
+                        merged[k] = v
+                task.auth_scope = merged
         pb_id = ""
         if commission is not None:
             pb_id = str(getattr(commission, "playbook_id", "") or "")

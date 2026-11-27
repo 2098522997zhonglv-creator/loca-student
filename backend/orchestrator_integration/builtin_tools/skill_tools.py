@@ -1424,7 +1424,7 @@ def get_skill_tools(
             if not skill_dir or not os.path.isdir(skill_dir):
                 return f"错误: Skill '{skill_name}' 目录不存在"
 
-            # 阶段2：同任务同幂等键的副作用已成功 → 跳过重放
+            # 阶段2/3：授权门禁 + 同任务同幂等键副作用跳过重放
             try:
                 from orchestrator_integration.resume_execution import (
                     guard_side_effect_replay,
@@ -1433,6 +1433,9 @@ def get_skill_tools(
                     get_telemetry_context,
                 )
                 from orchestrator_integration.models import AgentTask
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    authorize_tool_call,
+                )
                 import json as _json
 
                 _ctx = get_telemetry_context()
@@ -1448,6 +1451,31 @@ def get_skill_tools(
                     if _tid:
                         _task = AgentTask.objects.filter(public_task_id=str(_tid)).first()
                 if _task is not None:
+                    _auth = authorize_tool_call(
+                        auth_scope=getattr(_task, "auth_scope", None) or {},
+                        skill_name=skill_name or "",
+                        command=command or "",
+                    )
+                    if not _auth.get("ok"):
+                        logger.info(
+                            "[execute_skill_script] auth denied task=%s code=%s",
+                            _task.public_task_id or _task.pk,
+                            _auth.get("error_code"),
+                        )
+                        return _json.dumps(
+                            {
+                                "status": "blocked",
+                                "execution_status": "blocked",
+                                "reason": _auth.get("error_code") or "auth_denied",
+                                "retryable": False,
+                                "summary": _auth.get("message")
+                                or "动作未授权，禁止执行",
+                                "recovery": _auth.get("recovery") or "",
+                                "risk": _auth.get("risk") or {},
+                                "auth": _auth.get("auth") or {},
+                            },
+                            ensure_ascii=False,
+                        )
                     _guard = guard_side_effect_replay(
                         _task, skill_name=skill_name or "", command=command or ""
                     )
