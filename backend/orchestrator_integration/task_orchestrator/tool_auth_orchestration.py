@@ -18,6 +18,122 @@ from orchestrator_integration.execution_policy import command_side_effect
 RiskLevel = str  # read | write | irreversible | l3 | execute | unknown
 
 
+def persist_granted_skills(
+    task,
+    skill_names: Sequence[str] | Set[str],
+    *,
+    commission: Any = None,
+) -> Dict[str, Any]:
+    """将获批 Skill 持久化进任务有效授权，并同步 commission / telemetry。
+
+    供 request_tool_expansion / 二层备用启用后调用，确保后续 read/execute
+    门禁读取到同一份授权，而不是只改内存提示词。
+    """
+    names = {str(s).strip() for s in (skill_names or []) if str(s).strip()}
+    if not names:
+        return {"ok": False, "allowed_skills": [], "reason": "empty"}
+
+    allowed: Set[str] = set()
+    try:
+        auth = dict(getattr(task, "auth_scope", None) or {})
+        allowed = set(auth.get("allowed_skills") or []) | names
+        auth["allowed_skills"] = sorted(allowed)
+        task.auth_scope = auth
+        type(task).objects.filter(pk=task.pk).update(auth_scope=auth)
+    except Exception:
+        pass
+
+    try:
+        facts = dict(getattr(task, "facts", None) or {})
+        prev_g = set(facts.get("granted_auxiliary") or [])
+        prev_fb = set(facts.get("activated_fallbacks") or [])
+        facts["granted_auxiliary"] = sorted(prev_g | names)
+        facts["activated_fallbacks"] = sorted(prev_fb | names)
+        task.facts = facts
+        type(task).objects.filter(pk=task.pk).update(facts=facts)
+    except Exception:
+        pass
+
+    if commission is not None:
+        try:
+            if hasattr(commission, "grant_skills"):
+                allowed = set(commission.grant_skills(names) or []) | allowed
+            else:
+                commission.granted_auxiliary = set(
+                    getattr(commission, "granted_auxiliary", None) or []
+                ) | names
+                commission.primary_skills = frozenset(
+                    set(getattr(commission, "primary_skills", None) or []) | names
+                )
+                allowed = set(commission.primary_skills) | set(
+                    commission.granted_auxiliary
+                ) | allowed
+        except Exception:
+            pass
+
+    try:
+        from orchestrator_integration.telemetry_context import get_telemetry_context
+
+        ctx = get_telemetry_context()
+        ctx.granted_skills = set(ctx.granted_skills or []) | names | allowed
+        if commission is not None:
+            ctx.commission = commission
+        if ctx.orchestrator_mount is not None:
+            try:
+                ctx.orchestrator_mount.skill_allowlist = set(
+                    getattr(ctx.orchestrator_mount, "skill_allowlist", None) or []
+                ) | names
+                ctx.orchestrator_mount.activated_fallbacks = set(
+                    getattr(ctx.orchestrator_mount, "activated_fallbacks", None)
+                    or []
+                ) | names
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "allowed_skills": sorted(allowed | names),
+        "granted": sorted(names),
+    }
+
+
+def restore_granted_skills_from_task(task, commission: Any = None) -> Set[str]:
+    """从任务 auth_scope / facts 恢复已获批 Skill 到 commission。"""
+    names: Set[str] = set()
+    try:
+        auth = dict(getattr(task, "auth_scope", None) or {})
+        names |= {str(s).strip() for s in (auth.get("allowed_skills") or []) if s}
+    except Exception:
+        pass
+    try:
+        facts = dict(getattr(task, "facts", None) or {})
+        names |= {
+            str(s).strip() for s in (facts.get("granted_auxiliary") or []) if s
+        }
+        names |= {
+            str(s).strip() for s in (facts.get("activated_fallbacks") or []) if s
+        }
+    except Exception:
+        pass
+    names = {n for n in names if n}
+    if commission is not None and names:
+        try:
+            if hasattr(commission, "grant_skills"):
+                commission.grant_skills(names)
+            else:
+                commission.granted_auxiliary = set(
+                    getattr(commission, "granted_auxiliary", None) or []
+                ) | names
+                commission.primary_skills = frozenset(
+                    set(getattr(commission, "primary_skills", None) or []) | names
+                )
+        except Exception:
+            pass
+    return names
+
+
 def classify_tool_risk(
     *,
     skill_name: str = "",

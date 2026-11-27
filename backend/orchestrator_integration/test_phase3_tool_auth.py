@@ -267,3 +267,150 @@ class Phase3ToolAuthAcceptance(TestCase):
             f"primary={split['primary']} optional={split['optional']} "
             f"ok={probe.get('ok')} opt_miss={probe.get('optional_missing')}",
         )
+
+    def test_v7_expansion_propagates_to_skill_gate(self):
+        """获批 Skill 写入有效授权后，read/execute 门放行；未获批仍拦截；无需用户「继续」。"""
+        from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
+        from orchestrator_integration.skill_zones import ZONE_KB_QA
+        from orchestrator_integration.task_commission import TaskCommission
+        from orchestrator_integration.task_orchestrator.node_runtime import (
+            apply_remount_to_context,
+        )
+        from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+            persist_granted_skills,
+            restore_granted_skills_from_task,
+        )
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        task = self._task(
+            status="running",
+            auth_scope={"allow_actions": [], "deny_actions": []},
+            facts={},
+        )
+        # 复现线上：kb_qa 区主类为空，扩权前全部 Skill 被拦
+        commission = TaskCommission(
+            task_id="p3-expand",
+            zone_id=ZONE_KB_QA,
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset(
+                {"playwright-skill", "browser-use", "loca-stude"}
+            ),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+        )
+        self.assertEqual(commission.effective_allowlist(), set())
+
+        tools = {
+            t.name: t
+            for t in get_skill_tools(
+                user_id=1,
+                project_id=1,
+                allowed_skill_names=set(),  # 创建时空白名单（closed-over）
+                allow_execute=True,
+            )
+        }
+        set_telemetry_context(
+            TelemetryContext(
+                zone=ZONE_KB_QA,
+                commission=commission,
+                runtime_task_id=task.pk,
+                granted_skills=set(),
+            )
+        )
+        try:
+            denied_before = tools["read_skill_content"].invoke(
+                {"skill_name": "playwright-skill"}
+            )
+            before_blocked = "不在本任务主类授权内" in denied_before or "辅类" in denied_before
+
+            # 模拟 request_tool_expansion granted → remount + persist
+            apply_remount_to_context({"playwright-skill"})
+            persisted = persist_granted_skills(
+                task, {"playwright-skill"}, commission=commission
+            )
+            task.refresh_from_db()
+            allow_after = commission.effective_allowlist() or set()
+            auth_skills = set((task.auth_scope or {}).get("allowed_skills") or [])
+            facts_g = set((task.facts or {}).get("granted_auxiliary") or [])
+
+            ok_after = tools["read_skill_content"].invoke(
+                {"skill_name": "playwright-skill"}
+            )
+            still_blocked = (
+                "不在本任务主类授权内" in ok_after
+                or "辅类，尚未授权" in ok_after
+                or "不在本轮分区白名单" in ok_after
+            )
+
+            # 未获批等价执行器仍拦截
+            denied_other = tools["read_skill_content"].invoke(
+                {"skill_name": "browser-use"}
+            )
+            other_blocked = (
+                "不在本任务主类授权内" in denied_other
+                or "辅类" in denied_other
+                or "尚未授权" in denied_other
+            )
+
+            # 跨轮恢复：新 commission 从任务读回授权
+            commission2 = TaskCommission(
+                task_id="p3-expand-2",
+                zone_id=ZONE_KB_QA,
+                playbook_id="",
+                primary_skills=frozenset(),
+                auxiliary_skills=frozenset({"playwright-skill", "browser-use"}),
+                short_circuit=False,
+                draft_writes=False,
+                channel="light",
+            )
+            restored = restore_granted_skills_from_task(task, commission=commission2)
+            restore_ok = "playwright-skill" in restored and (
+                "playwright-skill" in (commission2.effective_allowlist() or set())
+            )
+
+            self._record(
+                "P3-V7-expansion-propagate",
+                before_blocked
+                and not still_blocked
+                and other_blocked
+                and "playwright-skill" in allow_after
+                and "playwright-skill" in auth_skills
+                and "playwright-skill" in facts_g
+                and persisted.get("ok") is True
+                and restore_ok,
+                f"before_blocked={before_blocked} still_blocked={still_blocked} "
+                f"other_blocked={other_blocked} allow={sorted(allow_after)} "
+                f"auth={sorted(auth_skills)} restore={sorted(restored)} "
+                f"retry_note=no_user_continue",
+            )
+        finally:
+            set_telemetry_context(None)
+
+    def test_v8_kb_qa_effective_allowlist_honors_grants(self):
+        """kb_qa 区不得因默认空主类丢弃已写入的 granted_auxiliary。"""
+        from orchestrator_integration.skill_zones import ZONE_KB_QA
+        from orchestrator_integration.task_commission import TaskCommission
+
+        c = TaskCommission(
+            task_id="kb-grant",
+            zone_id=ZONE_KB_QA,
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset({"playwright-skill"}),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+        )
+        empty_ok = c.effective_allowlist() == set()
+        c.grant_skills({"playwright-skill"})
+        granted = c.effective_allowlist() or set()
+        self._record(
+            "P3-V8-kb-qa-grant",
+            empty_ok and "playwright-skill" in granted,
+            f"empty_ok={empty_ok} granted={sorted(granted)}",
+        )

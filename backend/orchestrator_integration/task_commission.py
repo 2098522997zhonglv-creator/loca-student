@@ -57,11 +57,23 @@ class TaskCommission:
     last_tool_results: list = field(default_factory=list)
 
     def effective_allowlist(self) -> Optional[Set[str]]:
+        granted = set(self.primary_skills or []) | set(self.granted_auxiliary or [])
+        # kb_qa 默认禁止 Skill；但编排/扩权已写入的主类或辅类授权必须生效，
+        # 否则 request_tool_expansion 会 granted 而 read/execute 仍被空集拦截。
         if self.zone_id == ZONE_KB_QA:
-            return set()
-        if not self.primary_skills and not self.granted_auxiliary:
+            return granted
+        if not granted:
             return None if self.zone_id == "general" else set()
-        return set(self.primary_skills) | set(self.granted_auxiliary)
+        return granted
+
+    def grant_skills(self, skill_names: Set[str] | list) -> Set[str]:
+        """将获批 Skill 并入主类+辅类授权，返回最新有效白名单。"""
+        names = {str(s).strip() for s in (skill_names or []) if str(s).strip()}
+        if not names:
+            return self.effective_allowlist() or set()
+        self.granted_auxiliary = set(self.granted_auxiliary or []) | names
+        self.primary_skills = frozenset(set(self.primary_skills or []) | names)
+        return self.effective_allowlist() or set()
 
     def can_escape(self) -> bool:
         return self.escape_used < self.max_escape_hatches
