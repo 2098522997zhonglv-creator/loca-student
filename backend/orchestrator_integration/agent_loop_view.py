@@ -84,9 +84,9 @@ logger = logging.getLogger(__name__)
 
 _KB_PRIORITY_HINT = """
 # 工具选择（由你按用户意图决定）
-可用工具仅限本轮实际挂载名（见「本轮意图路由」）：通常为 knowledge_search、read_skill_content、execute_skill_script（以及已配置的 MCP）。
+可用工具仅限下方「本轮已绑定工具」列出的名字（与 Agent 工具列表一致）；勿假设一定有 execute_skill_script。
 禁止把 Skill 名称（如 url-reader、loca-stude、playwright-skill）当成 tool 名直接调用。
-若某工具未挂载，说明本轮意图不需要它——不要编造调用结果。
+若某工具未列出，说明本轮未绑定——不要编造调用结果；禁止要求用户重挂工具或重新下发任务。
 
 ## 怎么选
 - 业务事实 / 环境地址 / 规则 / 流程 / 接口设计「文档里怎么写」：优先下方「知识库预检索结果」；不足时再调 knowledge_search。预检索已够用时不要重复 knowledge_search。
@@ -1802,11 +1802,26 @@ class AgentLoopStreamAPIView(View):
                 mount_execute = (
                     skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
                 )
+                # 编排一层要求执行通道时，禁止被误判的 kb_qa 区卸掉 execute
+                try:
+                    from orchestrator_integration.tool_binding_consistency import (
+                        orch_requires_execute as _orch_needs_exec,
+                    )
+
+                    if _orch_needs_exec(_orch_mount):
+                        mount_execute = True
+                except Exception:
+                    if "execute_skill_script" in set(
+                        getattr(_orch_mount, "builtin_allow", None) or set()
+                    ):
+                        mount_execute = True
                 skill_allowlist = set(_orch_mount.skill_allowlist)
                 if _preserve_exec:
                     skill_allowlist |= set(zone_skills(ZONE_BROWSER))
                 elif not skill_zone.allow_execute and kb_qa_mode:
-                    skill_allowlist = set()
+                    # 编排仍需要 skill 白名单时不得清空（否则公布≠可达）
+                    if not mount_execute:
+                        skill_allowlist = set()
                 # 将一层 skill 并入 commission 主类，避免旧 _assert 仍按辅类拒
                 try:
                     task_commission.primary_skills = frozenset(
@@ -2074,6 +2089,31 @@ class AgentLoopStreamAPIView(View):
                     } and name not in have:
                         tools.append(mt)
                         have.add(name)
+            # 编排 skip_legacy_intersect：业务步骤前恢复被意图裁剪卸掉的必需工具
+            _bind_report = None
+            try:
+                from orchestrator_integration.tool_binding_consistency import (
+                    ensure_orchestrator_tools_bound,
+                )
+
+                _bind_report = ensure_orchestrator_tools_bound(
+                    tools,
+                    orch_mount=_orch_mount,
+                    builtin_tool_pool=builtin_tools,
+                    require_execute=bool(mount_execute),
+                )
+                tools = list(_bind_report.get("tools") or tools)
+                if _bind_report.get("remounted"):
+                    logger.info(
+                        "AgentLoopStreamAPI: remounted orch-required tools before "
+                        "business steps: %s",
+                        _bind_report.get("remounted"),
+                    )
+            except Exception as _bind_err:
+                logger.warning(
+                    "AgentLoopStreamAPI: tool bind reconcile failed: %s",
+                    _bind_err,
+                )
             # 阶段允许时才重挂 KB；browser_interact 未声明则不得重挂
             _stage_allows_kb = bool(
                 not _stage_mount.get("restrict")
@@ -2201,6 +2241,24 @@ class AgentLoopStreamAPIView(View):
                     else specialist_hint_text
                 )
             mounted_names = [getattr(t, "name", str(t)) for t in tools]
+            # 公布文案与实际绑定对齐；去掉「未挂载 execute / 请用户重说」等虚报
+            try:
+                from orchestrator_integration.tool_binding_consistency import (
+                    build_bound_tools_advertise_hint,
+                    patch_advertise_hint_for_bound_tools,
+                )
+
+                intent_hint = patch_advertise_hint_for_bound_tools(
+                    intent_hint or "", mounted_names
+                )
+                _bound_adv = build_bound_tools_advertise_hint(
+                    mounted_names, skill_allowlist=skill_allowlist
+                )
+                intent_hint = (
+                    f"{intent_hint}\n\n{_bound_adv}" if intent_hint else _bound_adv
+                )
+            except Exception as _adv_err:
+                logger.debug("bound-tools advertise skipped: %s", _adv_err)
             set_telemetry_context(
                 TelemetryContext(
                     zone=skill_zone.zone_id,
@@ -2446,6 +2504,100 @@ class AgentLoopStreamAPIView(View):
                             }
                             for n in _need_skills
                         )
+                        # 业务步骤前：若编排需要执行通道但未绑定，先自动恢复挂载
+                        try:
+                            from orchestrator_integration.tool_binding_consistency import (
+                                ensure_orchestrator_tools_bound as _ensure_bind2,
+                                executor_gap_block_payload,
+                            )
+
+                            if bool(mount_execute) and not any(
+                                getattr(t, "name", "") == "execute_skill_script"
+                                for t in (tools or [])
+                            ):
+                                _pre = _ensure_bind2(
+                                    tools,
+                                    orch_mount=_orch_mount
+                                    if "_orch_mount" in locals()
+                                    else None,
+                                    builtin_tool_pool=builtin_tools
+                                    if "builtin_tools" in locals()
+                                    else [],
+                                    require_execute=True,
+                                )
+                                tools = list(_pre.get("tools") or tools)
+                                if _pre.get("remounted"):
+                                    logger.info(
+                                        "AgentLoopStreamAPI: pre-probe remounted %s",
+                                        _pre.get("remounted"),
+                                    )
+                                if not _pre.get("ok"):
+                                    _gap = executor_gap_block_payload(
+                                        missing=_pre.get("missing") or [
+                                            "execute_skill_script"
+                                        ],
+                                        remounted=_pre.get("remounted") or [],
+                                    )
+                                    _probe = {
+                                        "ok": False,
+                                        "missing": [
+                                            {
+                                                "capability": m,
+                                                "kind": "builtin",
+                                                "reason": "executor_bind_mismatch",
+                                            }
+                                            for m in (_gap.get("missing") or [])
+                                        ],
+                                        "optional_missing": [],
+                                        "recovery": [_gap.get("recovery") or ""],
+                                        "blocker_code": "executor_bind_mismatch",
+                                        "message": _gap.get("message"),
+                                    }
+                                    _blk = await sync_to_async(
+                                        block_task_for_missing_env
+                                    )(runtime_task, _probe)
+                                    _msg_text = "；".join(
+                                        _gap.get("reasons") or [_gap.get("message")]
+                                    )
+                                    if _gap.get("recovery"):
+                                        _msg_text = (
+                                            f"{_msg_text}\n恢复：{_gap['recovery']}"
+                                        )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "task_blocked",
+                                            "task_id": getattr(
+                                                runtime_task, "public_task_id", ""
+                                            )
+                                            or str(getattr(runtime_task, "id", "")),
+                                            "status": "blocked",
+                                            "acceptance": _blk.get("acceptance"),
+                                            "message_kind": "final",
+                                        }
+                                    )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "stream",
+                                            "data": _msg_text,
+                                            "message_kind": "final",
+                                        }
+                                    )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "complete",
+                                            "status": "blocked",
+                                            "task_status": "blocked",
+                                            "message_kind": "final",
+                                            "closure": _blk,
+                                        }
+                                    )
+                                    yield "data: [DONE]\n\n"
+                                    return
+                        except Exception as _pre_bind_err:
+                            logger.warning(
+                                "AgentLoopStreamAPI: pre-probe remount failed: %s",
+                                _pre_bind_err,
+                            )
                         _avail = resolve_available_skill_names(
                             auth_scope=auth_scope,
                             mounted_tool_names=[

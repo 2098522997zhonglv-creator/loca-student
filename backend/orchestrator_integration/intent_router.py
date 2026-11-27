@@ -760,9 +760,9 @@ def build_intent_hint(
         lines.extend(
             [
                 "- 本轮以知识库问答为主：优先用预检索或历史已答缓存；不足时再 knowledge_search，须标注来源。",
-                "- 未挂载 execute_skill_script；不要编造落库、执行 Skill 或浏览器操作。",
-                "- 若用户其实要保存/知识沉淀/执行 Skill/读网页：不要硬调不存在的工具；"
-                "请明确请用户重说「保存到平台」「沉淀到知识库」或「执行 skill」。",
+                "- 若本轮未绑定 execute_skill_script：不要编造落库、执行 Skill 或浏览器操作。",
+                "- 若编排/续跑需要执行通道：由服务端在开跑前恢复挂载或明确 blocked；"
+                "禁止要求用户重新下发任务或手动重挂工具。",
             ]
         )
     if INTENT_WRITE in decision.intents and (
