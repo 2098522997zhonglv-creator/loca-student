@@ -114,6 +114,29 @@ test('deferred-executor and exhausted-budget details do not create duplicate cha
   }), true);
 });
 
+test('task_blocked acceptance reasons stay on the card instead of a duplicate chat bubble', () => {
+  assert.equal(shouldAppendTaskTerminalMessage({
+    type: 'task_blocked',
+    status: 'blocked',
+    acceptance: {
+      ok: false,
+      reasons: ['写入路径异常且无确认草稿', '验收条件缺少合格证据: single:check:0'],
+      blockers: [
+        { blocker_code: 'missing_evidence' },
+        { blocker_code: 'acceptance_failed' },
+      ],
+    },
+  }), false);
+  assert.equal(shouldAppendTaskTerminalMessage({
+    type: 'task_completed',
+    status: 'completed',
+    acceptance: { ok: true, reasons: [] },
+  }), false);
+  assert.equal(shouldAppendTaskTerminalMessage({
+    type: 'task_status', status: 'cancelled',
+  }), true);
+});
+
 test('resuming a blocked task clears its stale acceptance from the live progress card', () => {
   const stream = {
     taskStatus: 'blocked',

@@ -25,6 +25,15 @@ CLAIM_RANK = {
     "inference": 1,
 }
 
+# Align with expected_business_steps_from_plan: conversation-only ``single``
+# (and empty ids) are not business checkpoints and must not invent
+# ``single:check:0`` missing_evidence while progress shows ``0/—``.
+_NON_BUSINESS_STAGE_IDS = frozenset({"single", ""})
+
+
+def _is_business_stage(stage_id: str) -> bool:
+    return str(stage_id or "").strip() not in _NON_BUSINESS_STAGE_IDS
+
 
 def classify_claim_level(
     *,
@@ -101,12 +110,17 @@ def _criteria_from_stage_plan(stage_plan: Sequence[Any]) -> List[Dict[str, Any]]
         if not isinstance(s, dict):
             continue
         sid = str(s.get("stage_id") or s.get("node_id") or "")
+        if not _is_business_stage(sid):
+            continue
         checks = list(s.get("completion_checks") or [])
         if s.get("acceptance") and not checks:
             checks = [s.get("acceptance")]
         # 兼容 tool_auth manifest 风格
         if not checks and s.get("acceptance_evidence"):
             checks = list(s.get("acceptance_evidence") or [])
+        # summarize without acceptance is not a business checkpoint
+        if sid == "summarize" and not checks:
+            continue
         for i, c in enumerate(checks):
             if isinstance(c, dict):
                 cid = str(c.get("criterion_id") or c.get("id") or f"{sid}:{i}")
@@ -140,6 +154,8 @@ def _criteria_from_task_plan(facts: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not isinstance(node, dict):
             continue
         nid = str(node.get("node_id") or "")
+        if not _is_business_stage(nid):
+            continue
         for i, c in enumerate(node.get("completion_checks") or []):
             if isinstance(c, dict):
                 out.append(

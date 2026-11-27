@@ -46,6 +46,23 @@ export function isNoopCompletedTask(
 
 /** Terminal execution policy details belong in the task card, not a duplicate chat bubble. */
 export function shouldAppendTaskTerminalMessage(event: Record<string, any>): boolean {
+  const type = String(event.type || '');
+  const st = String(event.status || '');
+  // Ambiguous resume needs an in-chat prompt; the task card alone is not enough.
+  if (type === 'task_status' && st === 'ambiguous') return true;
+  // Cancelled status is a short lifecycle notice (not an acceptance dump).
+  if (st === 'cancelled' || st === 'cancelling') return true;
+  // Blocked/completed reasons already appear on the task card; appending another
+  // system bubble duplicates the model final answer when it restates the same
+  // acceptance.reasons / recovery text.
+  if (
+    type === 'task_blocked'
+    || type === 'task_completed'
+    || st === 'blocked'
+    || st === 'completed'
+  ) {
+    return false;
+  }
   const blockers = event.acceptance?.blockers
     || event.payload?.acceptance?.blockers
     || [];
@@ -53,7 +70,10 @@ export function shouldAppendTaskTerminalMessage(event: Record<string, any>): boo
     ? blockers.map((b: Record<string, unknown>) => String(b?.blocker_code || ''))
     : [];
   if (codes.includes('assistant_deferred_executor_mount')
-      || codes.includes('execution_budget_exhausted_no_progress')) return false;
+      || codes.includes('execution_budget_exhausted_no_progress')
+      || codes.includes('missing_evidence')
+      || codes.includes('acceptance_failed')
+      || codes.includes('missing_capability')) return false;
   return true;
 }
 
