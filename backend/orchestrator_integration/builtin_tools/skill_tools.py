@@ -1424,6 +1424,116 @@ def get_skill_tools(
             if not skill_dir or not os.path.isdir(skill_dir):
                 return f"错误: Skill '{skill_name}' 目录不存在"
 
+            # 阶段2/3：授权门禁 + 同任务同幂等键副作用跳过重放
+            try:
+                from orchestrator_integration.resume_execution import (
+                    guard_side_effect_replay,
+                )
+                from orchestrator_integration.telemetry_context import (
+                    get_telemetry_context,
+                )
+                from orchestrator_integration.models import AgentTask
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    authorize_tool_call,
+                )
+                import json as _json
+
+                _ctx = get_telemetry_context()
+                _task = None
+                if getattr(_ctx, "runtime_task_id", None):
+                    _task = AgentTask.objects.filter(
+                        public_task_id=str(_ctx.runtime_task_id)
+                    ).first() or AgentTask.objects.filter(
+                        pk=_ctx.runtime_task_id
+                    ).first()
+                if _task is None and getattr(_ctx, "commission", None) is not None:
+                    _tid = getattr(_ctx.commission, "task_id", "") or ""
+                    if _tid:
+                        _task = AgentTask.objects.filter(public_task_id=str(_tid)).first()
+                if _task is not None:
+                    _auth = authorize_tool_call(
+                        auth_scope=getattr(_task, "auth_scope", None) or {},
+                        skill_name=skill_name or "",
+                        command=command or "",
+                    )
+                    if not _auth.get("ok"):
+                        logger.info(
+                            "[execute_skill_script] auth denied task=%s code=%s",
+                            _task.public_task_id or _task.pk,
+                            _auth.get("error_code"),
+                        )
+                        return _json.dumps(
+                            {
+                                "status": "blocked",
+                                "execution_status": "blocked",
+                                "reason": _auth.get("error_code") or "auth_denied",
+                                "retryable": False,
+                                "summary": _auth.get("message")
+                                or "动作未授权，禁止执行",
+                                "recovery": _auth.get("recovery") or "",
+                                "risk": _auth.get("risk") or {},
+                                "auth": _auth.get("auth") or {},
+                            },
+                            ensure_ascii=False,
+                        )
+                    _guard = guard_side_effect_replay(
+                        _task, skill_name=skill_name or "", command=command or ""
+                    )
+                    if _guard.get("skip"):
+                        logger.info(
+                            "[execute_skill_script] idempotent skip task=%s key=%s step=%s reason=%s",
+                            _task.public_task_id or _task.pk,
+                            _guard.get("idempotency_key"),
+                            _guard.get("step_id"),
+                            _guard.get("reason"),
+                        )
+                        if _guard.get("must_reconcile"):
+                            _rec = _guard.get("reconcile") or {}
+                            return _json.dumps(
+                                {
+                                    "status": "unknown",
+                                    "execution_status": "unknown",
+                                    "reason": "uncertain_must_reconcile",
+                                    "retryable": False,
+                                    "idempotency_key": _guard.get("idempotency_key"),
+                                    "operation_id": _guard.get("operation_id")
+                                    or _guard.get("step_id"),
+                                    "summary": (
+                                        "结果未知：禁止重放同一副作用；"
+                                        f"请先 {_rec.get('reconcile_action') or '核对原记录'}。"
+                                    ),
+                                    "reconcile": _rec,
+                                    "data": {"prior_output": _guard.get("output_summary")},
+                                    "evidence": _guard.get("evidence") or {},
+                                },
+                                ensure_ascii=False,
+                            )
+                        return _json.dumps(
+                            {
+                                "status": "skipped",
+                                "execution_status": "skipped",
+                                "reason": "idempotent_replay_blocked",
+                                "idempotency_key": _guard.get("idempotency_key"),
+                                "operation_id": _guard.get("operation_id")
+                                or _guard.get("step_id"),
+                                "summary": (
+                                    "相同副作用已成功执行过，已跳过重放；"
+                                    f"沿用原证据 operation_id={_guard.get('operation_id') or _guard.get('step_id')}"
+                                ),
+                                "data": {
+                                    "prior_output": _guard.get("output_summary"),
+                                    "prior_structured": _guard.get("structured_result")
+                                    or {},
+                                },
+                                "evidence": _guard.get("evidence") or {},
+                            },
+                            ensure_ascii=False,
+                        )
+            except Exception as _guard_err:
+                logger.debug(
+                    "[execute_skill_script] idempotent guard skipped: %s", _guard_err
+                )
+
             logger.info(f"[execute_skill_script] 在目录 {skill_dir} 执行: {command}")
 
             env = os.environ.copy()

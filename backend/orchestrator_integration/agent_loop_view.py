@@ -1729,18 +1729,28 @@ class AgentLoopStreamAPIView(View):
                 if _preserve_exec and isinstance(
                     getattr(_prior_task, "auth_scope", None), dict
                 ):
-                    # 补充续跑：合并授权，不收缩已批准范围
+                    # 阶段3：继续不静默扩权；新 allow → pending
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        merge_auth_scope_for_continue,
+                    )
+
                     prior_auth = dict(_prior_task.auth_scope or {})
-                    for k in ("allow_actions", "deny_actions", "deliver_identifiers"):
+                    _auth_scope0 = merge_auth_scope_for_continue(
+                        prior_auth,
+                        _auth_scope0,
+                        require_l3_for_new_allows=True,
+                    )
+                    if prior_auth.get("requires_wysiwyg_upload"):
+                        _auth_scope0["requires_wysiwyg_upload"] = True
+                    for k in ("deliver_identifiers",):
                         merged = list(
                             dict.fromkeys(
                                 list(prior_auth.get(k) or [])
-                                + list(_auth_scope0.get(k) or [])
+                                + list((_auth_scope0.get(k) or []))
                             )
                         )
-                        _auth_scope0[k] = merged
-                    if prior_auth.get("requires_wysiwyg_upload"):
-                        _auth_scope0["requires_wysiwyg_upload"] = True
+                        if merged:
+                            _auth_scope0[k] = merged
                 if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
                     _orch_plan = plan_from_dict(_prior_facts.get("task_plan"))
                     # 与 DB current_stage 对齐，避免 facts 滞后导致挂载停在首节点
@@ -2124,6 +2134,51 @@ class AgentLoopStreamAPIView(View):
                     intent_hint = (
                         f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
                     )
+            # 阶段2：续跑注入幂等计划（跳过已完成、未知先核对）
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.resume_execution import (
+                        build_resume_plan,
+                    )
+
+                    _rplan = build_resume_plan(_prior_task)
+                    _rhint = (_rplan or {}).get("hint") or ""
+                    if _rhint:
+                        intent_hint = (
+                            f"{intent_hint}\n\n{_rhint}" if intent_hint else _rhint
+                        )
+                except Exception as _rplan_err:
+                    logger.debug("resume plan hint skipped: %s", _rplan_err)
+            # 阶段3：工具与授权步骤清单
+            try:
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    build_step_tool_manifest,
+                )
+
+                _tp = None
+                if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
+                    _tp = _prior_facts.get("task_plan")
+                elif "_orch_plan" in locals() and _orch_plan is not None:
+                    try:
+                        _tp = _orch_plan.to_dict() if hasattr(_orch_plan, "to_dict") else None
+                    except Exception:
+                        _tp = None
+                _manifest = build_step_tool_manifest(
+                    stage_plan=[s.to_dict() for s in (_stage_specs or [])]
+                    if "_stage_specs" in locals() and _stage_specs
+                    else None,
+                    task_plan=_tp,
+                    auth_scope=_auth_scope0
+                    if "_auth_scope0" in locals()
+                    else (auth_scope if "auth_scope" in locals() else {}),
+                )
+                _ahint = (_manifest or {}).get("hint") or ""
+                if _ahint:
+                    intent_hint = (
+                        f"{intent_hint}\n\n{_ahint}" if intent_hint else _ahint
+                    )
+            except Exception as _auth_hint_err:
+                logger.debug("tool auth hint skipped: %s", _auth_hint_err)
             # FR04.5：探测经 finalize 模块统一构造
             try:
                 from orchestrator_integration.agent_loop_finalize import (
@@ -2251,15 +2306,17 @@ class AgentLoopStreamAPIView(View):
                     else infer_auth_scope(user_message)
                 )
                 if _preserve_exec and _prior_task is not None:
-                    # 补充话术可能带出新约束，但不得用本轮短句覆盖原 deny
+                    # 阶段3：补充话术不得静默扩大 allow
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        merge_auth_scope_for_continue,
+                    )
+
                     patch_auth = infer_auth_scope(_routing_message)
-                    allow = set(auth_scope.get("allow_actions") or [])
-                    deny = set(auth_scope.get("deny_actions") or [])
-                    allow |= set(patch_auth.get("allow_actions") or [])
-                    deny |= set(patch_auth.get("deny_actions") or [])
-                    allow -= deny
-                    auth_scope["allow_actions"] = sorted(allow)
-                    auth_scope["deny_actions"] = sorted(deny)
+                    auth_scope = merge_auth_scope_for_continue(
+                        auth_scope,
+                        patch_auth,
+                        require_l3_for_new_allows=True,
+                    )
                 if _orch_mount is not None:
                     auth_scope.update(_orch_mount.to_auth_scope_patch())
                     # 预计业务节点写入 budget 友好字段（与工具调用次数分离）
@@ -2320,6 +2377,130 @@ class AgentLoopStreamAPIView(View):
                         )
                     ),
                 )
+                # 阶段3：环境就绪检查 — 缺 Skill/执行器则立即 blocked
+                if runtime_task is not None and not (
+                    getattr(runtime_task, "task_scope", None) or {}
+                ).get("ambiguous_resume"):
+                    try:
+                        from orchestrator_integration.task_orchestrator.env_readiness import (
+                            block_task_for_missing_env,
+                            probe_required_capabilities,
+                            required_skills_from_manifest,
+                        )
+                        from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                            build_step_tool_manifest,
+                        )
+
+                        _m3 = build_step_tool_manifest(
+                            stage_plan=stages,
+                            task_plan=(
+                                (getattr(runtime_task, "facts", None) or {}).get(
+                                    "task_plan"
+                                )
+                            ),
+                            auth_scope=auth_scope,
+                        )
+                        _need = required_skills_from_manifest(_m3)
+                        # 只探测真实 Skill 名（排除 builtin）
+                        _builtins = {
+                            "knowledge_search",
+                            "read_skill_content",
+                            "execute_skill_script",
+                            "request_tool_expansion",
+                            "request_executor_heal",
+                            "assert_task_postcondition",
+                            "report_task_blocked",
+                        }
+                        _need_skills = [n for n in _need if n not in _builtins]
+                        _browser_needed = any(
+                            n
+                            in {
+                                "playwright-skill",
+                                "playwright-cli",
+                                "browser-use",
+                                "ui-automation",
+                            }
+                            for n in _need_skills
+                        )
+                        _probe = probe_required_capabilities(
+                            required_skills=_need_skills,
+                            mount_execute=bool(mount_execute),
+                            executor_mounted=bool(
+                                any(
+                                    getattr(t, "name", "") == "execute_skill_script"
+                                    for t in (tools or [])
+                                )
+                            ),
+                            browser_required=_browser_needed,
+                            browser_alive=None,  # 未探测时不因浏览器误杀
+                        )
+                        if not _probe.get("ok"):
+                            _blk = await sync_to_async(block_task_for_missing_env)(
+                                runtime_task, _probe
+                            )
+                            _msg = (
+                                (_blk.get("acceptance") or {}).get("reasons")
+                                or [_probe.get("message")]
+                            )
+                            _msg_text = "；".join(str(x) for x in _msg if x)
+                            _rec = (_blk.get("acceptance") or {}).get("recovery") or ""
+                            if _rec:
+                                _msg_text = f"{_msg_text}\n恢复：{_rec}"
+                            yield create_sse_data(
+                                {
+                                    "type": "task_blocked",
+                                    "task_id": getattr(
+                                        runtime_task, "public_task_id", ""
+                                    )
+                                    or str(getattr(runtime_task, "id", "")),
+                                    "status": "blocked",
+                                    "acceptance": _blk.get("acceptance"),
+                                    "message_kind": "final",
+                                }
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "stream",
+                                    "data": _msg_text,
+                                    "message_kind": "final",
+                                }
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "complete",
+                                    "status": "blocked",
+                                    "task_status": "blocked",
+                                    "message_kind": "final",
+                                    "closure": _blk,
+                                }
+                            )
+                            yield "data: [DONE]\n\n"
+                            return
+                        # 就绪清单写入 facts
+                        try:
+                            _facts = dict(getattr(runtime_task, "facts", None) or {})
+                            _facts["tool_auth_manifest"] = {
+                                "steps": (_m3 or {}).get("steps") or [],
+                                "auth_scope_snapshot": (_m3 or {}).get(
+                                    "auth_scope_snapshot"
+                                )
+                                or {},
+                            }
+                            _facts["env_readiness"] = {
+                                "ok": True,
+                                "missing": [],
+                            }
+                            runtime_task.facts = _facts
+                            await sync_to_async(runtime_task.save)(
+                                update_fields=["facts", "updated_at"]
+                            )
+                        except Exception:
+                            pass
+                    except Exception as _env_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: env readiness check failed: %s",
+                            _env_err,
+                        )
                 # create_or_resume 仍可能因旧逻辑返回消歧任务：必须可见，禁止静默 lease_held
                 if runtime_task is not None and (
                     getattr(runtime_task, "task_scope", None) or {}
@@ -2949,6 +3130,9 @@ class AgentLoopStreamAPIView(View):
                 current_tool_calls = []
                 interrupt_detected = False
                 user_stopped = False
+                deferred_execution_recovered = False
+                closure_result = None
+                _closure_task = None
 
                 # 15. 流式执行
                 stream_modes = ["updates", "messages"]
@@ -3872,6 +4056,92 @@ class AgentLoopStreamAPIView(View):
                             acc_err,
                         )
 
+                # 第 1 阶段：流结束强制状态闭环，禁止悬挂 running
+                closure_result = None
+                _closure_task = None
+                try:
+                    if agent_runtime and agent_runtime.task is not None:
+                        _closure_task = agent_runtime.task
+                    elif runtime_task is not None:
+                        _closure_task = runtime_task
+                except Exception:
+                    _closure_task = None
+                if _closure_task is not None:
+                    try:
+                        from orchestrator_integration.task_state_closure import (
+                            close_task_after_stream,
+                        )
+                        from orchestrator_integration.runtime_progress import (
+                            progress_event,
+                        )
+
+                        _auto_ok = bool(deferred_execution_recovered)
+                        _auto_attempted = bool(deferred_execution_recovered) or (
+                            bool(executor_mounted)
+                            and requests_user_to_remount_executor(
+                                original_final_ai_text or ""
+                            )
+                        )
+                        closure_result = await sync_to_async(close_task_after_stream)(
+                            _closure_task,
+                            user_stopped=bool(user_stopped),
+                            interrupt_detected=bool(interrupt_detected),
+                            acceptance=acceptance,
+                            auto_continue_attempted=_auto_attempted,
+                            auto_continue_succeeded=_auto_ok,
+                        )
+                        if closure_result.get("acceptance"):
+                            acceptance = closure_result["acceptance"]
+                        try:
+                            await sync_to_async(_closure_task.refresh_from_db)()
+                        except Exception:
+                            pass
+                        try:
+                            yield create_sse_data(
+                                await sync_to_async(progress_event)(_closure_task.pk)
+                            )
+                        except Exception:
+                            pass
+                        _c_status = str(closure_result.get("status") or "")
+                        _c_tid = getattr(_closure_task, "public_task_id", "") or str(
+                            getattr(_closure_task, "id", "")
+                        )
+                        if _c_status == "blocked":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_blocked",
+                                    "task_id": _c_tid,
+                                    "status": "blocked",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "completed":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_completed",
+                                    "task_id": _c_tid,
+                                    "status": "completed",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "waiting_approval":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_status",
+                                    "task_id": _c_tid,
+                                    "status": "waiting_approval",
+                                    "closure": closure_result,
+                                }
+                            )
+                    except Exception as closure_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: task state closure failed: %s",
+                            closure_err,
+                            exc_info=True,
+                        )
+
                 if user_stopped:
                     # RC09/RC10：传输结束 ≠ 业务成功；取消保持 cancelled/cancelling
                     _stop_status = "stopped"
@@ -3897,25 +4167,54 @@ class AgentLoopStreamAPIView(View):
                     logger.info(
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
-                else:
-                    # RC09：complete 只表示传输结束；业务态取 acceptance / 任务实态
-                    _biz = "finished"
-                    if acceptance is not None:
-                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    # 审批等待：complete 仍推送，task_status=waiting_approval
+                    _wait_status = "waiting_approval"
                     try:
-                        if agent_runtime and agent_runtime.task is not None:
-                            _live = str(
-                                getattr(agent_runtime.task, "status", "") or ""
+                        if _closure_task is not None:
+                            await sync_to_async(_closure_task.refresh_from_db)(
+                                fields=["status"]
                             )
-                            if _live in {
-                                "cancelled",
-                                "cancelling",
-                                "blocked",
-                                "failed",
-                            }:
-                                _biz = _live
+                            if str(_closure_task.status or "") == "awaiting_approval":
+                                _wait_status = "waiting_approval"
                     except Exception:
                         pass
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": _wait_status,
+                            "task_status": _wait_status,
+                            "message_kind": "final",
+                            "steps": step_count,
+                        }
+                    )
+                else:
+                    # RC09：complete 只表示传输结束；业务态取闭环后的持久化状态
+                    _biz = "finished"
+                    if closure_result and closure_result.get("status"):
+                        _biz = str(closure_result["status"])
+                    elif acceptance is not None:
+                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    try:
+                        _live_task = _closure_task
+                        if _live_task is None and agent_runtime and agent_runtime.task:
+                            _live_task = agent_runtime.task
+                        if _live_task is not None:
+                            await sync_to_async(_live_task.refresh_from_db)(
+                                fields=["status"]
+                            )
+                            _live = str(getattr(_live_task, "status", "") or "")
+                            from orchestrator_integration.task_state_closure import (
+                                normalize_status,
+                            )
+
+                            if _live:
+                                _biz = normalize_status(_live)
+                    except Exception:
+                        pass
+                    # 未完成不得显示成功
+                    if _biz in {"completed", "finished"} and acceptance is not None:
+                        if not acceptance.get("ok"):
+                            _biz = "blocked"
                     complete_data = {
                         "type": "complete",
                         "total_steps": step_count,
@@ -3930,6 +4229,13 @@ class AgentLoopStreamAPIView(View):
                     }
                     if acceptance is not None:
                         complete_data["acceptance"] = acceptance
+                    if closure_result is not None:
+                        complete_data["closure"] = {
+                            "action": closure_result.get("action"),
+                            "status": closure_result.get("status"),
+                            "blocker_code": closure_result.get("blocker_code"),
+                            "recovery": closure_result.get("recovery"),
+                        }
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,
