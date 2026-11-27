@@ -267,9 +267,9 @@ def zone_hint(zone: SkillZone) -> str:
     ]
     if not zone.allow_execute:
         lines.append(
-            "- 本轮未挂载执行工具，仅知识库/只读能力可用。"
-            "若会话存在已授权的未完成执行任务，服务端会在分类前自动复用并重挂工具；"
-            "禁止要求用户重写「执行 / browser-use / playwright」或「再发一句带目标的话」。"
+            "- 分区默认不挂执行工具，仅知识库/只读能力可用；"
+            "若编排一层或续跑需要执行通道，以「本轮已绑定工具」为准（服务端会自动恢复挂载）。"
+            "禁止要求用户重写「执行 / browser-use / playwright」、重新下发任务或手动重挂工具。"
             "禁止以「下一轮再说」推诿；阻塞须报告具体缺参/缺证据。"
         )
         return "\n".join(lines)
