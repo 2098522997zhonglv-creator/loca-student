@@ -123,6 +123,8 @@ def correction_for_unverified_delivery(
     acceptance: Optional[Dict[str, Any]] = None,
     completed_business_steps: int = 0,
     expected_business_steps: int = 0,
+    executor_mounted: bool = True,
+    budget_remaining: bool = True,
 ) -> str:
     acc = acceptance or {}
     reasons = [str(r) for r in (acc.get("reasons") or []) if r]
@@ -132,11 +134,26 @@ def correction_for_unverified_delivery(
         if expected_business_steps
         else f"{completed_business_steps}/—"
     )
+    if executor_mounted and budget_remaining:
+        next_step = (
+            "服务端将在预算内自动续跑采集本轮页面/截图/工具证据；"
+            "禁止要求用户代为提供执行证据或手动重挂工具。"
+        )
+    elif not executor_mounted:
+        next_step = (
+            "当前缺少已绑定的执行工具，属工具挂载阻塞；"
+            "由服务端恢复挂载后继续，禁止要求用户替 Agent 提供执行证据。"
+        )
+    else:
+        next_step = (
+            "工具预算已耗尽且仍缺本轮证据；缩小目标或提高预算后由服务端续跑，"
+            "禁止要求用户代为提供执行证据。"
+        )
     return (
         "更正：本轮不能据此声称商品检查/业务验收已完成。"
         f"业务进度 {biz}；{reason_line}。"
         "历史截图目录或上一轮产物不得当作本轮验证证据。"
-        "任务保持未完成；补齐本轮页面/截图/工具证据后发送「继续」。"
+        f"任务保持未完成；{next_step}"
     )
 
 
@@ -183,10 +200,14 @@ def should_attempt_checkpoint_continue(
     completed_business_steps: int,
     expected_business_steps: int,
     acceptance_ok: Optional[bool] = None,
+    missing_evidence: bool = False,
 ) -> bool:
-    """第 1 阶段：检查点未齐 + 有预算时，对提前终答做一次受控同轮续跑。
+    """检查点未齐 + 有预算 + 执行工具已挂载时，做一次受控同轮续跑。
 
-    与 remount 续跑互补：覆盖「完成第 1 步后模型提前结束」受控场景。
+    触发条件（满足其一即可）：
+    - 模型提前终答 / 假称验收通过
+    - 业务进度仍为 0（有检查点却未推进）
+    - 证据门禁缺本轮证据（缺证据应继续执行，勿甩给用户补证）
     """
     has_budget = (
         max_tool_actions > 0
@@ -196,15 +217,44 @@ def should_attempt_checkpoint_continue(
         expected_business_steps > 0
         and completed_business_steps < expected_business_steps
     )
+    stalled_zero = (
+        expected_business_steps > 0 and completed_business_steps <= 0
+    )
     early = looks_like_early_final_answer(response_text) or acceptance_ok is True
+    needs_evidence_run = bool(missing_evidence) or claims_unverified_business_completion(
+        response_text
+    )
+    trigger = early or stalled_zero or needs_evidence_run
     return bool(
         not user_stopped
         and not interrupt_detected
         and executor_mounted
         and has_budget
         and has_work
-        and early
+        and trigger
         and not requests_user_to_remount_executor(response_text)
+    )
+
+
+def recovery_for_missing_evidence(
+    *,
+    executor_mounted: bool,
+    budget_remaining: bool,
+) -> str:
+    """缺证据时的恢复文案：有工具+预算 → 服务端续跑；缺挂载 → 挂载阻塞。"""
+    if not executor_mounted:
+        return (
+            "工具挂载阻塞：服务端将恢复绑定 execute_skill_script 后继续采集证据；"
+            "禁止要求用户替 Agent 提供执行证据或手动重挂。"
+        )
+    if budget_remaining:
+        return (
+            "执行工具可用且预算充足：服务端将自动续跑采集本轮页面/截图/工具证据；"
+            "禁止要求用户代为提供执行证据。"
+        )
+    return (
+        "工具预算已耗尽且仍缺本轮证据；提高预算或缩小目标后由服务端续跑，"
+        "禁止要求用户代为提供执行证据。"
     )
 
 

@@ -343,14 +343,29 @@ def close_task_after_stream(
                 gated = gate_completion_on_evidence(task, acceptance)
                 acceptance = gated.get("acceptance") or acceptance
                 if not acceptance.get("ok"):
+                    try:
+                        from orchestrator_integration.final_response_policy import (
+                            recovery_for_missing_evidence,
+                        )
+
+                        _rec = recovery_for_missing_evidence(
+                            executor_mounted=bool(
+                                (getattr(task, "facts", None) or {}).get(
+                                    "executor_mounted", True
+                                )
+                            ),
+                            budget_remaining=budget_remaining(task),
+                        )
+                    except Exception:
+                        _rec = str(
+                            acceptance.get("recovery")
+                            or "服务端将自动续跑采集证据；禁止要求用户代为提供执行证据。"
+                        )
                     return _block_task(
                         task,
                         blocker_code="evidence_gate_failed",
                         reasons=list(acceptance.get("reasons") or ["证据门禁未通过"]),
-                        recovery=str(
-                            acceptance.get("recovery")
-                            or "补齐可追溯证据或消除矛盾后发送「继续」。"
-                        ),
+                        recovery=str(acceptance.get("recovery") or _rec),
                         acceptance=acceptance,
                     )
             except Exception:
@@ -380,14 +395,47 @@ def close_task_after_stream(
     # 验收已失败且已 blocked
     if acceptance is not None and not acceptance.get("ok"):
         if st in OPEN_STATUSES or st == "running":
+            _acc_recovery = str(acceptance.get("recovery") or "")
+            if not _acc_recovery:
+                try:
+                    from orchestrator_integration.final_response_policy import (
+                        recovery_for_missing_evidence,
+                    )
+
+                    _codes = {
+                        str((b or {}).get("blocker_code") or "")
+                        for b in (acceptance.get("blockers") or [])
+                        if isinstance(b, dict)
+                    }
+                    if _codes & {
+                        "missing_evidence",
+                        "verified_without_evidence",
+                        "evidence_gate_failed",
+                        "executor_bind_mismatch",
+                    }:
+                        _acc_recovery = recovery_for_missing_evidence(
+                            executor_mounted=bool(
+                                (getattr(task, "facts", None) or {}).get(
+                                    "executor_mounted", True
+                                )
+                            )
+                            and "executor_bind_mismatch" not in _codes,
+                            budget_remaining=budget_remaining(task),
+                        )
+                    else:
+                        _acc_recovery = (
+                            "查看 acceptance.reasons 与工具明细；"
+                            "由服务端续跑或恢复挂载，禁止要求用户代为提供执行证据。"
+                        )
+                except Exception:
+                    _acc_recovery = (
+                        "查看 acceptance.reasons 与工具明细；由服务端续跑恢复。"
+                    )
             return _block_task(
                 task,
                 blocker_code="acceptance_failed",
                 reasons=list(acceptance.get("reasons") or ["业务验收未通过"]),
-                recovery=str(
-                    acceptance.get("recovery")
-                    or "查看 acceptance.reasons 与工具明细；修复后发送「继续」。"
-                ),
+                recovery=_acc_recovery,
                 acceptance=acceptance,
             )
         return {

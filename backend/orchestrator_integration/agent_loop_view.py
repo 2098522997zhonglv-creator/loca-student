@@ -2674,6 +2674,13 @@ class AgentLoopStreamAPIView(View):
                                 "ok": True,
                                 "missing": [],
                             }
+                            _facts["executor_mounted"] = bool(
+                                any(
+                                    getattr(t, "name", "")
+                                    == "execute_skill_script"
+                                    for t in (tools or [])
+                                )
+                            )
                             runtime_task.facts = _facts
                             await sync_to_async(runtime_task.save)(
                                 update_fields=["facts", "updated_at"]
@@ -3955,22 +3962,31 @@ class AgentLoopStreamAPIView(View):
                         completed_business_steps=_retry_completed,
                         expected_business_steps=_retry_expected,
                         acceptance_ok=None,
+                        missing_evidence=(
+                            _retry_expected > 0 and _retry_completed <= 0
+                        ),
                     )
                     if _do_remount_continue or _do_checkpoint_continue:
                         checkpoint_continue_attempted = bool(_do_checkpoint_continue)
-                        _retry_reason = (
-                            "模型提前终答但业务检查点未齐"
-                            if _do_checkpoint_continue and not _do_remount_continue
-                            else "执行工具已挂载且仍有工具预算"
-                        )
+                        if _do_checkpoint_continue and not _do_remount_continue:
+                            if _retry_expected > 0 and _retry_completed <= 0:
+                                _retry_reason = (
+                                    "业务进度仍为 0 且预算充足，缺本轮执行证据"
+                                )
+                            else:
+                                _retry_reason = "模型提前终答但业务检查点未齐"
+                        else:
+                            _retry_reason = "执行工具已挂载且仍有工具预算"
                         _retry_instruction = SystemMessage(
                             id=f"deferred-execution-retry-{uuid.uuid4().hex}",
                             content=(
                                 f"服务端检测到当前任务尚未完成（{_retry_reason}）。"
-                                "这是一次受控续跑：继续完成原用户目标和当前未完成阶段，不要要求用户重新挂载、重发或确认；"
-                                "先检查已有执行记录/当前状态，跳过已经完成的业务动作，不要重复提交或重复写入。"
-                                "按原授权边界执行；若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
-                                "禁止在业务检查点未齐时宣称任务完成。"
+                                "这是一次受控续跑：立刻用已绑定工具继续完成原用户目标与未完成检查点；"
+                                "不要要求用户重新挂载、重发、确认，或替你提供截图/执行证据。"
+                                "先核对已有执行记录/当前状态，跳过已完成动作，禁止重复提交或重复写入。"
+                                "按原授权边界执行；缺的是本轮页面/截图/工具结果，须自己调用工具采集。"
+                                "若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
+                                "禁止在业务检查点未齐或无本轮证据时宣称任务完成。"
                             ),
                         )
                         try:
@@ -4374,6 +4390,11 @@ class AgentLoopStreamAPIView(View):
                             if _closure_task is not None
                             else {}
                         )
+                        _corr_used = int(_biz_snap.get("used_tool_actions") or 0)
+                        _corr_max = int(_biz_snap.get("max_tool_actions") or 0)
+                        _corr_budget_left = (
+                            _corr_max <= 0 or _corr_used < _corr_max
+                        )
                         if should_correct_unverified_delivery(
                             response_text=final_ai_text,
                             acceptance=acceptance
@@ -4397,6 +4418,8 @@ class AgentLoopStreamAPIView(View):
                                 expected_business_steps=int(
                                     _biz_snap.get("expected_business_steps") or 0
                                 ),
+                                executor_mounted=bool(executor_mounted),
+                                budget_remaining=_corr_budget_left,
                             )
                             await _persist_corrected_final_message(
                                 agent,
