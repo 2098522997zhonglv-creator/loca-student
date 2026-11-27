@@ -2949,6 +2949,9 @@ class AgentLoopStreamAPIView(View):
                 current_tool_calls = []
                 interrupt_detected = False
                 user_stopped = False
+                deferred_execution_recovered = False
+                closure_result = None
+                _closure_task = None
 
                 # 15. 流式执行
                 stream_modes = ["updates", "messages"]
@@ -3872,6 +3875,92 @@ class AgentLoopStreamAPIView(View):
                             acc_err,
                         )
 
+                # 第 1 阶段：流结束强制状态闭环，禁止悬挂 running
+                closure_result = None
+                _closure_task = None
+                try:
+                    if agent_runtime and agent_runtime.task is not None:
+                        _closure_task = agent_runtime.task
+                    elif runtime_task is not None:
+                        _closure_task = runtime_task
+                except Exception:
+                    _closure_task = None
+                if _closure_task is not None:
+                    try:
+                        from orchestrator_integration.task_state_closure import (
+                            close_task_after_stream,
+                        )
+                        from orchestrator_integration.runtime_progress import (
+                            progress_event,
+                        )
+
+                        _auto_ok = bool(deferred_execution_recovered)
+                        _auto_attempted = bool(deferred_execution_recovered) or (
+                            bool(executor_mounted)
+                            and requests_user_to_remount_executor(
+                                original_final_ai_text or ""
+                            )
+                        )
+                        closure_result = await sync_to_async(close_task_after_stream)(
+                            _closure_task,
+                            user_stopped=bool(user_stopped),
+                            interrupt_detected=bool(interrupt_detected),
+                            acceptance=acceptance,
+                            auto_continue_attempted=_auto_attempted,
+                            auto_continue_succeeded=_auto_ok,
+                        )
+                        if closure_result.get("acceptance"):
+                            acceptance = closure_result["acceptance"]
+                        try:
+                            await sync_to_async(_closure_task.refresh_from_db)()
+                        except Exception:
+                            pass
+                        try:
+                            yield create_sse_data(
+                                await sync_to_async(progress_event)(_closure_task.pk)
+                            )
+                        except Exception:
+                            pass
+                        _c_status = str(closure_result.get("status") or "")
+                        _c_tid = getattr(_closure_task, "public_task_id", "") or str(
+                            getattr(_closure_task, "id", "")
+                        )
+                        if _c_status == "blocked":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_blocked",
+                                    "task_id": _c_tid,
+                                    "status": "blocked",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "completed":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_completed",
+                                    "task_id": _c_tid,
+                                    "status": "completed",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "waiting_approval":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_status",
+                                    "task_id": _c_tid,
+                                    "status": "waiting_approval",
+                                    "closure": closure_result,
+                                }
+                            )
+                    except Exception as closure_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: task state closure failed: %s",
+                            closure_err,
+                            exc_info=True,
+                        )
+
                 if user_stopped:
                     # RC09/RC10：传输结束 ≠ 业务成功；取消保持 cancelled/cancelling
                     _stop_status = "stopped"
@@ -3897,25 +3986,54 @@ class AgentLoopStreamAPIView(View):
                     logger.info(
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
-                else:
-                    # RC09：complete 只表示传输结束；业务态取 acceptance / 任务实态
-                    _biz = "finished"
-                    if acceptance is not None:
-                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    # 审批等待：complete 仍推送，task_status=waiting_approval
+                    _wait_status = "waiting_approval"
                     try:
-                        if agent_runtime and agent_runtime.task is not None:
-                            _live = str(
-                                getattr(agent_runtime.task, "status", "") or ""
+                        if _closure_task is not None:
+                            await sync_to_async(_closure_task.refresh_from_db)(
+                                fields=["status"]
                             )
-                            if _live in {
-                                "cancelled",
-                                "cancelling",
-                                "blocked",
-                                "failed",
-                            }:
-                                _biz = _live
+                            if str(_closure_task.status or "") == "awaiting_approval":
+                                _wait_status = "waiting_approval"
                     except Exception:
                         pass
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": _wait_status,
+                            "task_status": _wait_status,
+                            "message_kind": "final",
+                            "steps": step_count,
+                        }
+                    )
+                else:
+                    # RC09：complete 只表示传输结束；业务态取闭环后的持久化状态
+                    _biz = "finished"
+                    if closure_result and closure_result.get("status"):
+                        _biz = str(closure_result["status"])
+                    elif acceptance is not None:
+                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    try:
+                        _live_task = _closure_task
+                        if _live_task is None and agent_runtime and agent_runtime.task:
+                            _live_task = agent_runtime.task
+                        if _live_task is not None:
+                            await sync_to_async(_live_task.refresh_from_db)(
+                                fields=["status"]
+                            )
+                            _live = str(getattr(_live_task, "status", "") or "")
+                            from orchestrator_integration.task_state_closure import (
+                                normalize_status,
+                            )
+
+                            if _live:
+                                _biz = normalize_status(_live)
+                    except Exception:
+                        pass
+                    # 未完成不得显示成功
+                    if _biz in {"completed", "finished"} and acceptance is not None:
+                        if not acceptance.get("ok"):
+                            _biz = "blocked"
                     complete_data = {
                         "type": "complete",
                         "total_steps": step_count,
@@ -3930,6 +4048,13 @@ class AgentLoopStreamAPIView(View):
                     }
                     if acceptance is not None:
                         complete_data["acceptance"] = acceptance
+                    if closure_result is not None:
+                        complete_data["closure"] = {
+                            "action": closure_result.get("action"),
+                            "status": closure_result.get("status"),
+                            "blocker_code": closure_result.get("blocker_code"),
+                            "recovery": closure_result.get("recovery"),
+                        }
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,
