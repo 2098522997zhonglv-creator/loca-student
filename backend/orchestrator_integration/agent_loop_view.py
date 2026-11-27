@@ -1793,6 +1793,20 @@ class AgentLoopStreamAPIView(View):
                 _orch_mount = apply_orchestrator_mount(
                     _orch_plan, activated_fallbacks=_activated_fb
                 )
+                # 计划需要执行时解除 kb_qa 分类禁令；不静默授予整区 Skill。
+                # 具体 Skill 仍由一层 allowlist / 扩权获批决定。
+                from orchestrator_integration.skill_zones import (
+                    promote_zone_for_orchestrated_plan,
+                )
+
+                skill_zone = promote_zone_for_orchestrated_plan(
+                    skill_zone, _orch_plan
+                )
+                try:
+                    if skill_zone.zone_id != "kb_qa":
+                        task_commission.zone_id = skill_zone.zone_id
+                except Exception:
+                    pass
                 _stage_specs = sync_plan_to_stage_specs(_orch_plan)
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
@@ -2909,6 +2923,16 @@ class AgentLoopStreamAPIView(View):
                         "response_locale", "auto"
                     ),
                 }
+                try:
+                    from orchestrator_integration.task_state_closure import (
+                        public_progress_view as _ppv,
+                    )
+
+                    _pv = _ppv(runtime_task)
+                    _eff["progress_phase"] = _pv.get("phase") or ""
+                    _eff["phase_label"] = _pv.get("phase_label") or ""
+                except Exception:
+                    pass
                 yield create_sse_data(
                     {
                         "type": "task_started",

@@ -1198,20 +1198,52 @@ def get_skill_tools(
                     "kind": kind,
                     "message": (message or "")[:400],
                 }
-                # 扩权后重试仍被同一门拒，或连续 2 次授权/分区门拒 → 停耗上报
+                # 扩权后重试仍被同一门拒，或连续 2 次授权/分区门拒 → 停耗并落阻塞态
                 escalate = awaiting or streak >= 2
                 if escalate:
                     facts["expansion_awaiting_retry"] = False
                     facts["platform_auth_blocked"] = True
+                    facts["progress_phase"] = "tool_prep"
                 task.facts = facts
                 type(task).objects.filter(pk=task.pk).update(facts=facts)
+                if escalate:
+                    try:
+                        from orchestrator_integration.task_state_closure import (
+                            _block_task,
+                        )
+
+                        _block_task(
+                            task,
+                            blocker_code="authorized_but_not_executable",
+                            reasons=[
+                                (message or "")[:300],
+                                "已获批或已扩权，但运行分区/执行入口仍拒绝；停止重复尝试。",
+                            ],
+                            recovery=(
+                                "检查任务运行分区与有效授权是否同一份状态；"
+                                "恢复 execute 通道后发送「继续」从已保存进度重试。"
+                                "在实际打开测试站并留下本轮证据前，不得判定用例通过或失败。"
+                            ),
+                            acceptance={
+                                "blockers": [
+                                    {
+                                        "blocker_code": "authorized_but_not_executable",
+                                        "kind": kind,
+                                        "step": "tool_prep",
+                                    }
+                                ]
+                            },
+                        )
+                    except Exception:
+                        pass
         except Exception:
             escalate = streak >= 2
         if escalate:
             return (
                 f"{message}\n"
                 "【平台阻塞】分区/Skill 授权门在扩权或重试后仍拒绝执行，"
-                "已停止继续消耗工具预算。请修复任务分区与有效授权同步后重试；"
+                "已停止继续消耗工具预算，任务已标记为可诊断阻塞。"
+                "请修复任务分区与有效授权同步后重试；"
                 "在恢复执行通道并留下本轮页面/截图证据前，不得判定用例通过或失败。"
             )
         return message
@@ -1529,7 +1561,7 @@ def get_skill_tools(
                 error_kind="allowlist",
             )
             return blocked
-        _clear_auth_gate_streak()
+        # 读取说明成功 ≠ 执行通道已通；勿清掉 expansion_awaiting_retry
 
         try:
             skill = Skill.objects.filter(name=skill_name, is_active=True).first()
@@ -2091,12 +2123,14 @@ def get_skill_tools(
             )
 
         def _privilege_check(skill: Optional[str], cmd: Optional[str]) -> Optional[str]:
+            # 已进入 execute_skill_script：执行通道必然已挂载。
+            # 启用知识库不得在此再用 kb_qa 一刀切拒绝；白名单另由 _assert_skill_allowed 约束。
             return reject_zone_privilege_escalation(
                 zone_id=get_telemetry_context().zone or "",
                 skill_name=skill,
                 command=cmd,
                 authorized_skills=_live_authorized_skills(),
-                mount_execute=_mount_execute_active(),
+                mount_execute=True,
             )
 
         if _should_stop_execution():

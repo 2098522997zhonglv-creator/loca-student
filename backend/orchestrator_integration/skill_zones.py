@@ -63,6 +63,85 @@ def zone_skills(zone_id: str) -> FrozenSet[str]:
     return _FALLBACK_ZONE_SKILLS.get(zone_id, frozenset())
 
 
+_ORCHESTRATED_EXECUTION_NODES = frozenset(
+    {
+        # fetch_conditions 单独出现仍可为纯 KB；与 check_executable/verify_deliver
+        # 等同计划时由下方 any() 触发提升。
+        "check_executable",
+        "execute",
+        "execute_testcase",
+        "run_or_browser",
+        "browser_interact",
+        "customize_upload",
+        "add_to_cart",
+        "submit_order",
+        "verify_deliver",
+        "persist",
+    }
+)
+
+_ORCHESTRATED_EXEC_SKILLS = frozenset(
+    {
+        "playwright-skill",
+        "playwright-cli",
+        "browser-use",
+        "ui-automation",
+        "loca-stude",
+        "api-automation",
+    }
+)
+
+
+def promote_zone_for_orchestrated_plan(zone: "SkillZone", plan: object) -> "SkillZone":
+    """计划需要执行时，解除 kb_qa「禁止 execute」分类禁令。
+
+    不把整区 Skill 白名单塞进主类（那是未授权扩权）。具体 Skill 仍由
+    编排一层 allowlist / request_tool_expansion 获批决定。
+    """
+    if zone.zone_id != ZONE_KB_QA:
+        return zone
+    nodes = getattr(plan, "nodes", None) or []
+    requires_execution = False
+    wants_browser = False
+    for node in nodes:
+        status = str(getattr(node, "status", "pending") or "pending")
+        if status in {"done", "failed"}:
+            continue
+        nid = str(getattr(node, "node_id", "") or "")
+        if nid in _ORCHESTRATED_EXECUTION_NODES:
+            requires_execution = True
+        cands = set()
+        for attr in (
+            "primary_candidates",
+            "fallback_candidates",
+            "skill_names",
+            "tools",
+        ):
+            raw = getattr(node, attr, None) or []
+            if isinstance(raw, (list, tuple, set, frozenset)):
+                cands |= {str(x).strip() for x in raw if str(x).strip()}
+        if cands & _ORCHESTRATED_EXEC_SKILLS:
+            requires_execution = True
+        if cands & {"playwright-skill", "playwright-cli", "browser-use"}:
+            wants_browser = True
+    if not requires_execution:
+        return zone
+    # allowed_skills 留空：挂载 execute，但不静默授予整区 Skill
+    if wants_browser:
+        return SkillZone(
+            ZONE_BROWSER,
+            frozenset(),
+            allow_execute=True,
+            reason="task_orchestrator:browser_plan",
+        )
+    return SkillZone(
+        ZONE_EXECUTE,
+        frozenset(),
+        allow_execute=True,
+        reason="task_orchestrator:execution_plan",
+    )
+
+
 @dataclass(frozen=True)
 class SkillZone:
     zone_id: str
