@@ -77,15 +77,55 @@ def reject_cross_skill_batch(commands: Sequence[dict]) -> Optional[str]:
     )
 
 
+def elevate_zone_for_authorized_execute(
+    zone_id: str,
+    *,
+    authorized_skills: Optional[Set[str]] = None,
+    skill_name: Optional[str] = None,
+    mount_execute: bool = False,
+) -> str:
+    """知识库问答区若已挂执行通道或已获批执行类 Skill，提升为可执行分区。
+
+    避免「扩权 granted + remount」后 ctx.zone 仍停在 kb_qa，导致同轮重试
+    继续被「禁止 execute_skill_script」硬拦。
+    """
+    zone = (zone_id or "").strip()
+    if zone != ZONE_KB_QA:
+        return zone
+    auth = {str(s).strip() for s in (authorized_skills or set()) if str(s).strip()}
+    name = (skill_name or "").strip()
+    exec_skills = auth | ({name} if name and name in auth else set())
+    browserish = exec_skills & _BROWSER_SKILLS
+    platformish = exec_skills & {"loca-stude", "ui-automation", "api-automation"}
+    if browserish or (mount_execute and (name in _BROWSER_SKILLS or not name)):
+        return ZONE_BROWSER
+    if platformish or (mount_execute and auth):
+        return ZONE_EXECUTE
+    if mount_execute and name:
+        # 已挂 execute 且点名某 Skill：按浏览器兜底放行分区检查（白名单另判）
+        return ZONE_BROWSER if name in _BROWSER_SKILLS else ZONE_EXECUTE
+    return zone
+
+
 def reject_zone_privilege_escalation(
     *,
     zone_id: str,
     skill_name: Optional[str],
     command: Optional[str],
+    authorized_skills: Optional[Set[str]] = None,
+    mount_execute: bool = False,
 ) -> Optional[str]:
-    """分区越权：执行区禁止写入；问答区禁止一切 execute 副作用；网页区禁非 url-reader。"""
-    zone = (zone_id or "").strip()
+    """分区越权：执行区禁止写入；问答区默认禁止 execute；网页区禁非 url-reader。
+
+    若 authorized_skills / mount_execute 表明本轮已获批执行通道，kb_qa 不再一刀切拒绝。
+    """
     name = (skill_name or "").strip()
+    zone = elevate_zone_for_authorized_execute(
+        zone_id or "",
+        authorized_skills=authorized_skills,
+        skill_name=name,
+        mount_execute=mount_execute,
+    )
     if not zone:
         return None
 
@@ -93,6 +133,8 @@ def reject_zone_privilege_escalation(
         return (
             "本轮为知识库问答区，禁止 execute_skill_script。"
             "请用知识库回答；禁止要求用户重写指令或点名 Skill。"
+            "若任务需要页面实测，请先 request_tool_expansion 获批执行类 Skill；"
+            "获批后同轮重试须能通过本门禁。"
         )
 
     if zone == ZONE_WEB and name and name != "url-reader":
