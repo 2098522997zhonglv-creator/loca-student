@@ -476,6 +476,67 @@ def close_task_after_stream(
     chk = incomplete_checkpoints(task)
     has_budget = budget_remaining(task)
 
+    # 执行循环护栏：无进展阈值 / fetch 滞留 / 同类失败（facts 已记）
+    try:
+        from orchestrator_integration.execution_loop_control import (
+            FETCH_CONDITIONS_STALL_TOOLS,
+            NO_PROGRESS_TOOL_THRESHOLD,
+        )
+
+        facts = dict(getattr(task, "facts", None) or {})
+        tools_since = int(facts.get("tools_since_business_progress") or 0)
+        identical = dict(facts.get("identical_failure") or {})
+        if (
+            no_business_progress(task)
+            and tools_since >= NO_PROGRESS_TOOL_THRESHOLD
+            and chk["incomplete"]
+        ):
+            return _block_task(
+                task,
+                blocker_code="no_business_progress_threshold",
+                reasons=chk["reasons"]
+                + [
+                    f"工具调用 {tools_since} 次仍无业务进展"
+                    f"（阈值 {NO_PROGRESS_TOOL_THRESHOLD}）；工具调用不等于业务进度。"
+                ],
+                recovery=(
+                    "取得检查点合格证据后再继续；禁止把工具空转告成正常执行中。"
+                ),
+                acceptance=acceptance,
+            )
+        if (
+            str(getattr(task, "current_stage", "") or "") == "fetch_conditions"
+            and tools_since >= FETCH_CONDITIONS_STALL_TOOLS
+            and chk["incomplete"]
+        ):
+            return _block_task(
+                task,
+                blocker_code="fetch_conditions_stall",
+                reasons=chk["reasons"]
+                + [
+                    "条件检索阶段滞留过久；完成后必须转入 check_executable，"
+                    "缺环境时明确阻塞。"
+                ],
+                recovery=(
+                    "推进到可执行性检查，或报告缺失的 Skill/执行器后 blocked。"
+                ),
+                acceptance=acceptance,
+            )
+        if int(identical.get("streak") or 0) >= 2 and chk["incomplete"]:
+            return _block_task(
+                task,
+                blocker_code="identical_failure_cap",
+                reasons=chk["reasons"]
+                + [
+                    f"同类失败连续 {identical.get('streak')} 次："
+                    f"{identical.get('error_code') or identical.get('summary') or ''}"
+                ],
+                recovery="停止原样重试；核对超时/选择器后更换策略再「继续」。",
+                acceptance=acceptance,
+            )
+    except Exception:
+        pass
+
     if tool_error and chk["incomplete"]:
         return _block_task(
             task,

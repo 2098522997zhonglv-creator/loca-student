@@ -3823,8 +3823,8 @@ class AgentLoopStreamAPIView(View):
                                     or ""
                                 )
                                 if node and any(
-                                    skip in str(node)
-                                    for skip in ("tools", "ToolNode", "summarization")
+                                    skip in str(node).lower()
+                                    for skip in ("tools", "toolnode", "summarization")
                                 ):
                                     continue
                                 if hasattr(token, "content") and token.content:
@@ -6504,8 +6504,8 @@ class AgentLoopResumeAPIView(View):
                                     or ""
                                 )
                                 if node and any(
-                                    skip in str(node)
-                                    for skip in ("tools", "ToolNode", "summarization")
+                                    skip in str(node).lower()
+                                    for skip in ("tools", "toolnode", "summarization")
                                 ):
                                     continue
                                 if hasattr(token, "content") and token.content:

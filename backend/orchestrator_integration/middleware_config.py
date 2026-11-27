@@ -22,6 +22,11 @@ from langchain.agents.middleware import (
     HumanInTheLoopMiddleware,
 )
 
+from orchestrator_integration.summary_context_policy import (
+    TASK_AWARE_SUMMARY_PROMPT,
+    InternalSummarizationMiddleware,
+)
+
 from requirements.context_limits import (
     MODEL_CONTEXT_LIMITS,
     context_checker,
@@ -774,6 +779,9 @@ def get_summarization_middleware(
     token_counter 只计算消息内容 token（不含系统提示词和工具定义），
     overhead 通过降低 trigger 阈值来补偿，确保 trim 和 cutoff 逻辑不受污染。
 
+    使用 InternalSummarizationMiddleware：摘要写入 SystemMessage（不进用户气泡），
+    并在压缩时保留任务目标/检查点/进度/证据/授权结构化状态。
+
     Args:
         model: 用于生成摘要的模型（字符串或 BaseChatModel 实例）
                如果为 None，则返回 None（不使用摘要中间件）
@@ -812,12 +820,13 @@ def get_summarization_middleware(
         effective_trigger, trigger_tokens, overhead, trim_limit,
     )
 
-    return SummarizationMiddleware(
+    return InternalSummarizationMiddleware(
         model=model,
         trigger=("tokens", effective_trigger),
         keep=("messages", keep_messages),
         token_counter=_create_token_counter(model_name),
         trim_tokens_to_summarize=trim_limit,
+        summary_prompt=TASK_AWARE_SUMMARY_PROMPT,
     )
 
 

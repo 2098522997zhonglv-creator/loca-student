@@ -75,6 +75,9 @@ from langchain_core.messages import (
     ToolMessage,
     SystemMessage,
 )
+from orchestrator_integration.summary_context_policy import (
+    is_summarization_artifact_message,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages  # Correct import for add_messages
@@ -1701,6 +1704,9 @@ class ChatAPIView(APIView):
                                     msg.content if hasattr(msg, "content") else str(msg)
                                 )
                             elif isinstance(msg, HumanMessage):
+                                if is_summarization_artifact_message(msg):
+                                    # 摘要产物不当作用户消息进入会话流
+                                    continue
                                 msg_type = "human"
                                 raw_content = (
                                     msg.content if hasattr(msg, "content") else str(msg)
@@ -1941,6 +1947,9 @@ def sync_chat_messages_from_checkpointer(chat_session, user, thread_id):
                 image = None
                 metadata = {}
 
+                if is_summarization_artifact_message(msg):
+                    # 摘要仅内部传递，不同步为用户/人类消息
+                    continue
                 if isinstance(msg, SystemMessage):
                     role = "system"
                     content = msg.content if hasattr(msg, "content") else str(msg)
@@ -2268,6 +2277,9 @@ class ChatHistoryAPIView(APIView):
                                 msg_type = "unknown"
                                 content = ""
 
+                                if is_summarization_artifact_message(msg):
+                                    # 历史 UI：不展示摘要占位/泄漏为「你」
+                                    continue
                                 if isinstance(msg, SystemMessage):
                                     msg_type = "system"
                                     content = (
