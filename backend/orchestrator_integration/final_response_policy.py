@@ -30,6 +30,37 @@ def requests_user_to_remount_executor(text: str) -> bool:
     )
 
 
+def should_attempt_executor_recovery(
+    *,
+    response_text: str,
+    executor_mounted: bool,
+    user_stopped: bool,
+    interrupt_detected: bool,
+    used_tool_actions: int,
+    reserved_tool_actions: int,
+    max_tool_actions: int,
+    completed_business_steps: int,
+    expected_business_steps: int,
+) -> bool:
+    """Allow one bounded continuation for a stale executor-unavailable answer."""
+    has_budget = (
+        max_tool_actions > 0
+        and used_tool_actions + reserved_tool_actions < max_tool_actions
+    )
+    has_work = (
+        expected_business_steps <= 0
+        or completed_business_steps < expected_business_steps
+    )
+    return bool(
+        not user_stopped
+        and not interrupt_detected
+        and executor_mounted
+        and requests_user_to_remount_executor(response_text)
+        and has_budget
+        and has_work
+    )
+
+
 def correction_for_executor_deferral(*, executor_mounted: bool) -> str:
     if executor_mounted:
         return (

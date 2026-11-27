@@ -3505,14 +3505,249 @@ class AgentLoopStreamAPIView(View):
                     getattr(t, "name", "") == "execute_skill_script"
                     for t in (tools or [])
                 )
-                final_response_corrected = False
                 from orchestrator_integration.final_response_policy import (
                     correction_for_executor_deferral,
                     requests_user_to_remount_executor,
+                    should_attempt_executor_recovery,
                 )
 
+                # A model can still emit a stale "please remount the executor" answer
+                # even though the executor is present. Do one bounded server-side
+                # continuation when the task has unfinished business and tool budget;
+                # correcting that answer and blocking the task would strand it here.
+                deferred_execution_recovered = False
+                if (
+                    not user_stopped
+                    and not interrupt_detected
+                    and executor_mounted
+                    and requests_user_to_remount_executor(final_ai_text)
+                    and runtime_task is not None
+                ):
+                    try:
+                        await sync_to_async(runtime_task.refresh_from_db)(
+                            fields=["budget", "status"]
+                        )
+                    except Exception:
+                        pass
+                    _retry_budget = dict(runtime_task.budget or {})
+                    _retry_used = int(
+                        _retry_budget.get("used_tool_actions")
+                        or _retry_budget.get("used_tool_steps")
+                        or 0
+                    )
+                    _retry_reserved = int(
+                        _retry_budget.get("reserved_tool_actions") or 0
+                    )
+                    _retry_max = int(
+                        _retry_budget.get("max_tool_actions")
+                        or _retry_budget.get("max_tool_steps")
+                        or 0
+                    )
+                    _retry_completed = int(
+                        _retry_budget.get("completed_business_steps") or 0
+                    )
+                    _retry_expected = int(
+                        _retry_budget.get("expected_business_steps") or 0
+                    )
+                    if should_attempt_executor_recovery(
+                        response_text=final_ai_text,
+                        executor_mounted=executor_mounted,
+                        user_stopped=user_stopped,
+                        interrupt_detected=interrupt_detected,
+                        used_tool_actions=_retry_used,
+                        reserved_tool_actions=_retry_reserved,
+                        max_tool_actions=_retry_max,
+                        completed_business_steps=_retry_completed,
+                        expected_business_steps=_retry_expected,
+                    ):
+                        _retry_instruction = SystemMessage(
+                            id=f"deferred-execution-retry-{uuid.uuid4().hex}",
+                            content=(
+                                "服务端检测到当前任务尚未完成，而本轮执行工具已挂载且仍有工具预算。"
+                                "这是一次受控续跑：继续完成原用户目标和当前未完成阶段，不要要求用户重新挂载、重发或确认；"
+                                "先检查已有执行记录/当前状态，跳过已经完成的业务动作，不要重复提交或重复写入。"
+                                "按原授权边界执行；若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
+                            ),
+                        )
+                        try:
+                            if agent_runtime and agent_runtime.task is not None:
+                                try:
+                                    from orchestrator_integration.runtime_progress import (
+                                        progress_event,
+                                    )
+
+                                    yield create_sse_data(
+                                        await sync_to_async(progress_event)(
+                                            agent_runtime.task.pk
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                            async for _retry_mode, _retry_chunk in agent.astream(
+                                {"messages": [_retry_instruction]},
+                                config=invoke_config,
+                                stream_mode=["updates"],
+                            ):
+                                if should_stop(session_id):
+                                    user_stopped = True
+                                    clear_stop_signal(session_id)
+                                    break
+                                if (
+                                    _retry_mode == "updates"
+                                    and isinstance(_retry_chunk, dict)
+                                    and "__interrupt__" in _retry_chunk
+                                ):
+                                    _interrupt_info = _retry_chunk["__interrupt__"]
+                                    _interrupts = (
+                                        list(_interrupt_info)
+                                        if isinstance(_interrupt_info, (list, tuple))
+                                        else [_interrupt_info]
+                                    )
+                                    _action_requests = []
+                                    _interrupt_id = None
+                                    for _intr in _interrupts:
+                                        _interrupt_id = _interrupt_id or getattr(
+                                            _intr, "id", None
+                                        )
+                                        _value = getattr(_intr, "value", _intr)
+                                        _requests = (
+                                            _value.get("action_requests", [])
+                                            if isinstance(_value, dict)
+                                            else getattr(_value, "action_requests", [])
+                                        )
+                                        for _request in _requests or []:
+                                            _action_requests.append(
+                                                {
+                                                    "name": (
+                                                        _request.get("name", "unknown")
+                                                        if isinstance(_request, dict)
+                                                        else getattr(_request, "name", "unknown")
+                                                    ),
+                                                    "args": (
+                                                        _request.get(
+                                                            "arguments",
+                                                            _request.get("args", {}),
+                                                        )
+                                                        if isinstance(_request, dict)
+                                                        else getattr(
+                                                            _request,
+                                                            "arguments",
+                                                            getattr(_request, "args", {}),
+                                                        )
+                                                    ),
+                                                    "description": (
+                                                        _request.get("description", "")
+                                                        if isinstance(_request, dict)
+                                                        else getattr(
+                                                            _request,
+                                                            "description",
+                                                            "",
+                                                        )
+                                                    ),
+                                                }
+                                            )
+                                    if _action_requests:
+                                        interrupt_detected = True
+                                        _retry_interrupt_id = str(
+                                            _interrupt_id or uuid.uuid4().hex
+                                        )
+                                        try:
+                                            from orchestrator_integration.agent_runtime import (
+                                                park_for_approval,
+                                            )
+
+                                            if agent_runtime and agent_runtime.task:
+                                                await sync_to_async(park_for_approval)(
+                                                    agent_runtime.task,
+                                                    interrupt_id=_retry_interrupt_id,
+                                                )
+                                        except Exception as park_err:
+                                            logger.warning(
+                                                "deferred recovery approval park failed: %s",
+                                                park_err,
+                                            )
+                                        yield create_sse_data(
+                                            {
+                                                "type": "interrupt",
+                                                "interrupt_id": _retry_interrupt_id,
+                                                "action_requests": _action_requests,
+                                                "session_id": session_id,
+                                                "thread_id": thread_id,
+                                            }
+                                        )
+                                    break
+                            if not user_stopped:
+                                current_state = await agent.aget_state(invoke_config)
+                                all_messages = (
+                                    current_state.values.get("messages", [])
+                                    if current_state.values
+                                    else []
+                                )
+                                for _message in reversed(all_messages):
+                                    if isinstance(_message, AIMessage) and not getattr(
+                                        _message, "tool_calls", None
+                                    ):
+                                        _content = _message.content
+                                        if isinstance(_content, list):
+                                            _content = "".join(
+                                                c.get("text", "")
+                                                if isinstance(c, dict)
+                                                else (c if isinstance(c, str) else "")
+                                                for c in _content
+                                            )
+                                        _candidate = str(_content or "").strip()
+                                        if _candidate:
+                                            final_ai_text = _candidate
+                                            break
+                                deferred_execution_recovered = (
+                                    bool(final_ai_text)
+                                    and not requests_user_to_remount_executor(
+                                        final_ai_text
+                                    )
+                                )
+                                if deferred_execution_recovered:
+                                    yield create_sse_data(
+                                        {
+                                            "type": "final_answer",
+                                            "content": final_ai_text,
+                                            "response_locale": (
+                                                _response_locale
+                                                if "_response_locale" in locals()
+                                                else "zh-CN"
+                                            ),
+                                        }
+                                    )
+                                    logger.info(
+                                        "AgentLoopStreamAPI: recovered deferred execution session=%s task=%s",
+                                        session_id,
+                                        getattr(runtime_task, "task_id", ""),
+                                    )
+                        except Exception as retry_err:
+                            logger.warning(
+                                "AgentLoopStreamAPI: deferred execution continuation failed session=%s: %s",
+                                session_id,
+                                retry_err,
+                                exc_info=True,
+                            )
+                        finally:
+                            if not interrupt_detected:
+                                try:
+                                    await agent.aupdate_state(
+                                        invoke_config,
+                                        {"messages": [RemoveMessage(id=_retry_instruction.id)]},
+                                    )
+                                except Exception as cleanup_err:
+                                    logger.warning(
+                                        "AgentLoopStreamAPI: failed to remove internal continuation instruction: %s",
+                                        cleanup_err,
+                                    )
+
+                final_response_corrected = False
                 original_final_ai_text = final_ai_text
-                if requests_user_to_remount_executor(final_ai_text):
+                if (
+                    requests_user_to_remount_executor(final_ai_text)
+                    and not deferred_execution_recovered
+                ):
                     final_response_corrected = True
                     final_ai_text = correction_for_executor_deferral(
                         executor_mounted=executor_mounted
