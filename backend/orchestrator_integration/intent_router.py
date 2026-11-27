@@ -485,9 +485,30 @@ def looks_like_testcase_execute_keywords(message: str) -> bool:
     # spelling out "执行用例". Route those through the testcase long-flow planner.
     if (
         "回归" in text
-        and any(cue in text for cue in ("测试", "功能", "用例", "常规品", "模块", "商品"))
-        and re.search(r"执行|开始|运行|跑|验证|复测|开展|帮我|请你", text)
+        and any(
+            cue in text
+            for cue in (
+                "测试",
+                "功能",
+                "用例",
+                "常规品",
+                "模块",
+                "商品",
+                "检查点",
+                "截图",
+                "商品中心",
+            )
+        )
+        and re.search(
+            r"执行|开始|运行|跑|验证|复测|开展|帮我|请你|恢复执行|待办", text
+        )
     ):
+        return True
+    # 商品中心检查清单：即使未写「回归」也按可执行业务流路由，避免落成 single
+    if any(
+        k in text
+        for k in ("商品中心", "goods-list", "编辑展示", "定制设置", "定制价格")
+    ) and re.search(r"检查点|截图|复测|验证|商品ID|商品\s*id", text, re.I):
         return True
     if _EXECUTE_APPROVAL_RE.search(text) and (
         "用例" in text or "自动化" in text or "套件" in text or "testcase" in text.lower()

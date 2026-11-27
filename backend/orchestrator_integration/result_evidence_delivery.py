@@ -35,6 +35,59 @@ def _is_business_stage(stage_id: str) -> bool:
     return str(stage_id or "").strip() not in _NON_BUSINESS_STAGE_IDS
 
 
+def _has_traceable_evidence_ref(
+    structured: Optional[Dict[str, Any]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+) -> bool:
+    structured = structured or {}
+    evidence = evidence or {}
+    nested = (
+        structured.get("evidence")
+        if isinstance(structured.get("evidence"), dict)
+        else {}
+    )
+    return bool(
+        evidence.get("output_ref")
+        or evidence.get("evidence_id")
+        or structured.get("output_ref")
+        or structured.get("evidence_id")
+        or nested.get("output_ref")
+        or nested.get("evidence_id")
+    )
+
+
+def _demote_unreferenced_verified(
+    level: str,
+    *,
+    structured: Optional[Dict[str, Any]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+) -> str:
+    """verified 必须带可追溯引用；否则降为 observed/executed。"""
+    if level != CLAIM_VERIFIED:
+        return level
+    if _has_traceable_evidence_ref(structured, evidence):
+        return CLAIM_VERIFIED
+    structured = structured or {}
+    evidence = evidence or {}
+    data = structured.get("data") if isinstance(structured.get("data"), dict) else {}
+    if any(
+        data.get(k) or structured.get(k) or evidence.get(k)
+        for k in (
+            "page_state",
+            "page_url",
+            "dom_snapshot",
+            "db_row",
+            "file_path",
+            "resource_id",
+            "source_url",
+            "side_effect_before",
+            "side_effect_after",
+        )
+    ):
+        return CLAIM_OBSERVED
+    return CLAIM_EXECUTED
+
+
 def classify_claim_level(
     *,
     tool_name: str = "",
@@ -48,7 +101,9 @@ def classify_claim_level(
     name = (tool_name or "").strip().lower()
     status = (step_status or structured.get("status") or "").strip().lower()
 
-    # 显式声明优先
+    level = CLAIM_EXECUTED
+
+    # 显式声明优先（仍受引用门禁约束）
     explicit = (
         structured.get("claim_level")
         or structured.get("claim_type")
@@ -61,47 +116,63 @@ def classify_claim_level(
         CLAIM_OBSERVED,
         CLAIM_VERIFIED,
     }:
-        return str(explicit)
-
-    if name in {"assert_task_postcondition", "assert_and_deliver"} or (
+        level = str(explicit)
+    elif name in {"assert_task_postcondition", "assert_and_deliver"} or (
         "assert" in name and "postcondition" in name
     ):
-        if status in {"succeeded", "ok", "passed"}:
-            return CLAIM_VERIFIED
-        return CLAIM_EXECUTED
+        # 工具调用成功 ≠ 业务验收通过；ok=false 最高只能 executed
+        verdict_ok = structured.get("ok")
+        if verdict_ok is None and isinstance(structured.get("data"), dict):
+            verdict_ok = structured["data"].get("ok")
+        if verdict_ok is False:
+            level = CLAIM_EXECUTED
+        elif status in {"succeeded", "ok", "passed"} and verdict_ok is not False:
+            level = CLAIM_VERIFIED
+        else:
+            level = CLAIM_EXECUTED
+    else:
+        # 副作用前后态变化 → 已观察
+        before = evidence.get("side_effect_before")
+        after = evidence.get("side_effect_after")
+        if before is None:
+            before = (structured.get("evidence") or {}).get("side_effect_before")
+        if after is None:
+            after = (structured.get("evidence") or {}).get("side_effect_after")
+        if before is not None and after is not None and before != after:
+            level = CLAIM_OBSERVED
+        else:
+            # 页面/资源观测字段
+            data = (
+                structured.get("data")
+                if isinstance(structured.get("data"), dict)
+                else {}
+            )
+            if any(
+                data.get(k) or structured.get(k) or evidence.get(k)
+                for k in (
+                    "page_state",
+                    "page_url",
+                    "dom_snapshot",
+                    "db_row",
+                    "file_path",
+                    "resource_id",
+                    "source_url",
+                )
+            ):
+                if status in {"succeeded", "ok", "passed", "skipped"}:
+                    level = CLAIM_OBSERVED
+                else:
+                    level = CLAIM_EXECUTED
+            elif status in {"succeeded", "ok", "passed", "skipped"}:
+                level = CLAIM_EXECUTED
+            elif status in {"failed", "cancelled", "unknown", "blocked"}:
+                level = CLAIM_EXECUTED
+            else:
+                level = CLAIM_EXECUTED
 
-    # 副作用前后态变化 → 已观察
-    before = evidence.get("side_effect_before")
-    after = evidence.get("side_effect_after")
-    if before is None:
-        before = (structured.get("evidence") or {}).get("side_effect_before")
-    if after is None:
-        after = (structured.get("evidence") or {}).get("side_effect_after")
-    if before is not None and after is not None and before != after:
-        return CLAIM_OBSERVED
-
-    # 页面/资源观测字段
-    data = structured.get("data") if isinstance(structured.get("data"), dict) else {}
-    if any(
-        data.get(k) or structured.get(k) or evidence.get(k)
-        for k in (
-            "page_state",
-            "page_url",
-            "dom_snapshot",
-            "db_row",
-            "file_path",
-            "resource_id",
-            "source_url",
-        )
-    ):
-        if status in {"succeeded", "ok", "passed", "skipped"}:
-            return CLAIM_OBSERVED
-
-    if status in {"succeeded", "ok", "passed", "skipped"}:
-        return CLAIM_EXECUTED
-    if status in {"failed", "cancelled", "unknown", "blocked"}:
-        return CLAIM_EXECUTED
-    return CLAIM_EXECUTED
+    return _demote_unreferenced_verified(
+        level, structured=structured, evidence=evidence
+    )
 
 
 def _criteria_from_stage_plan(stage_plan: Sequence[Any]) -> List[Dict[str, Any]]:
@@ -343,9 +414,30 @@ def detect_evidence_contradictions(
                 }
             )
 
-        if (s.get("claim_level") == CLAIM_VERIFIED) and not (
-            s.get("output_ref") or s.get("evidence_id")
-        ):
+        st_claim = str(
+            (st.get("claim_level") if isinstance(st, dict) else None)
+            or (
+                (s.get("evidence") or {}).get("claim_level")
+                if isinstance(s.get("evidence"), dict)
+                else None
+            )
+            or s.get("claim_level")
+            or ""
+        )
+        tool_l = str(s.get("tool_name") or "").lower()
+        is_assert = (
+            tool_l in {"assert_task_postcondition", "assert_and_deliver"}
+            or ("assert" in tool_l and "postcondition" in tool_l)
+        )
+        assert_claimed_ok = bool(
+            isinstance(st, dict) and st.get("ok") is True
+        )
+        has_ref = bool(s.get("output_ref") or s.get("evidence_id"))
+        if (
+            st_claim == CLAIM_VERIFIED or (is_assert and assert_claimed_ok)
+        ) and not has_ref:
+            # 降级内存中的声明，避免交付报告继续以 verified 对外
+            s["claim_level"] = CLAIM_EXECUTED
             issues.append(
                 {
                     "code": "verified_without_evidence",
