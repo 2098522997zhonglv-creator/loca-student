@@ -378,6 +378,26 @@ def consume_approval(
         row.save(
             update_fields=["decision", "status", "consumed_at", "updated_at"]
         )
+        # 阶段5：审批决策审计
+        try:
+            if row.task_id:
+                from orchestrator_integration.production_observability import (
+                    audit_approval_decision,
+                )
+
+                audit_approval_decision(
+                    row.task,
+                    decision=decision,
+                    interrupt_id=interrupt_id,
+                    actions=list(
+                        (row.action_args or {}).get("actions")
+                        or (row.action_args or {}).get("allow_actions")
+                        or []
+                    ),
+                    actor=str(user_id),
+                )
+        except Exception:
+            pass
         return {
             "ok": True,
             "status": row.status,
