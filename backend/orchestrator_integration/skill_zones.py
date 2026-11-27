@@ -63,6 +63,47 @@ def zone_skills(zone_id: str) -> FrozenSet[str]:
     return _FALLBACK_ZONE_SKILLS.get(zone_id, frozenset())
 
 
+_ORCHESTRATED_EXECUTION_NODES = frozenset(
+    {
+        "check_executable",
+        "execute",
+        "execute_testcase",
+        "browser_interact",
+        "customize_upload",
+        "add_to_cart",
+        "submit_order",
+        "verify_deliver",
+        "persist",
+    }
+)
+
+
+def promote_zone_for_orchestrated_plan(zone: "SkillZone", plan: object) -> "SkillZone":
+    """Use an execution policy zone when the durable task plan requires actions.
+
+    Knowledge search can remain mounted for a fetch_conditions node. The zone
+    decides whether execution is categorically forbidden; per-node skill
+    allowlists and action authorization continue to constrain actual calls.
+    """
+    if zone.zone_id != ZONE_KB_QA:
+        return zone
+    nodes = getattr(plan, "nodes", None) or []
+    requires_execution = any(
+        str(getattr(node, "node_id", "") or "") in _ORCHESTRATED_EXECUTION_NODES
+        and str(getattr(node, "status", "pending") or "pending")
+        not in {"done", "failed"}
+        for node in nodes
+    )
+    if not requires_execution:
+        return zone
+    return SkillZone(
+        ZONE_EXECUTE,
+        zone_skills(ZONE_EXECUTE),
+        allow_execute=True,
+        reason="task_orchestrator:execution_plan",
+    )
+
+
 @dataclass(frozen=True)
 class SkillZone:
     zone_id: str

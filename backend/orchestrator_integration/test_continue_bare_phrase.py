@@ -102,6 +102,25 @@ class BareContinuePhraseTests(unittest.TestCase):
         self.assertEqual(rel, TURN_CONTINUE)
         self.assertTrue(should_preserve_execution(prior, rel))
 
+    def test_running_fetch_conditions_with_action_plan_stays_on_execution_route(self):
+        prior = PriorTaskContext(
+            task_pk=5,
+            public_task_id="running-browser-task",
+            goal="检查常规品并交付页面证据",
+            current_stage="fetch_conditions",
+            stage_plan=[
+                {"stage_id": "fetch_conditions"},
+                {"stage_id": "check_executable"},
+                {"stage_id": "verify_deliver"},
+            ],
+            status="running",
+        )
+        resumable = executable_open_tasks([prior])
+        self.assertEqual(resumable, [prior])
+        rel = classify_turn_relation("继续", prior, open_count=len(resumable))
+        self.assertEqual(rel, TURN_CONTINUE)
+        self.assertTrue(should_preserve_execution(prior, rel))
+
     def test_blocked_kb_shell_without_action_plan_is_not_resumable(self):
         prior = PriorTaskContext(
             task_pk=4,
@@ -115,6 +134,17 @@ class BareContinuePhraseTests(unittest.TestCase):
         self.assertEqual(
             classify_turn_relation("继续执行", prior, open_count=0), TURN_NEW
         )
+
+    def test_running_kb_only_shell_without_action_plan_is_not_resumable(self):
+        prior = PriorTaskContext(
+            task_pk=6,
+            public_task_id="running-kb-shell",
+            goal="查询商品中心规则",
+            current_stage="fetch_conditions",
+            stage_plan=[{"stage_id": "fetch_conditions"}],
+            status="running",
+        )
+        self.assertEqual(executable_open_tasks([prior]), [])
 
 
 if __name__ == "__main__":

@@ -6,10 +6,69 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from orchestrator_integration.final_response_policy import (
     correction_for_executor_deferral,
     requests_user_to_remount_executor,
+    should_continue_incomplete_task,
 )
 
 
 class FinalResponsePolicyTests(SimpleTestCase):
+    def test_continues_running_task_with_remaining_checkpoints_and_budget(self):
+        self.assertTrue(
+            should_continue_incomplete_task(
+                executor_mounted=True,
+                user_stopped=False,
+                interrupt_detected=False,
+                task_status="running",
+                used_tool_actions=2,
+                reserved_tool_actions=0,
+                max_tool_actions=20,
+                completed_business_steps=1,
+                expected_business_steps=3,
+            )
+        )
+
+    def test_does_not_continue_when_stopped_interrupted_or_not_running(self):
+        base = {
+            "executor_mounted": True,
+            "user_stopped": False,
+            "interrupt_detected": False,
+            "task_status": "running",
+            "used_tool_actions": 2,
+            "reserved_tool_actions": 0,
+            "max_tool_actions": 20,
+            "completed_business_steps": 1,
+            "expected_business_steps": 3,
+        }
+        for change in (
+            {"user_stopped": True},
+            {"interrupt_detected": True},
+            {"task_status": "waiting_approval"},
+            {"task_status": "completed"},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(should_continue_incomplete_task(**(base | change)))
+
+    def test_does_not_continue_without_executor_budget_or_remaining_work(self):
+        base = {
+            "executor_mounted": True,
+            "user_stopped": False,
+            "interrupt_detected": False,
+            "task_status": "running",
+            "used_tool_actions": 2,
+            "reserved_tool_actions": 0,
+            "max_tool_actions": 20,
+            "completed_business_steps": 1,
+            "expected_business_steps": 3,
+        }
+        for change in (
+            {"executor_mounted": False},
+            {"used_tool_actions": 20},
+            {"reserved_tool_actions": 18},
+            {"completed_business_steps": 3},
+            {"expected_business_steps": 0},
+        ):
+            with self.subTest(change=change):
+                self.assertFalse(should_continue_incomplete_task(**(base | change)))
+
     def test_detects_user_remount_request(self):
         self.assertTrue(
             requests_user_to_remount_executor(

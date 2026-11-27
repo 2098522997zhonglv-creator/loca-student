@@ -118,12 +118,20 @@ class PriorTaskContext:
             return True
         if self.allow_actions:
             return True
-        if self.status not in {"blocked", "paused"}:
+        if self.status not in {
+            "running",
+            "blocked",
+            "paused",
+            "waiting_approval",
+            "awaiting_approval",
+        }:
             return False
-        # A blocked task may still be resumable when progress accounting left
-        # it on a planning node.  Only restore it when its persisted plan has
-        # a real business/action node; a blocked KB-only task remains a zombie
-        # and will not capture a generic "continue" message.
+        # A task may be on a planning/knowledge node while its durable plan
+        # contains executable work (for example fetch_conditions → check_executable).
+        # Keep such running/resumable tasks attached to the execution route;
+        # otherwise a KB-enabled turn can be misclassified as pure KB QA and
+        # the execution zone will reject the very tools the plan requires.
+        # KB-only shells remain excluded because they have no executable node.
         return any(
             isinstance(stage, dict)
             and str(stage.get("stage_id") or stage.get("node_id") or "")

@@ -1768,6 +1768,25 @@ class AgentLoopStreamAPIView(View):
                 _orch_mount = apply_orchestrator_mount(
                     _orch_plan, activated_fallbacks=_activated_fb
                 )
+                # Keep task execution policy separate from the KB toggle. A
+                # multi-stage plan can start with fetch_conditions while still
+                # requiring browser/test execution later; retaining kb_qa as
+                # the tool-zone would hard-reject execute_skill_script even
+                # after an L2 skill grant. Stage/commission allowlists remain
+                # the authoritative per-skill and per-action gates.
+                try:
+                    from orchestrator_integration.skill_zones import (
+                        promote_zone_for_orchestrated_plan,
+                    )
+
+                    skill_zone = promote_zone_for_orchestrated_plan(
+                        skill_zone, _orch_plan
+                    )
+                except Exception as _zone_promote_err:
+                    logger.warning(
+                        "AgentLoopStreamAPI: execution zone promotion skipped: %s",
+                        _zone_promote_err,
+                    )
                 _stage_specs = sync_plan_to_stage_specs(_orch_plan)
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
@@ -3521,19 +3540,17 @@ class AgentLoopStreamAPIView(View):
                 from orchestrator_integration.final_response_policy import (
                     correction_for_executor_deferral,
                     requests_user_to_remount_executor,
-                    should_attempt_executor_recovery,
+                    should_continue_incomplete_task,
                 )
 
-                # A model can still emit a stale "please remount the executor" answer
-                # even though the executor is present. Do one bounded server-side
-                # continuation when the task has unfinished business and tool budget;
-                # correcting that answer and blocking the task would strand it here.
-                deferred_execution_recovered = False
+                # Transport completion is not task completion. If the model ends its
+                # turn while persisted business checkpoints remain, continue once on
+                # the server instead of leaving an idle stream with a running task.
+                execution_continued = False
                 if (
                     not user_stopped
                     and not interrupt_detected
                     and executor_mounted
-                    and requests_user_to_remount_executor(final_ai_text)
                     and runtime_task is not None
                 ):
                     try:
@@ -3562,11 +3579,11 @@ class AgentLoopStreamAPIView(View):
                     _retry_expected = int(
                         _retry_budget.get("expected_business_steps") or 0
                     )
-                    if should_attempt_executor_recovery(
-                        response_text=final_ai_text,
+                    if should_continue_incomplete_task(
                         executor_mounted=executor_mounted,
                         user_stopped=user_stopped,
                         interrupt_detected=interrupt_detected,
+                        task_status=str(runtime_task.status or ""),
                         used_tool_actions=_retry_used,
                         reserved_tool_actions=_retry_reserved,
                         max_tool_actions=_retry_max,
@@ -3576,10 +3593,11 @@ class AgentLoopStreamAPIView(View):
                         _retry_instruction = SystemMessage(
                             id=f"deferred-execution-retry-{uuid.uuid4().hex}",
                             content=(
-                                "服务端检测到当前任务尚未完成，而本轮执行工具已挂载且仍有工具预算。"
-                                "这是一次受控续跑：继续完成原用户目标和当前未完成阶段，不要要求用户重新挂载、重发或确认；"
-                                "先检查已有执行记录/当前状态，跳过已经完成的业务动作，不要重复提交或重复写入。"
-                                "按原授权边界执行；若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
+                                "服务端检测到当前任务仍有未完成业务检查点且工具预算充足。"
+                                "这是一次受控续跑：从当前阶段继续原任务，不要要求用户重发目标或重新挂载工具；"
+                                "先检查已有执行记录，跳过已完成动作，不要重复提交或写入。"
+                                "严格遵守原授权；若缺少必要输入或新增授权，走既有审批/澄清流程并暂停等待。"
+                                "实际推进后继续检查剩余业务检查点；不得仅因查到资料就结束。"
                             ),
                         )
                         try:
@@ -3712,13 +3730,39 @@ class AgentLoopStreamAPIView(View):
                                         if _candidate:
                                             final_ai_text = _candidate
                                             break
-                                deferred_execution_recovered = (
-                                    bool(final_ai_text)
-                                    and not requests_user_to_remount_executor(
-                                        final_ai_text
-                                    )
+                                _retry_start = next(
+                                    (
+                                        i
+                                        for i, _message in enumerate(all_messages)
+                                        if getattr(_message, "id", None)
+                                        == _retry_instruction.id
+                                    ),
+                                    -1,
                                 )
-                                if deferred_execution_recovered:
+                                _retry_final_text = ""
+                                for _message in reversed(
+                                    all_messages[_retry_start + 1 :]
+                                    if _retry_start >= 0
+                                    else []
+                                ):
+                                    if isinstance(_message, AIMessage) and not getattr(
+                                        _message, "tool_calls", None
+                                    ):
+                                        _content = _message.content
+                                        if isinstance(_content, list):
+                                            _content = "".join(
+                                                c.get("text", "")
+                                                if isinstance(c, dict)
+                                                else (c if isinstance(c, str) else "")
+                                                for c in _content
+                                            )
+                                        _candidate = str(_content or "").strip()
+                                        if _candidate:
+                                            _retry_final_text = _candidate
+                                            break
+                                if _retry_final_text:
+                                    final_ai_text = _retry_final_text
+                                    execution_continued = True
                                     yield create_sse_data(
                                         {
                                             "type": "final_answer",
@@ -3731,7 +3775,7 @@ class AgentLoopStreamAPIView(View):
                                         }
                                     )
                                     logger.info(
-                                        "AgentLoopStreamAPI: recovered deferred execution session=%s task=%s",
+                                        "AgentLoopStreamAPI: continued incomplete task session=%s task=%s",
                                         session_id,
                                         getattr(runtime_task, "task_id", ""),
                                     )
@@ -3759,7 +3803,7 @@ class AgentLoopStreamAPIView(View):
                 original_final_ai_text = final_ai_text
                 if (
                     requests_user_to_remount_executor(final_ai_text)
-                    and not deferred_execution_recovered
+                    and not execution_continued
                 ):
                     final_response_corrected = True
                     final_ai_text = correction_for_executor_deferral(
@@ -3870,6 +3914,48 @@ class AgentLoopStreamAPIView(View):
                         logger.warning(
                             "AgentLoopStreamAPI: runtime acceptance failed: %s",
                             acc_err,
+                        )
+
+                # Never leave a task visibly running after its SSE turn has ended
+                # without a business acceptance result. This is a truthful blocked
+                # state that the existing continuation path can resume.
+                if (
+                    not user_stopped
+                    and not interrupt_detected
+                    and acceptance is None
+                    and agent_runtime is not None
+                    and agent_runtime.task is not None
+                ):
+                    try:
+                        await sync_to_async(agent_runtime.task.refresh_from_db)()
+                        if str(agent_runtime.task.status or "") == "running":
+                            acceptance = {
+                                "ok": False,
+                                "reasons": [
+                                    "对话流已结束，但服务端未得到任务验收结果；任务未标记完成，可从已保存进度继续。"
+                                ],
+                                "blockers": [
+                                    {
+                                        "blocker_code": "agent_turn_ended_without_acceptance",
+                                        "step": str(
+                                            agent_runtime.task.current_stage
+                                            or "final_acceptance"
+                                        ),
+                                    }
+                                ],
+                            }
+                            _blocked_event = await sync_to_async(
+                                agent_runtime.accept
+                            )(acceptance)
+                            if _blocked_event:
+                                _blocked_event["acceptance"] = acceptance
+                                yield create_sse_data(_blocked_event)
+                    except Exception as fallback_err:
+                        logger.error(
+                            "AgentLoopStreamAPI: failed to close task without acceptance task=%s error=%s",
+                            getattr(agent_runtime.task, "task_id", ""),
+                            fallback_err,
+                            exc_info=True,
                         )
 
                 if user_stopped:

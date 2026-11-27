@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
@@ -11,9 +13,11 @@ from langgraph_integration.models import ChatSession
 from orchestrator_integration.models import AgentTask
 from orchestrator_integration.skill_zones import (
     ZONE_BROWSER,
+    ZONE_EXECUTE,
     ZONE_KB_QA,
     SkillZone,
     correct_misrouted_zone,
+    promote_zone_for_orchestrated_plan,
     resolve_skill_zone,
     zone_skills,
 )
@@ -285,6 +289,35 @@ class KnownTaskFollowupTests(TestCase):
 
 
 class MultiturnPositiveControlTests(TestCase):
+    def test_kb_zone_is_promoted_for_plan_with_execution_node(self):
+        kb_zone = SkillZone(ZONE_KB_QA, frozenset(), allow_execute=False, reason="kb_qa")
+        plan = SimpleNamespace(
+            nodes=[
+                SimpleNamespace(node_id="fetch_conditions"),
+                SimpleNamespace(node_id="check_executable"),
+                SimpleNamespace(node_id="verify_deliver"),
+            ]
+        )
+        promoted = promote_zone_for_orchestrated_plan(kb_zone, plan)
+        self.assertEqual(promoted.zone_id, ZONE_EXECUTE)
+        self.assertTrue(promoted.allow_execute)
+        from orchestrator_integration.skill_governance import (
+            reject_zone_privilege_escalation,
+        )
+
+        self.assertIsNone(
+            reject_zone_privilege_escalation(
+                zone_id=promoted.zone_id,
+                skill_name="playwright-skill",
+                command="goto https://example.test",
+            )
+        )
+
+    def test_kb_only_plan_keeps_kb_zone(self):
+        kb_zone = SkillZone(ZONE_KB_QA, frozenset(), allow_execute=False, reason="kb_qa")
+        plan = SimpleNamespace(nodes=[SimpleNamespace(node_id="fetch_conditions")])
+        self.assertIs(promote_zone_for_orchestrated_plan(kb_zone, plan), kb_zone)
+
     def test_full_goal_with_url_routes_browser(self):
         from orchestrator_integration.intent_router import classify_user_intent
 
