@@ -93,6 +93,62 @@ def incomplete_checkpoints(task) -> Dict[str, Any]:
     }
 
 
+def public_progress_view(task) -> Dict[str, Any]:
+    """前端/刷新可见的进度投影（业务检查点 + 工具预算）。"""
+    snap = budget_snapshot(task)
+    chk = incomplete_checkpoints(task)
+    st = normalize_status(getattr(task, "status", "") or "")
+    display_status = st
+    if st == "blocked" or chk["incomplete"]:
+        # 未完成不得显示成功
+        if st == "completed":
+            display_status = "blocked"
+    success_visible = st == "completed" and not chk["incomplete"]
+    return {
+        "task_id": getattr(task, "public_task_id", None) or str(getattr(task, "pk", "")),
+        "status": st,
+        "display_status": display_status,
+        "incomplete": bool(chk["incomplete"]),
+        "success_visible": success_visible,
+        "label": (
+            "已完成"
+            if success_visible
+            else ("未完全完成" if chk["incomplete"] or st == "blocked" else st)
+        ),
+        "business_progress": {
+            "completed": snap["completed_business_steps"],
+            "expected": snap["expected_business_steps"],
+            "text": (
+                f"{snap['completed_business_steps']}/{snap['expected_business_steps']}"
+                if snap["expected_business_steps"]
+                else f"{snap['completed_business_steps']}/-"
+            ),
+        },
+        "tool_budget": {
+            "used": snap["used_tool_actions"],
+            "max": snap["max_tool_actions"],
+            "text": (
+                f"{snap['used_tool_actions']}/{snap['max_tool_actions']}"
+                if snap["max_tool_actions"]
+                else f"{snap['used_tool_actions']}/-"
+            ),
+        },
+        "remaining_stages": chk.get("remaining_stages") or [],
+        "reasons": list(chk.get("reasons") or []),
+    }
+
+
+def no_business_progress(task) -> bool:
+    snap = budget_snapshot(task)
+    expected = snap["expected_business_steps"]
+    completed = snap["completed_business_steps"]
+    if expected > 0:
+        return completed <= 0
+    facts = dict(getattr(task, "facts", None) or {})
+    done = facts.get("completed_stage_ids") or []
+    return len(done) == 0
+
+
 def budget_remaining(task) -> bool:
     snap = budget_snapshot(task)
     max_a = snap["max_tool_actions"]
@@ -354,6 +410,25 @@ def close_task_after_stream(
 
     if chk["incomplete"] and not has_budget:
         snap = chk["budget"]
+        # 真实失败形态：工具调用烧满、业务检查点 0/N → 明确标注无进展
+        if no_business_progress(task) and snap["used_tool_actions"] > 0:
+            return _block_task(
+                task,
+                blocker_code="budget_exhausted_no_business_progress",
+                reasons=chk["reasons"]
+                + [
+                    f"工具预算已耗尽 "
+                    f"{snap['used_tool_actions']}/{snap['max_tool_actions']}，"
+                    f"但业务检查点仍为 "
+                    f"{snap['completed_business_steps']}/{snap['expected_business_steps']}"
+                    "（工具调用很多但业务未推进）"
+                ],
+                recovery=(
+                    "发送「继续」前先核对超时/选择器/浏览器异常；"
+                    "缩小目标或提高预算，禁止把工具空转告成已完成。"
+                ),
+                acceptance=acceptance,
+            )
         return _block_task(
             task,
             blocker_code="budget_exhausted",

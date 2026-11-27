@@ -245,12 +245,34 @@ def finish_call(task_id, call_id, name, args, result, duration_ms):
 
 def progress_event(task_id):
     from .models import AgentTask
+    from .task_state_closure import public_progress_view
+
     task = AgentTask.objects.get(pk=task_id)
     budget = task.budget or {}
-    return {"type": "task_status", "task_id": task.public_task_id or str(task.pk), "status": task.status,
-            "payload": {"stage": task.current_stage, "stage_plan": task.stage_plan, "acceptance": task.acceptance},
-            "effective_config": {k: budget.get(k, 0) for k in (
-                "expected_business_steps", "completed_business_steps", "max_tool_actions", "used_tool_actions", "config_version")}}
+    view = public_progress_view(task)
+    return {
+        "type": "task_status",
+        "task_id": task.public_task_id or str(task.pk),
+        "status": task.status,
+        "payload": {
+            "stage": task.current_stage,
+            "stage_plan": task.stage_plan,
+            "acceptance": task.acceptance,
+            "progress_view": view,
+            "incomplete": view.get("incomplete"),
+            "label": view.get("label"),
+        },
+        "effective_config": {
+            k: budget.get(k, 0)
+            for k in (
+                "expected_business_steps",
+                "completed_business_steps",
+                "max_tool_actions",
+                "used_tool_actions",
+                "config_version",
+            )
+        },
+    }
 
 
 @transaction.atomic

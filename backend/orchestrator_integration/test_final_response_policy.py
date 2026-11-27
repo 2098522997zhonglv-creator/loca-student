@@ -5,7 +5,9 @@ from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 
 from orchestrator_integration.final_response_policy import (
     correction_for_executor_deferral,
+    looks_like_early_final_answer,
     requests_user_to_remount_executor,
+    should_attempt_checkpoint_continue,
 )
 
 
@@ -33,6 +35,37 @@ class FinalResponsePolicyTests(SimpleTestCase):
         self.assertFalse(
             requests_user_to_remount_executor(
                 "本轮未完成执行，服务端记录显示工具调用为 0。"
+            )
+        )
+
+    def test_early_final_triggers_checkpoint_continue(self):
+        text = "任务已完成，最终结果如下，可以结束了。"
+        self.assertTrue(looks_like_early_final_answer(text))
+        self.assertTrue(
+            should_attempt_checkpoint_continue(
+                response_text=text,
+                executor_mounted=True,
+                user_stopped=False,
+                interrupt_detected=False,
+                used_tool_actions=10,
+                reserved_tool_actions=0,
+                max_tool_actions=80,
+                completed_business_steps=1,
+                expected_business_steps=3,
+            )
+        )
+        # 预算耗尽则不续跑
+        self.assertFalse(
+            should_attempt_checkpoint_continue(
+                response_text=text,
+                executor_mounted=True,
+                user_stopped=False,
+                interrupt_detected=False,
+                used_tool_actions=80,
+                reserved_tool_actions=0,
+                max_tool_actions=80,
+                completed_business_steps=0,
+                expected_business_steps=3,
             )
         )
 

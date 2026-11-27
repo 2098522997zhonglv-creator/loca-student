@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from typing import Optional
 
 
 _EXECUTOR_REMOUNT_REQUEST = re.compile(
@@ -28,6 +29,24 @@ def requests_user_to_remount_executor(text: str) -> bool:
         _EXECUTOR_REMOUNT_REQUEST.search(text)
         or _USER_TRIGGER_DEFERRAL.search(text)
     )
+
+
+_EARLY_FINAL_CLAIM = re.compile(
+    r"(?:任务(?:已)?完成|已全部完成|全部检查点|交付完成|验收通过|"
+    r"最终结果|最终回复|到此结束|无需再执行|可以结束了|"
+    r"completed successfully|all (?:done|complete)|mission accomplished)",
+    re.I,
+)
+
+
+def looks_like_early_final_answer(text: str) -> bool:
+    """模型在业务未完成时给出终答/交付口吻。"""
+    text = (text or "").strip()
+    if not text:
+        return False
+    if requests_user_to_remount_executor(text):
+        return False
+    return bool(_EARLY_FINAL_CLAIM.search(text))
 
 
 def should_attempt_executor_recovery(
@@ -58,6 +77,43 @@ def should_attempt_executor_recovery(
         and requests_user_to_remount_executor(response_text)
         and has_budget
         and has_work
+    )
+
+
+def should_attempt_checkpoint_continue(
+    *,
+    response_text: str,
+    executor_mounted: bool,
+    user_stopped: bool,
+    interrupt_detected: bool,
+    used_tool_actions: int,
+    reserved_tool_actions: int,
+    max_tool_actions: int,
+    completed_business_steps: int,
+    expected_business_steps: int,
+    acceptance_ok: Optional[bool] = None,
+) -> bool:
+    """第 1 阶段：检查点未齐 + 有预算时，对提前终答做一次受控同轮续跑。
+
+    与 remount 续跑互补：覆盖「完成第 1 步后模型提前结束」受控场景。
+    """
+    has_budget = (
+        max_tool_actions > 0
+        and used_tool_actions + reserved_tool_actions < max_tool_actions
+    )
+    has_work = (
+        expected_business_steps > 0
+        and completed_business_steps < expected_business_steps
+    )
+    early = looks_like_early_final_answer(response_text) or acceptance_ok is True
+    return bool(
+        not user_stopped
+        and not interrupt_detected
+        and executor_mounted
+        and has_budget
+        and has_work
+        and early
+        and not requests_user_to_remount_executor(response_text)
     )
 
 
