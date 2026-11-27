@@ -1793,19 +1793,6 @@ class AgentLoopStreamAPIView(View):
                 _orch_mount = apply_orchestrator_mount(
                     _orch_plan, activated_fallbacks=_activated_fb
                 )
-                # A durable plan may start in fetch_conditions while its next
-                # node requires browser/test execution. The KB switch must not
-                # keep the low-level tool telemetry in kb_qa, which hard-blocks
-                # execute_skill_script even after the planned skill is granted.
-                # The orchestrator's node allowlist and action auth remain the
-                # narrower gates for each actual call.
-                from orchestrator_integration.skill_zones import (
-                    promote_zone_for_orchestrated_plan,
-                )
-
-                skill_zone = promote_zone_for_orchestrated_plan(
-                    skill_zone, _orch_plan
-                )
                 _stage_specs = sync_plan_to_stage_specs(_orch_plan)
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
