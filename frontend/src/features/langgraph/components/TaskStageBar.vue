@@ -42,6 +42,9 @@ export interface EffectiveConfig {
   max_tool_actions?: number;
   used_tool_actions?: number;
   config_version?: number;
+  /** tool_prep = 工具准备/权限检查；business_exec = 业务执行 */
+  progress_phase?: string;
+  phase_label?: string;
 }
 
 const props = defineProps<{
@@ -73,7 +76,15 @@ const budgetLabel = computed(() => {
   const used = Number(cfg.used_tool_actions ?? 0);
   const maxA = Number(cfg.max_tool_actions ?? 0);
   if (!exp && !maxA) return '';
-  return `业务 ${done}/${exp || '—'} · 工具 ${used}/${maxA || '—'}`;
+  const phase =
+    cfg.phase_label ||
+    (cfg.progress_phase === 'tool_prep'
+      ? '工具准备/权限检查'
+      : done <= 0 && used > 0
+        ? '工具准备/权限检查'
+        : '');
+  const core = `业务 ${done}/${exp || '—'} · 工具 ${used}/${maxA || '—'}`;
+  return phase ? `${phase} · ${core}` : core;
 });
 
 const statusClass = computed(() => {

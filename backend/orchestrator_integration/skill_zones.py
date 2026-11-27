@@ -65,9 +65,12 @@ def zone_skills(zone_id: str) -> FrozenSet[str]:
 
 _ORCHESTRATED_EXECUTION_NODES = frozenset(
     {
+        # fetch_conditions 单独出现仍可为纯 KB；与 check_executable/verify_deliver
+        # 等同计划时由下方 any() 触发提升。
         "check_executable",
         "execute",
         "execute_testcase",
+        "run_or_browser",
         "browser_interact",
         "customize_upload",
         "add_to_cart",
@@ -77,25 +80,61 @@ _ORCHESTRATED_EXECUTION_NODES = frozenset(
     }
 )
 
+_ORCHESTRATED_EXEC_SKILLS = frozenset(
+    {
+        "playwright-skill",
+        "playwright-cli",
+        "browser-use",
+        "ui-automation",
+        "loca-stude",
+        "api-automation",
+    }
+)
+
 
 def promote_zone_for_orchestrated_plan(zone: "SkillZone", plan: object) -> "SkillZone":
     """Use an execution policy zone when the durable task plan requires actions.
 
-    Knowledge search can remain mounted for a fetch_conditions node. The zone
-    decides whether execution is categorically forbidden; per-node skill
-    allowlists and action authorization continue to constrain actual calls.
+    Knowledge search can remain mounted for a fetch_conditions node. Enabling
+    the KB toggle must not keep the runtime zone in kb_qa when later nodes or
+    primary candidates need browser/test execution. Per-node skill allowlists
+    and action authorization continue to constrain actual calls.
     """
     if zone.zone_id != ZONE_KB_QA:
         return zone
     nodes = getattr(plan, "nodes", None) or []
-    requires_execution = any(
-        str(getattr(node, "node_id", "") or "") in _ORCHESTRATED_EXECUTION_NODES
-        and str(getattr(node, "status", "pending") or "pending")
-        not in {"done", "failed"}
-        for node in nodes
-    )
+    requires_execution = False
+    wants_browser = False
+    for node in nodes:
+        status = str(getattr(node, "status", "pending") or "pending")
+        if status in {"done", "failed"}:
+            continue
+        nid = str(getattr(node, "node_id", "") or "")
+        if nid in _ORCHESTRATED_EXECUTION_NODES:
+            requires_execution = True
+        cands = set()
+        for attr in (
+            "primary_candidates",
+            "fallback_candidates",
+            "skill_names",
+            "tools",
+        ):
+            raw = getattr(node, attr, None) or []
+            if isinstance(raw, (list, tuple, set, frozenset)):
+                cands |= {str(x).strip() for x in raw if str(x).strip()}
+        if cands & _ORCHESTRATED_EXEC_SKILLS:
+            requires_execution = True
+        if cands & {"playwright-skill", "playwright-cli", "browser-use"}:
+            wants_browser = True
     if not requires_execution:
         return zone
+    if wants_browser:
+        return SkillZone(
+            ZONE_BROWSER,
+            zone_skills(ZONE_BROWSER),
+            allow_execute=True,
+            reason="task_orchestrator:browser_plan",
+        )
     return SkillZone(
         ZONE_EXECUTE,
         zone_skills(ZONE_EXECUTE),

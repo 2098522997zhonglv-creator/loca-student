@@ -135,6 +135,8 @@ interface StreamState {
     config_version?: number;
     config_hash?: string;
     response_locale?: string;
+    progress_phase?: string;
+    phase_label?: string;
   };
   /** RC11：任务语言 */
   responseLocale?: string;
@@ -924,6 +926,8 @@ export async function sendChatMessageStream(
                 config_version: Number(eff.config_version ?? 0),
                 config_hash: String(eff.config_hash || ''),
                 response_locale: String(eff.response_locale || ''),
+                progress_phase: String(eff.progress_phase || ''),
+                phase_label: String(eff.phase_label || ''),
               };
               if (stream.effectiveConfig.response_locale) {
                 stream.responseLocale = stream.effectiveConfig.response_locale;
@@ -1525,6 +1529,8 @@ export function applyTaskSnapshotToStream(
       config_version: Number(eff.config_version ?? 0),
       config_hash: String(eff.config_hash || ''),
       response_locale: String(eff.response_locale || ''),
+      progress_phase: String(eff.progress_phase || ''),
+      phase_label: String(eff.phase_label || ''),
     };
     if (stream.effectiveConfig.response_locale) {
       stream.responseLocale = stream.effectiveConfig.response_locale;

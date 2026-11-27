@@ -86,24 +86,25 @@ def elevate_zone_for_authorized_execute(
 ) -> str:
     """知识库问答区若已挂执行通道或已获批执行类 Skill，提升为可执行分区。
 
-    避免「扩权 granted + remount」后 ctx.zone 仍停在 kb_qa，导致同轮重试
-    继续被「禁止 execute_skill_script」硬拦。
+    启用知识库 ≠ 禁止执行：只要执行工具已挂载或已有获批执行类 Skill，
+    kb_qa 分类禁令即失效（白名单/动作授权仍单独约束）。
     """
     zone = (zone_id or "").strip()
     if zone != ZONE_KB_QA:
         return zone
     auth = {str(s).strip() for s in (authorized_skills or set()) if str(s).strip()}
     name = (skill_name or "").strip()
-    exec_skills = auth | ({name} if name and name in auth else set())
-    browserish = exec_skills & _BROWSER_SKILLS
-    platformish = exec_skills & {"loca-stude", "ui-automation", "api-automation"}
-    if browserish or (mount_execute and (name in _BROWSER_SKILLS or not name)):
-        return ZONE_BROWSER
-    if platformish or (mount_execute and auth):
+    browserish = (auth & _BROWSER_SKILLS) or (name in _BROWSER_SKILLS)
+    platformish = bool(
+        auth & {"loca-stude", "ui-automation", "api-automation"}
+    ) or name in {"loca-stude", "ui-automation", "api-automation"}
+    # 执行通道已挂载：一律离开 kb_qa（能进 execute_skill_script 即属此类）
+    if mount_execute or auth:
+        if browserish:
+            return ZONE_BROWSER
+        if platformish or name or auth:
+            return ZONE_EXECUTE
         return ZONE_EXECUTE
-    if mount_execute and name:
-        # 已挂 execute 且点名某 Skill：按浏览器兜底放行分区检查（白名单另判）
-        return ZONE_BROWSER if name in _BROWSER_SKILLS else ZONE_EXECUTE
     return zone
 
 

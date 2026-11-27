@@ -94,27 +94,55 @@ def incomplete_checkpoints(task) -> Dict[str, Any]:
 
 
 def public_progress_view(task) -> Dict[str, Any]:
-    """前端/刷新可见的进度投影（业务检查点 + 工具预算）。"""
+    """前端/刷新可见的进度投影（业务检查点 + 工具预算）。
+
+    明确区分「工具准备/权限检查」与「业务执行」，避免工具调用数被当成业务进度。
+    """
     snap = budget_snapshot(task)
     chk = incomplete_checkpoints(task)
     st = normalize_status(getattr(task, "status", "") or "")
+    facts = dict(getattr(task, "facts", None) or {})
     display_status = st
     if st == "blocked" or chk["incomplete"]:
         # 未完成不得显示成功
         if st == "completed":
             display_status = "blocked"
     success_visible = st == "completed" and not chk["incomplete"]
+    # 工具准备：业务 0 且仅在门禁/扩权/阻塞，或显式标记
+    phase = str(facts.get("progress_phase") or "").strip()
+    if not phase:
+        if facts.get("platform_auth_blocked") or facts.get("expansion_awaiting_retry"):
+            phase = "tool_prep"
+        elif (
+            snap["expected_business_steps"] > 0
+            and snap["completed_business_steps"] <= 0
+            and snap["used_tool_actions"] > 0
+            and st in {"running", "blocked", "waiting_approval"}
+        ):
+            phase = "tool_prep"
+        elif snap["completed_business_steps"] > 0:
+            phase = "business_exec"
+        else:
+            phase = "business_exec" if st == "completed" else "tool_prep"
+    phase_label = (
+        "工具准备/权限检查" if phase == "tool_prep" else "业务执行"
+    )
+    label = (
+        "已完成"
+        if success_visible
+        else ("未完全完成" if chk["incomplete"] or st == "blocked" else st)
+    )
+    if phase == "tool_prep" and st in {"running", "blocked"} and not success_visible:
+        label = f"{label} · {phase_label}"
     return {
         "task_id": getattr(task, "public_task_id", None) or str(getattr(task, "pk", "")),
         "status": st,
         "display_status": display_status,
         "incomplete": bool(chk["incomplete"]),
         "success_visible": success_visible,
-        "label": (
-            "已完成"
-            if success_visible
-            else ("未完全完成" if chk["incomplete"] or st == "blocked" else st)
-        ),
+        "label": label,
+        "phase": phase,
+        "phase_label": phase_label,
         "business_progress": {
             "completed": snap["completed_business_steps"],
             "expected": snap["expected_business_steps"],
@@ -132,6 +160,7 @@ def public_progress_view(task) -> Dict[str, Any]:
                 if snap["max_tool_actions"]
                 else f"{snap['used_tool_actions']}/-"
             ),
+            "is_prep_only": phase == "tool_prep",
         },
         "remaining_stages": chk.get("remaining_stages") or [],
         "reasons": list(chk.get("reasons") or []),

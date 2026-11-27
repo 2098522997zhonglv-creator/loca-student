@@ -1806,6 +1806,17 @@ class AgentLoopStreamAPIView(View):
                 skill_zone = promote_zone_for_orchestrated_plan(
                     skill_zone, _orch_plan
                 )
+                # 与运行分区同一份状态：commission / telemetry 不得停在 kb_qa
+                try:
+                    if skill_zone.zone_id != "kb_qa":
+                        task_commission.zone_id = skill_zone.zone_id
+                        if skill_zone.allow_execute:
+                            task_commission.primary_skills = frozenset(
+                                set(task_commission.primary_skills or [])
+                                | set(skill_zone.allowed_skills or [])
+                            )
+                except Exception:
+                    pass
                 _stage_specs = sync_plan_to_stage_specs(_orch_plan)
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
@@ -2922,6 +2933,16 @@ class AgentLoopStreamAPIView(View):
                         "response_locale", "auto"
                     ),
                 }
+                try:
+                    from orchestrator_integration.task_state_closure import (
+                        public_progress_view as _ppv,
+                    )
+
+                    _pv = _ppv(runtime_task)
+                    _eff["progress_phase"] = _pv.get("phase") or ""
+                    _eff["phase_label"] = _pv.get("phase_label") or ""
+                except Exception:
+                    pass
                 yield create_sse_data(
                     {
                         "type": "task_started",
