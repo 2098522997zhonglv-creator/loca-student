@@ -80,26 +80,38 @@ def build_reconcile_plan(
     )
 
     if uncertain:
+        browserish = (skill_name or "").strip() in {
+            "playwright-skill",
+            "playwright-cli",
+            "browser-use",
+        }
+        base_hint = (
+            "结果不确定（超时/断连）：禁止重新启动同一动作；"
+            f"请先用 {reconcile_action or '原记录查询'} 核对"
+            + (
+                f"（keys={keys}）"
+                if keys
+                else "（若无 execution_id，用业务唯一键/时间窗口查询）"
+            )
+            + "。核对成功则补齐证据；明确失败后再按策略有界重试。"
+        )
+        if browserish:
+            base_hint += (
+                " 用持久会话只读检查页面或操作状态（page_info/当前 URL/截图）；"
+                "结果未确认前，不重复执行可能产生副作用的动作。"
+            )
+            reconcile_action = reconcile_action or "persistent_session_inspect"
         return {
             "must_reconcile": True,
             "allow_replay": False,
             "reconcile_action": reconcile_action or "query_original_record",
             "resource_keys": keys,
             "reason": "uncertain_result_reconcile_first",
-            "hint": (
-                "结果不确定（超时/断连）：禁止重新启动同一动作；"
-                f"请先用 {reconcile_action or '原记录查询'} 核对"
-                + (
-                    f"（keys={keys}）"
-                    if keys
-                    else "（若无 execution_id，用业务唯一键/时间窗口查询）"
-                )
-                + "。核对成功则补齐证据；明确失败后再按策略有界重试。"
-            ),
+            "hint": base_hint,
             "retry": {
-                "allow": decision.allow,
-                "next_action": decision.next_action,
-                "reason": decision.reason,
+                "allow": False,  # 未核对前不允许重试副作用
+                "next_action": "reconcile",
+                "reason": "reconcile_before_retry",
             },
         }
 

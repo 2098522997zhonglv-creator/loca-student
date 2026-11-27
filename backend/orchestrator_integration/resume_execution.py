@@ -31,6 +31,27 @@ _SIDE_EFFECT_MARKERS = (
     "set_input_files",
     "execute_testcase",
     "run_testcase",
+    "click",
+    "submit",
+    "fill(",
+    "type(",
+    "press(",
+)
+
+# 只读核对：超时后允许用持久会话检查状态，不算副作用重做
+_READ_INSPECT_MARKERS = (
+    "page_info",
+    "page.url",
+    "screenshot",
+    "current_url",
+    "wait_for_load",
+    "content()",
+    "title()",
+    "get_execution_records",
+    "--action get_",
+    "--action list_",
+    "--action search",
+    "--action preview",
 )
 
 
@@ -75,9 +96,11 @@ def load_task_steps(task) -> List[Dict[str, Any]]:
 
 
 def is_side_effect_command(skill_name: str = "", command: str = "") -> bool:
+    blob = (command or "").lower()
+    if any(m in blob for m in _READ_INSPECT_MARKERS):
+        return False
     if not should_inject_idempotency(skill_name or "", command or ""):
         # should_inject false means read-like → not side effect for replay guard
-        blob = (command or "").lower()
         if any(m in blob for m in _SIDE_EFFECT_MARKERS):
             return True
         return False
