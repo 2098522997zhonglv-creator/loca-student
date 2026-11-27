@@ -845,12 +845,35 @@ def record_step_result(
             evidence["content_hash"] = stored.get("content_hash")
             structured = dict(structured)
             structured["output_ref"] = stored.get("output_ref")
+            # 入库拿到引用后再分级：此前无 ref 时 verified 会被降级
+            try:
+                _claim = classify_claim_level(
+                    tool_name=tool_name or "",
+                    step_status=step_status,
+                    structured=structured,
+                    evidence=evidence,
+                )
+            except Exception:
+                pass
+            evidence["claim_level"] = _claim
             structured["claim_level"] = _claim
             AgentStep.objects.filter(pk=step.pk).update(
                 evidence=evidence, structured_result=structured
             )
             step.evidence = evidence
             step.structured_result = structured
+        else:
+            # 无引用则禁止残留 verified 声明
+            if _claim == "verified":
+                _claim = "executed"
+                evidence["claim_level"] = _claim
+                structured = dict(structured)
+                structured["claim_level"] = _claim
+                AgentStep.objects.filter(pk=step.pk).update(
+                    evidence=evidence, structured_result=structured
+                )
+                step.evidence = evidence
+                step.structured_result = structured
     except Exception as evid_err:
         logger.warning("store_tool_output_evidence failed: %s", evid_err)
 

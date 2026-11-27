@@ -272,7 +272,12 @@ class Phase4ResultEvidenceAcceptance(TestCase):
         level = classify_claim_level(
             tool_name="assert_task_postcondition",
             step_status="succeeded",
-            structured={"status": "succeeded"},
+            structured={
+                "status": "succeeded",
+                "ok": True,
+                "output_ref": "ev://assert-ok",
+            },
+            evidence={"output_ref": "ev://assert-ok", "evidence_id": 42},
         )
         evt = apply_acceptance(task, {"ok": True, "reasons": []})
         task.refresh_from_db()
@@ -291,7 +296,7 @@ class Phase4ResultEvidenceAcceptance(TestCase):
             and len(report.get("completed_items") or []) == 3
             and not report.get("contradictions")
             and (task.acceptance or {}).get("delivery", {}).get("ok") is True,
-            f"bindings_ok={all_ok} status={task.status} "
+            f"bindings_ok={all_ok} status={task.status} level={level} "
             f"completed_items={len(report.get('completed_items') or [])} "
             f"delivery_ok={(task.acceptance or {}).get('delivery', {}).get('ok')}",
         )
@@ -344,10 +349,24 @@ class Phase4ResultEvidenceAcceptance(TestCase):
         v = classify_claim_level(
             tool_name="assert_task_postcondition",
             step_status="succeeded",
-            structured={"status": "succeeded"},
+            structured={
+                "status": "succeeded",
+                "ok": True,
+                "output_ref": "ev://v",
+            },
+            evidence={"output_ref": "ev://v", "evidence_id": 7},
+        )
+        v_no_ref = classify_claim_level(
+            tool_name="assert_task_postcondition",
+            step_status="succeeded",
+            structured={"status": "succeeded", "ok": True},
+            evidence={},
         )
         self._record(
             "P4-V5-claim-levels",
-            e == CLAIM_EXECUTED and o == CLAIM_OBSERVED and v == CLAIM_VERIFIED,
-            f"executed={e} observed={o} verified={v}",
+            e == CLAIM_EXECUTED
+            and o == CLAIM_OBSERVED
+            and v == CLAIM_VERIFIED
+            and v_no_ref == CLAIM_EXECUTED,
+            f"executed={e} observed={o} verified={v} demoted={v_no_ref}",
         )

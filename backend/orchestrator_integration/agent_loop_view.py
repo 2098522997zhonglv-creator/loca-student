@@ -4353,6 +4353,80 @@ class AgentLoopStreamAPIView(View):
                             exc_info=True,
                         )
 
+                # 证据门禁失败：剥离未关联本轮证据的验证性终态表述
+                if (
+                    not user_stopped
+                    and not interrupt_detected
+                    and not final_response_corrected
+                    and acceptance is not None
+                ):
+                    try:
+                        from orchestrator_integration.final_response_policy import (
+                            correction_for_unverified_delivery,
+                            should_correct_unverified_delivery,
+                        )
+                        from orchestrator_integration.task_state_closure import (
+                            budget_snapshot as _budget_snap_for_corr,
+                        )
+
+                        _biz_snap = (
+                            _budget_snap_for_corr(_closure_task)
+                            if _closure_task is not None
+                            else {}
+                        )
+                        if should_correct_unverified_delivery(
+                            response_text=final_ai_text,
+                            acceptance=acceptance
+                            if isinstance(acceptance, dict)
+                            else {},
+                            completed_business_steps=int(
+                                _biz_snap.get("completed_business_steps") or 0
+                            ),
+                            expected_business_steps=int(
+                                _biz_snap.get("expected_business_steps") or 0
+                            ),
+                        ):
+                            final_response_corrected = True
+                            final_ai_text = correction_for_unverified_delivery(
+                                acceptance=acceptance
+                                if isinstance(acceptance, dict)
+                                else {},
+                                completed_business_steps=int(
+                                    _biz_snap.get("completed_business_steps") or 0
+                                ),
+                                expected_business_steps=int(
+                                    _biz_snap.get("expected_business_steps") or 0
+                                ),
+                            )
+                            await _persist_corrected_final_message(
+                                agent,
+                                invoke_config,
+                                original_final_ai_text,
+                                final_ai_text,
+                                "AgentLoopStreamAPI",
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "final_answer",
+                                    "content": final_ai_text,
+                                    "response_locale": (
+                                        _response_locale
+                                        if "_response_locale" in locals()
+                                        else "zh-CN"
+                                    ),
+                                }
+                            )
+                            logger.warning(
+                                "AgentLoopStreamAPI: corrected unverified delivery "
+                                "claims session=%s",
+                                session_id,
+                            )
+                    except Exception as _ev_corr_err:
+                        logger.debug(
+                            "unverified delivery correction skipped: %s",
+                            _ev_corr_err,
+                        )
+
                 if user_stopped:
                     # RC09/RC10：传输结束 ≠ 业务成功；取消保持 cancelled/cancelling
                     _stop_status = "stopped"
