@@ -1048,6 +1048,17 @@ const enrichMessagesWithSeparators = (rawHistory: ChatHistoryMessage[], formatHi
       return;
     }
 
+    // 跳过上下文摘要泄漏（不应显示为「你」发出的用户消息）
+    const leakProbe = normalizeHistoryContent(historyItem);
+    if (
+      leakProbe.startsWith('Here is a summary of the conversation to date') ||
+      leakProbe.startsWith('[内部上下文摘要') ||
+      (leakProbe.includes('Previous conversation was too long to summarize') &&
+        leakProbe.toLowerCase().includes('summary of the conversation'))
+    ) {
+      return;
+    }
+
     // ✅ 检测 Agent Loop 步骤变化: 只要有step字段就插入分隔符
     // 修复逻辑: 与上一条agent_loop消息的步骤比较,而非全局追踪
     // 这样可以支持多轮对话中步骤编号重复的情况(例如两次对话都从Step 1开始)
@@ -1172,7 +1183,16 @@ const loadChatHistory = async () => {
       // 只有在会话列表中不存在该会话时才添加（避免重复）
       const existingSession = chatSessions.value.find(s => s.id === data.session_id);
       if (!existingSession) {
-        const firstHumanMessage = data.history.find(msg => msg.type === 'human')?.content;
+        const firstHumanMessage = data.history.find((msg) => {
+          if (msg.type !== 'human') return false;
+          const c = normalizeHistoryContent(msg);
+          return !(
+            c.startsWith('Here is a summary of the conversation to date') ||
+            c.startsWith('[内部上下文摘要') ||
+            (c.includes('Previous conversation was too long to summarize') &&
+              c.toLowerCase().includes('summary of the conversation'))
+          );
+        })?.content;
         updateSessionInList(data.session_id, firstHumanMessage, false);
       }
       

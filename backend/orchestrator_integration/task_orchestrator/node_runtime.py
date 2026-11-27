@@ -471,15 +471,24 @@ def orch_node_acceptance(
                 "stage_id": sid,
                 "ids": ids,
             }
-        if sid == "fetch_conditions" and (
-            ids.get("entry_url")
-            or ids.get("product_url")
-            or "entry_url" in joined
-            or "http" in joined.lower()
-        ):
+        if sid == "fetch_conditions":
+            # 必须有入口/规则证据才算完成；纯 knowledge 旁白不得长期占住本阶段
+            if (
+                ids.get("entry_url")
+                or ids.get("product_url")
+                or "entry_url" in joined
+                or bool(re.search(r"https?://\S+", joined, re.I))
+            ):
+                return {
+                    "ok": True,
+                    "reason": "fetch_conditions_ok",
+                    "stage_id": sid,
+                    "ids": ids,
+                    "next_hint": "check_executable",
+                }
             return {
-                "ok": True,
-                "reason": "fetch_conditions_ok",
+                "ok": False,
+                "reason": "fetch_conditions_incomplete",
                 "stage_id": sid,
                 "ids": ids,
             }
@@ -487,6 +496,7 @@ def orch_node_acceptance(
             _truthy_flag(ids.get("page_ok"))
             or ids.get("product_url")
             or "page_ok" in joined
+            or "page_ok" in joined.lower()
         ):
             return {
                 "ok": True,
@@ -494,7 +504,7 @@ def orch_node_acceptance(
                 "stage_id": sid,
                 "ids": ids,
             }
-        if joined.strip():
+        if sid in {"deliver"} and joined.strip():
             return {
                 "ok": True,
                 "reason": "browser_node_output",
@@ -757,6 +767,14 @@ def advance_orchestrator_on_task(
         done = int(budget.get("completed_business_steps") or 0) + 1
         expected = int(budget.get("expected_business_steps") or plan.estimated_nodes or 0)
         budget["completed_business_steps"] = min(done, expected) if expected else done
+        try:
+            from orchestrator_integration.execution_loop_control import (
+                mark_business_progress,
+            )
+
+            mark_business_progress(task)
+        except Exception:
+            pass
 
     auth = dict(task.auth_scope or {})
     auth.update(mount.to_auth_scope_patch())

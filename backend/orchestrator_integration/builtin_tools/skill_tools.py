@@ -895,6 +895,81 @@ def _finalize_skill_result(
                                 )
                     except Exception as step_err:
                         logger.debug("record_step_result 失败: %s", step_err)
+                # 执行循环护栏：同类失败封顶 / 无进展 / fetch_conditions 滞留
+                try:
+                    from orchestrator_integration.execution_loop_control import (
+                        apply_loop_block,
+                        clear_timeout_reconcile_if_inspect,
+                        evaluate_stage_exit_fetch_conditions,
+                        note_tool_outcome,
+                    )
+                    from orchestrator_integration.models import AgentTask as _ATLoop
+
+                    _tloop = None
+                    if getattr(ctx, "runtime_task_id", None):
+                        _tloop = _ATLoop.objects.filter(pk=ctx.runtime_task_id).first()
+                    if _tloop is not None:
+                        _adv = bool(
+                            isinstance(getattr(tr, "_stage_advanced", None), dict)
+                            and (getattr(tr, "_stage_advanced") or {}).get("advanced")
+                        )
+                        if tr.status == "succeeded":
+                            clear_timeout_reconcile_if_inspect(
+                                _tloop, command=command or ""
+                            )
+                        _outcome = note_tool_outcome(
+                            _tloop,
+                            skill_name=skill_name or "",
+                            command=command or "",
+                            status=tr.status or "",
+                            error_code=str(
+                                getattr(tr, "error_code", None)
+                                or (tr.data or {}).get("error_code")
+                                or ""
+                            ),
+                            summary=str(tr.summary or "")[:400],
+                            advanced_stage=_adv,
+                        )
+                        if _outcome.get("block"):
+                            apply_loop_block(_tloop, _outcome)
+                            tr.data = dict(tr.data or {})
+                            tr.data["loop_guard"] = _outcome
+                            notices = list(tr.data.get("runtime_notices") or [])
+                            notices.append(
+                                "【执行循环护栏】"
+                                + "；".join(_outcome.get("reasons") or [])
+                            )
+                            tr.data["runtime_notices"] = notices
+                        # fetch_conditions 具备证据 → 提示/推进
+                        _exit = evaluate_stage_exit_fetch_conditions(
+                            _tloop,
+                            tool_results=[str(tr.summary or ""), str(compact or "")],
+                        )
+                        if _exit.get("block"):
+                            apply_loop_block(_tloop, _exit)
+                        elif _exit.get("advance") and not _adv:
+                            try:
+                                from orchestrator_integration.task_orchestrator.node_runtime import (
+                                    advance_orchestrator_on_task as _adv_fetch,
+                                )
+
+                                _forced = _adv_fetch(
+                                    _tloop,
+                                    tool_results=[
+                                        str(tr.summary or ""),
+                                        str(compact or ""),
+                                    ],
+                                )
+                                if _forced.get("advanced"):
+                                    setattr(tr, "_stage_advanced", _forced)
+                                    ctx.current_stage = (
+                                        _forced.get("current_stage")
+                                        or ctx.current_stage
+                                    )
+                            except Exception:
+                                pass
+                except Exception as loop_err:
+                    logger.debug("execution_loop_control skipped: %s", loop_err)
                 # FR06：失败/unknown 附加集中重试与核对提示
                 if tr.status in {"failed", "unknown"}:
                     try:
@@ -919,6 +994,16 @@ def _finalize_skill_result(
                             attempt=0,
                             channel=channel,
                         )
+                        try:
+                            from orchestrator_integration.execution_loop_control import (
+                                enhance_reconcile_for_browser,
+                            )
+
+                            plan = enhance_reconcile_for_browser(
+                                plan, skill_name=skill_name or ""
+                            )
+                        except Exception:
+                            pass
                         # 不确定结果消耗一次重试预算标记（实际重放仍禁止）
                         if plan.get("must_reconcile") and ctx.runtime_task_id:
                             try:
@@ -1661,6 +1746,33 @@ def get_skill_tools(
                             },
                             ensure_ascii=False,
                         )
+                    # 超时未核对前禁止副作用重做
+                    try:
+                        from orchestrator_integration.execution_loop_control import (
+                            preflight_side_effect_after_timeout,
+                        )
+
+                        _to = preflight_side_effect_after_timeout(
+                            _task,
+                            skill_name=skill_name or "",
+                            command=command or "",
+                        )
+                        if _to.get("block_execute"):
+                            return _json.dumps(
+                                {
+                                    "status": "blocked",
+                                    "execution_status": "blocked",
+                                    "reason": _to.get("blocker_code")
+                                    or "timeout_must_reconcile_first",
+                                    "retryable": False,
+                                    "summary": _to.get("message")
+                                    or "超时结果未核对，禁止副作用重试",
+                                    "recovery": _to.get("recovery") or "",
+                                },
+                                ensure_ascii=False,
+                            )
+                    except Exception:
+                        pass
                     _guard = guard_side_effect_replay(
                         _task, skill_name=skill_name or "", command=command or ""
                     )
