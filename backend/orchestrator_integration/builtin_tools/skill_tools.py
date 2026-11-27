@@ -1107,30 +1107,76 @@ def get_skill_tools(
         name = (skill_name or "").strip()
         if not name:
             return None
-        # 任务立项主/辅授权（优先于工具创建时的静态分区白名单）
-        # Escape Hatch 动态扩权写在 commission.granted_auxiliary，必须在此直接放行，
-        # 否则会落到下方 closed-over allowed_names 仍被拒。
+        # 有效授权 = commission 主/辅 ∪ telemetry 获批 ∪ 任务 auth_scope/facts 持久化
+        # Escape Hatch / 二层备用必须在此直接放行，否则会落到创建时 closed-over 白名单仍被拒。
         try:
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
             ctx = get_telemetry_context()
+            live: set[str] = set(ctx.granted_skills or [])
             commission = ctx.commission
+            primary: set[str] = set()
+            auxiliary: set[str] = set()
             if commission is not None:
+                primary = set(commission.primary_skills or [])
+                auxiliary = set(commission.auxiliary_skills or [])
                 granted = commission.effective_allowlist()
                 if granted is not None:
-                    if name not in granted:
-                        if name in commission.auxiliary_skills:
-                            return (
-                                f"Skill「{name}」属于辅类，尚未授权。"
-                                "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
-                                "禁止要求用户点名 Skill 或重写指令。"
-                            )
-                        return (
-                            f"Skill「{name}」不在本任务主类授权内。"
-                            f"主类: {', '.join(sorted(commission.primary_skills)) or '(无)'}。"
-                            "请改用主类 skill 自愈；禁止要求用户重写指令。"
-                        )
+                    live |= set(granted)
+                else:
+                    live |= primary | set(commission.granted_auxiliary or [])
+            # 任务持久化授权（扩权后同轮/跨轮）
+            try:
+                from orchestrator_integration.models import AgentTask
+
+                task = None
+                if getattr(ctx, "runtime_task_id", None):
+                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+                if task is not None:
+                    auth = dict(getattr(task, "auth_scope", None) or {})
+                    facts = dict(getattr(task, "facts", None) or {})
+                    live |= {
+                        str(s).strip()
+                        for s in (auth.get("allowed_skills") or [])
+                        if s
+                    }
+                    live |= {
+                        str(s).strip()
+                        for s in (facts.get("granted_auxiliary") or [])
+                        if s
+                    }
+                    live |= {
+                        str(s).strip()
+                        for s in (facts.get("activated_fallbacks") or [])
+                        if s
+                    }
+            except Exception:
+                pass
+
+            if live:
+                if name in live:
                     return None
+                if name in auxiliary:
+                    return (
+                        f"Skill「{name}」属于辅类，尚未授权。"
+                        "请先 request_tool_expansion(skill_name=...) 申请一次 Escape Hatch，"
+                        "禁止要求用户点名 Skill 或重写指令。"
+                    )
+                return (
+                    f"Skill「{name}」不在本任务主类授权内。"
+                    f"主类: {', '.join(sorted(primary)) or '(无)'}。"
+                    f"已获批: {', '.join(sorted(live)) or '(无)'}。"
+                    "请改用已授权 skill 或 request_tool_expansion；禁止要求用户重写指令。"
+                )
+            if commission is not None:
+                # commission 存在但有效白名单为空：显式拒绝执行类 Skill
+                granted = commission.effective_allowlist()
+                if granted is not None and name not in granted:
+                    return (
+                        f"Skill「{name}」不在本任务主类授权内。"
+                        f"主类: {', '.join(sorted(primary)) or '(无)'}。"
+                        "请改用主类 skill 自愈；禁止要求用户重写指令。"
+                    )
         except Exception:
             pass
         if allowed_names is None:
@@ -1423,6 +1469,116 @@ def get_skill_tools(
             skill_dir = skill.get_full_path()
             if not skill_dir or not os.path.isdir(skill_dir):
                 return f"错误: Skill '{skill_name}' 目录不存在"
+
+            # 阶段2/3：授权门禁 + 同任务同幂等键副作用跳过重放
+            try:
+                from orchestrator_integration.resume_execution import (
+                    guard_side_effect_replay,
+                )
+                from orchestrator_integration.telemetry_context import (
+                    get_telemetry_context,
+                )
+                from orchestrator_integration.models import AgentTask
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    authorize_tool_call,
+                )
+                import json as _json
+
+                _ctx = get_telemetry_context()
+                _task = None
+                if getattr(_ctx, "runtime_task_id", None):
+                    _task = AgentTask.objects.filter(
+                        public_task_id=str(_ctx.runtime_task_id)
+                    ).first() or AgentTask.objects.filter(
+                        pk=_ctx.runtime_task_id
+                    ).first()
+                if _task is None and getattr(_ctx, "commission", None) is not None:
+                    _tid = getattr(_ctx.commission, "task_id", "") or ""
+                    if _tid:
+                        _task = AgentTask.objects.filter(public_task_id=str(_tid)).first()
+                if _task is not None:
+                    _auth = authorize_tool_call(
+                        auth_scope=getattr(_task, "auth_scope", None) or {},
+                        skill_name=skill_name or "",
+                        command=command or "",
+                    )
+                    if not _auth.get("ok"):
+                        logger.info(
+                            "[execute_skill_script] auth denied task=%s code=%s",
+                            _task.public_task_id or _task.pk,
+                            _auth.get("error_code"),
+                        )
+                        return _json.dumps(
+                            {
+                                "status": "blocked",
+                                "execution_status": "blocked",
+                                "reason": _auth.get("error_code") or "auth_denied",
+                                "retryable": False,
+                                "summary": _auth.get("message")
+                                or "动作未授权，禁止执行",
+                                "recovery": _auth.get("recovery") or "",
+                                "risk": _auth.get("risk") or {},
+                                "auth": _auth.get("auth") or {},
+                            },
+                            ensure_ascii=False,
+                        )
+                    _guard = guard_side_effect_replay(
+                        _task, skill_name=skill_name or "", command=command or ""
+                    )
+                    if _guard.get("skip"):
+                        logger.info(
+                            "[execute_skill_script] idempotent skip task=%s key=%s step=%s reason=%s",
+                            _task.public_task_id or _task.pk,
+                            _guard.get("idempotency_key"),
+                            _guard.get("step_id"),
+                            _guard.get("reason"),
+                        )
+                        if _guard.get("must_reconcile"):
+                            _rec = _guard.get("reconcile") or {}
+                            return _json.dumps(
+                                {
+                                    "status": "unknown",
+                                    "execution_status": "unknown",
+                                    "reason": "uncertain_must_reconcile",
+                                    "retryable": False,
+                                    "idempotency_key": _guard.get("idempotency_key"),
+                                    "operation_id": _guard.get("operation_id")
+                                    or _guard.get("step_id"),
+                                    "summary": (
+                                        "结果未知：禁止重放同一副作用；"
+                                        f"请先 {_rec.get('reconcile_action') or '核对原记录'}。"
+                                    ),
+                                    "reconcile": _rec,
+                                    "data": {"prior_output": _guard.get("output_summary")},
+                                    "evidence": _guard.get("evidence") or {},
+                                },
+                                ensure_ascii=False,
+                            )
+                        return _json.dumps(
+                            {
+                                "status": "skipped",
+                                "execution_status": "skipped",
+                                "reason": "idempotent_replay_blocked",
+                                "idempotency_key": _guard.get("idempotency_key"),
+                                "operation_id": _guard.get("operation_id")
+                                or _guard.get("step_id"),
+                                "summary": (
+                                    "相同副作用已成功执行过，已跳过重放；"
+                                    f"沿用原证据 operation_id={_guard.get('operation_id') or _guard.get('step_id')}"
+                                ),
+                                "data": {
+                                    "prior_output": _guard.get("output_summary"),
+                                    "prior_structured": _guard.get("structured_result")
+                                    or {},
+                                },
+                                "evidence": _guard.get("evidence") or {},
+                            },
+                            ensure_ascii=False,
+                        )
+            except Exception as _guard_err:
+                logger.debug(
+                    "[execute_skill_script] idempotent guard skipped: %s", _guard_err
+                )
 
             logger.info(f"[execute_skill_script] 在目录 {skill_dir} 执行: {command}")
 

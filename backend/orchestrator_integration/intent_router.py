@@ -485,9 +485,30 @@ def looks_like_testcase_execute_keywords(message: str) -> bool:
     # spelling out "执行用例". Route those through the testcase long-flow planner.
     if (
         "回归" in text
-        and any(cue in text for cue in ("测试", "功能", "用例", "常规品", "模块", "商品"))
-        and re.search(r"执行|开始|运行|跑|验证|复测|开展|帮我|请你", text)
+        and any(
+            cue in text
+            for cue in (
+                "测试",
+                "功能",
+                "用例",
+                "常规品",
+                "模块",
+                "商品",
+                "检查点",
+                "截图",
+                "商品中心",
+            )
+        )
+        and re.search(
+            r"执行|开始|运行|跑|验证|复测|开展|帮我|请你|恢复执行|待办", text
+        )
     ):
+        return True
+    # 商品中心检查清单：即使未写「回归」也按可执行业务流路由，避免落成 single
+    if any(
+        k in text
+        for k in ("商品中心", "goods-list", "编辑展示", "定制设置", "定制价格")
+    ) and re.search(r"检查点|截图|复测|验证|商品ID|商品\s*id", text, re.I):
         return True
     if _EXECUTE_APPROVAL_RE.search(text) and (
         "用例" in text or "自动化" in text or "套件" in text or "testcase" in text.lower()
@@ -760,9 +781,9 @@ def build_intent_hint(
         lines.extend(
             [
                 "- 本轮以知识库问答为主：优先用预检索或历史已答缓存；不足时再 knowledge_search，须标注来源。",
-                "- 未挂载 execute_skill_script；不要编造落库、执行 Skill 或浏览器操作。",
-                "- 若用户其实要保存/知识沉淀/执行 Skill/读网页：不要硬调不存在的工具；"
-                "请明确请用户重说「保存到平台」「沉淀到知识库」或「执行 skill」。",
+                "- 若本轮未绑定 execute_skill_script：不要编造落库、执行 Skill 或浏览器操作。",
+                "- 若编排/续跑需要执行通道：由服务端在开跑前恢复挂载或明确 blocked；"
+                "禁止要求用户重新下发任务或手动重挂工具。",
             ]
         )
     if INTENT_WRITE in decision.intents and (

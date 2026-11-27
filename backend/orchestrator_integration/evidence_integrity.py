@@ -162,6 +162,22 @@ def evaluate_evidence_integrity_text(
         hard_ok = False
         hard_reasons.append("禁止用占位值补齐交付字段")
 
+    # 历史截图目录 / 上一轮产物不得冒充本轮验证完成
+    historical_shot = bool(
+        re.search(r"reg_std_\w+|历史截图|上一轮截图|上一次证据", t, re.I)
+    )
+    claims_verified = bool(
+        re.search(
+            r"(已验证|验证完成|检查点(?:已)?完成|商品检查(?:已)?完成|回归(?:已)?完成)",
+            t,
+        )
+    )
+    if historical_shot and claims_verified and browser_actions_this_turn <= 0:
+        hard_ok = False
+        hard_reasons.append(
+            "历史截图/上一轮产物不得作为本轮验证证据；禁止据此声称检查已完成"
+        )
+
     return {
         "ok": hard_ok,  # 兼容旧调用：ok = 硬门禁
         "hard_ok": hard_ok,

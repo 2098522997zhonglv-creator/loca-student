@@ -331,32 +331,40 @@ def assert_task_access(
 
 
 def resume_preflight(task) -> Dict[str, Any]:
-    """恢复前核对：不确定步骤必须先 reconcile（FR04.4 / AC09）。"""
-    from orchestrator_integration.models import AgentStep
-    from orchestrator_integration.reconcile import collect_uncertain_steps
+    """恢复前核对：不确定步骤必须先 reconcile；附带续跑幂等计划（阶段2）。"""
+    try:
+        from orchestrator_integration.resume_execution import resume_preflight_v2
 
-    steps = list(
-        AgentStep.objects.filter(task=task)
-        .order_by("step_number")
-        .values(
-            "step_id",
-            "tool_name",
-            "status",
-            "tool_output_summary",
-            "structured_result",
-            "operation_id",
-        )[:100]
-    )
-    uncertain = collect_uncertain_steps(steps)
-    return {
-        "must_reconcile": bool(uncertain),
-        "uncertain_steps": uncertain,
-        "hint": (
-            "存在未核对的副作用步骤：先查询原动作状态，禁止盲目重放。"
-            if uncertain
-            else ""
-        ),
-    }
+        return resume_preflight_v2(task)
+    except Exception:
+        from orchestrator_integration.models import AgentStep
+        from orchestrator_integration.reconcile import collect_uncertain_steps
+
+        steps = list(
+            AgentStep.objects.filter(task=task)
+            .order_by("step_number")
+            .values(
+                "step_id",
+                "tool_name",
+                "status",
+                "tool_output_summary",
+                "structured_result",
+                "operation_id",
+                "evidence",
+                "param_fingerprint",
+                "tool_input",
+            )[:100]
+        )
+        uncertain = collect_uncertain_steps(steps)
+        return {
+            "must_reconcile": bool(uncertain),
+            "uncertain_steps": uncertain,
+            "hint": (
+                "存在未核对的副作用步骤：先查询原动作状态，禁止盲目重放。"
+                if uncertain
+                else ""
+            ),
+        }
 
 
 def _budget_remaining(budget: Dict[str, Any]) -> Tuple[int, int, int, int]:
@@ -745,6 +753,39 @@ def record_step_result(
             pass
     if structured.get("idempotency_key"):
         evidence["idempotency_key"] = structured.get("idempotency_key")
+    # 阶段2：保存输入摘要与副作用前后态，供续跑跳过/核对
+    try:
+        from orchestrator_integration.resume_execution import _input_summary
+
+        evidence.setdefault(
+            "input_summary",
+            _input_summary(
+                tool_input if isinstance(tool_input, dict) else {"raw": tool_input}
+            ),
+        )
+    except Exception:
+        pass
+    if not evidence.get("idempotency_key"):
+        try:
+            from orchestrator_integration.idempotency import build_idempotency_key
+
+            cmd = ""
+            if isinstance(tool_input, dict):
+                cmd = str(
+                    tool_input.get("command")
+                    or tool_input.get("script")
+                    or tool_input.get("raw")
+                    or ""
+                )
+            evidence["idempotency_key"] = build_idempotency_key(
+                task_id=str(task.public_task_id or task.pk),
+                skill_name=tool_name or "",
+                command=cmd,
+            )
+            structured = dict(structured)
+            structured["idempotency_key"] = evidence["idempotency_key"]
+        except Exception:
+            pass
 
     step = AgentStep.objects.create(
         task=task,
@@ -774,6 +815,21 @@ def record_step_result(
             full_text = structured.get("summary") or ""
         else:
             full_text = summary or ""
+        # 阶段4：区分已执行/已观察/已验证
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                classify_claim_level,
+            )
+
+            _claim = classify_claim_level(
+                tool_name=tool_name or "",
+                step_status=step_status,
+                structured=structured,
+                evidence=evidence,
+            )
+        except Exception:
+            _claim = "executed"
+        evidence["claim_level"] = _claim
         stored = store_tool_output_evidence(
             task,
             step=step,
@@ -781,7 +837,7 @@ def record_step_result(
             summary=summary or structured.get("summary") or "",
             full_text=full_text,
             structured=structured,
-            claim_type="observation",
+            claim_type=_claim,
         )
         if stored.get("ok"):
             evidence["output_ref"] = stored.get("output_ref")
@@ -789,11 +845,35 @@ def record_step_result(
             evidence["content_hash"] = stored.get("content_hash")
             structured = dict(structured)
             structured["output_ref"] = stored.get("output_ref")
+            # 入库拿到引用后再分级：此前无 ref 时 verified 会被降级
+            try:
+                _claim = classify_claim_level(
+                    tool_name=tool_name or "",
+                    step_status=step_status,
+                    structured=structured,
+                    evidence=evidence,
+                )
+            except Exception:
+                pass
+            evidence["claim_level"] = _claim
+            structured["claim_level"] = _claim
             AgentStep.objects.filter(pk=step.pk).update(
                 evidence=evidence, structured_result=structured
             )
             step.evidence = evidence
             step.structured_result = structured
+        else:
+            # 无引用则禁止残留 verified 声明
+            if _claim == "verified":
+                _claim = "executed"
+                evidence["claim_level"] = _claim
+                structured = dict(structured)
+                structured["claim_level"] = _claim
+                AgentStep.objects.filter(pk=step.pk).update(
+                    evidence=evidence, structured_result=structured
+                )
+                step.evidence = evidence
+                step.structured_result = structured
     except Exception as evid_err:
         logger.warning("store_tool_output_evidence failed: %s", evid_err)
 
@@ -911,13 +991,27 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
     """终态条件更新：不可逆；完成事件唯一（R20）。"""
     from orchestrator_integration.models import AgentTask, TaskEvent
 
+    # 阶段4：证据缺失或矛盾禁止 completed
+    if acceptance and acceptance.get("ok"):
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                gate_completion_on_evidence,
+            )
+
+            gated = gate_completion_on_evidence(task, acceptance)
+            acceptance = gated.get("acceptance") or acceptance
+        except Exception as gate_err:
+            logger.warning("evidence gate skipped: %s", gate_err)
+
     ok = bool(acceptance.get("ok"))
     status = "completed" if ok else "blocked"
     terminal = ("completed", "failed", "cancelled")
+    prior_status = ""
     with transaction.atomic():
         row = AgentTask.objects.select_for_update().filter(pk=task.pk).first()
         if row is None:
             return {"type": "error", "error_code": "task_missing"}
+        prior_status = str(row.status or "")
         # RC10：取消中/已终态不得被迟到验收复活为 completed/blocked
         if row.status in terminal or row.status == "cancelling":
             return {
@@ -962,6 +1056,28 @@ def apply_acceptance(task, acceptance: Dict[str, Any]) -> Dict[str, Any]:
         status=status,
         payload={"acceptance": acceptance},
     )
+    # 阶段5：状态迁移 + 最终交付审计
+    try:
+        from orchestrator_integration.production_observability import (
+            audit_final_delivery,
+            audit_status_transition,
+        )
+
+        audit_status_transition(
+            task,
+            from_status=prior_status,
+            to_status=status,
+            reason="apply_acceptance",
+            blocker_code=""
+            if ok
+            else str(
+                ((acceptance.get("blockers") or [{}])[0] or {}).get("blocker_code")
+                or ""
+            ),
+        )
+        audit_final_delivery(task, acceptance=acceptance)
+    except Exception as audit_err:
+        logger.debug("acceptance audit skipped: %s", audit_err)
     # 统一时间字段
     if "time" not in evt:
         evt["time"] = timezone.now().isoformat()
@@ -1950,6 +2066,19 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
             reconfirm_events += 1
     # R26：遥测按用户过滤，与任务列表范围一致
     telem = aggregate_telemetry(limit=2000, user_id=user_id)
+    # 阶段5：运营可观测指标
+    ops = {}
+    try:
+        from orchestrator_integration.production_observability import (
+            compute_ops_metrics,
+            detect_anomalies,
+        )
+
+        ops = compute_ops_metrics(user_id=user_id, limit=limit)
+        anomalies = detect_anomalies(user_id=user_id)
+    except Exception as ops_err:
+        logger.debug("ops metrics skipped: %s", ops_err)
+        anomalies = {"ok": True, "alerts": []}
     return {
         "tasks_sampled": len(recent),
         "status_counts": by_status,
@@ -1966,6 +2095,12 @@ def quality_metrics(*, user_id: Optional[int] = None, limit: int = 200) -> Dict[
             "playbook_hits": telem.get("playbook_hits"),
             "total_tool_events": telem.get("total"),
         },
+        "ops": ops,
+        "anomalies": anomalies,
+        "hanging_task_count": ops.get("hanging_task_count"),
+        "resume_success_rate": ops.get("resume_success_rate"),
+        "duplicate_op_rate": ops.get("duplicate_op_rate"),
+        "avg_duration_ms": ops.get("avg_duration_ms"),
     }
 
 

@@ -239,6 +239,18 @@ def finalize_task_acceptance(
             acceptance["reasons"] = reasons
             acceptance["stage_verdict"] = verdict
 
+    # 阶段4：交付报告 + 证据门禁（缺失/矛盾禁止 completed）
+    if task is not None:
+        try:
+            from orchestrator_integration.result_evidence_delivery import (
+                gate_completion_on_evidence,
+            )
+
+            gated = gate_completion_on_evidence(task, acceptance)
+            acceptance = gated.get("acceptance") or acceptance
+        except Exception:
+            pass
+
     evt_payload: Dict[str, Any] = {
         "type": "task_completed" if acceptance.get("ok") else "task_blocked",
         "task_id": session.task_id or getattr(commission, "task_id", ""),
@@ -249,12 +261,24 @@ def finalize_task_acceptance(
     if session.runtime.task is not None:
         persisted = session.runtime.accept(acceptance)
         if persisted.get("deferred_completion"):
+            # 多阶段未到末节点：流结束由 close_task_after_stream 收口，
+            # 此处只推送阶段信息，不再假装可长期停在 running。
             evt_payload = {
                 "type": "stage_changed",
                 "task_id": session.task_id,
                 "status": "running",
                 "payload": persisted.get("payload") or {},
+                "deferred_completion": True,
             }
+            acceptance = dict(acceptance)
+            acceptance["ok"] = False
+            acceptance["deferred_completion"] = True
+            acceptance["reasons"] = list(acceptance.get("reasons") or []) + [
+                str(
+                    (persisted.get("payload") or {}).get("reason")
+                    or "not_last_stage_defer_completion"
+                )
+            ]
         else:
             evt_payload.update(
                 {

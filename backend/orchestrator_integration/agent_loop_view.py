@@ -84,9 +84,9 @@ logger = logging.getLogger(__name__)
 
 _KB_PRIORITY_HINT = """
 # 工具选择（由你按用户意图决定）
-可用工具仅限本轮实际挂载名（见「本轮意图路由」）：通常为 knowledge_search、read_skill_content、execute_skill_script（以及已配置的 MCP）。
+可用工具仅限下方「本轮已绑定工具」列出的名字（与 Agent 工具列表一致）；勿假设一定有 execute_skill_script。
 禁止把 Skill 名称（如 url-reader、loca-stude、playwright-skill）当成 tool 名直接调用。
-若某工具未挂载，说明本轮意图不需要它——不要编造调用结果。
+若某工具未列出，说明本轮未绑定——不要编造调用结果；禁止要求用户重挂工具或重新下发任务。
 
 ## 怎么选
 - 业务事实 / 环境地址 / 规则 / 流程 / 接口设计「文档里怎么写」：优先下方「知识库预检索结果」；不足时再调 knowledge_search。预检索已够用时不要重复 knowledge_search。
@@ -1729,18 +1729,28 @@ class AgentLoopStreamAPIView(View):
                 if _preserve_exec and isinstance(
                     getattr(_prior_task, "auth_scope", None), dict
                 ):
-                    # 补充续跑：合并授权，不收缩已批准范围
+                    # 阶段3：继续不静默扩权；新 allow → pending
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        merge_auth_scope_for_continue,
+                    )
+
                     prior_auth = dict(_prior_task.auth_scope or {})
-                    for k in ("allow_actions", "deny_actions", "deliver_identifiers"):
+                    _auth_scope0 = merge_auth_scope_for_continue(
+                        prior_auth,
+                        _auth_scope0,
+                        require_l3_for_new_allows=True,
+                    )
+                    if prior_auth.get("requires_wysiwyg_upload"):
+                        _auth_scope0["requires_wysiwyg_upload"] = True
+                    for k in ("deliver_identifiers",):
                         merged = list(
                             dict.fromkeys(
                                 list(prior_auth.get(k) or [])
-                                + list(_auth_scope0.get(k) or [])
+                                + list((_auth_scope0.get(k) or []))
                             )
                         )
-                        _auth_scope0[k] = merged
-                    if prior_auth.get("requires_wysiwyg_upload"):
-                        _auth_scope0["requires_wysiwyg_upload"] = True
+                        if merged:
+                            _auth_scope0[k] = merged
                 if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
                     _orch_plan = plan_from_dict(_prior_facts.get("task_plan"))
                     # 与 DB current_stage 对齐，避免 facts 滞后导致挂载停在首节点
@@ -1760,33 +1770,42 @@ class AgentLoopStreamAPIView(View):
                         prior_facts=_prior_facts if _preserve_exec else None,
                         auth_scope=_auth_scope0,
                     )
-                _activated_fb = set(
-                    (_prior_facts.get("activated_fallbacks") or [])
-                    if _preserve_exec
-                    else []
-                )
+                _activated_fb = set()
+                if _preserve_exec:
+                    _activated_fb |= set(
+                        _prior_facts.get("activated_fallbacks") or []
+                    )
+                    _activated_fb |= set(
+                        _prior_facts.get("granted_auxiliary") or []
+                    )
+                    try:
+                        _prior_auth = dict(
+                            getattr(_prior_task, "auth_scope", None) or {}
+                        )
+                        _activated_fb |= {
+                            str(s).strip()
+                            for s in (_prior_auth.get("allowed_skills") or [])
+                            if s
+                        }
+                    except Exception:
+                        pass
+                    _activated_fb = {s for s in _activated_fb if s}
                 _orch_mount = apply_orchestrator_mount(
                     _orch_plan, activated_fallbacks=_activated_fb
                 )
-                # Keep task execution policy separate from the KB toggle. A
-                # multi-stage plan can start with fetch_conditions while still
-                # requiring browser/test execution later; retaining kb_qa as
-                # the tool-zone would hard-reject execute_skill_script even
-                # after an L2 skill grant. Stage/commission allowlists remain
-                # the authoritative per-skill and per-action gates.
-                try:
-                    from orchestrator_integration.skill_zones import (
-                        promote_zone_for_orchestrated_plan,
-                    )
+                # A durable plan may start in fetch_conditions while its next
+                # node requires browser/test execution. The KB switch must not
+                # keep the low-level tool telemetry in kb_qa, which hard-blocks
+                # execute_skill_script even after the planned skill is granted.
+                # The orchestrator's node allowlist and action auth remain the
+                # narrower gates for each actual call.
+                from orchestrator_integration.skill_zones import (
+                    promote_zone_for_orchestrated_plan,
+                )
 
-                    skill_zone = promote_zone_for_orchestrated_plan(
-                        skill_zone, _orch_plan
-                    )
-                except Exception as _zone_promote_err:
-                    logger.warning(
-                        "AgentLoopStreamAPI: execution zone promotion skipped: %s",
-                        _zone_promote_err,
-                    )
+                skill_zone = promote_zone_for_orchestrated_plan(
+                    skill_zone, _orch_plan
+                )
                 _stage_specs = sync_plan_to_stage_specs(_orch_plan)
                 _current_stage_id = _orch_plan.current_node or (
                     _stage_specs[0].stage_id if _stage_specs else ""
@@ -1811,11 +1830,26 @@ class AgentLoopStreamAPIView(View):
                 mount_execute = (
                     skill_zone.allow_execute or _preserve_exec or not kb_qa_mode
                 )
+                # 编排一层要求执行通道时，禁止被误判的 kb_qa 区卸掉 execute
+                try:
+                    from orchestrator_integration.tool_binding_consistency import (
+                        orch_requires_execute as _orch_needs_exec,
+                    )
+
+                    if _orch_needs_exec(_orch_mount):
+                        mount_execute = True
+                except Exception:
+                    if "execute_skill_script" in set(
+                        getattr(_orch_mount, "builtin_allow", None) or set()
+                    ):
+                        mount_execute = True
                 skill_allowlist = set(_orch_mount.skill_allowlist)
                 if _preserve_exec:
                     skill_allowlist |= set(zone_skills(ZONE_BROWSER))
                 elif not skill_zone.allow_execute and kb_qa_mode:
-                    skill_allowlist = set()
+                    # 编排仍需要 skill 白名单时不得清空（否则公布≠可达）
+                    if not mount_execute:
+                        skill_allowlist = set()
                 # 将一层 skill 并入 commission 主类，避免旧 _assert 仍按辅类拒
                 try:
                     task_commission.primary_skills = frozenset(
@@ -1824,6 +1858,11 @@ class AgentLoopStreamAPIView(View):
                     task_commission.granted_auxiliary = set(
                         task_commission.granted_auxiliary or []
                     ) | set(_activated_fb)
+                    if _activated_fb and hasattr(task_commission, "grant_skills"):
+                        task_commission.grant_skills(_activated_fb)
+                        skill_allowlist = set(skill_allowlist or []) | set(
+                            task_commission.effective_allowlist() or []
+                        )
                 except Exception:
                     pass
                 # 执行用例话术：禁止主类为空 / 卸掉 execute（防标题过长未命中旧正则）
@@ -2083,6 +2122,31 @@ class AgentLoopStreamAPIView(View):
                     } and name not in have:
                         tools.append(mt)
                         have.add(name)
+            # 编排 skip_legacy_intersect：业务步骤前恢复被意图裁剪卸掉的必需工具
+            _bind_report = None
+            try:
+                from orchestrator_integration.tool_binding_consistency import (
+                    ensure_orchestrator_tools_bound,
+                )
+
+                _bind_report = ensure_orchestrator_tools_bound(
+                    tools,
+                    orch_mount=_orch_mount,
+                    builtin_tool_pool=builtin_tools,
+                    require_execute=bool(mount_execute),
+                )
+                tools = list(_bind_report.get("tools") or tools)
+                if _bind_report.get("remounted"):
+                    logger.info(
+                        "AgentLoopStreamAPI: remounted orch-required tools before "
+                        "business steps: %s",
+                        _bind_report.get("remounted"),
+                    )
+            except Exception as _bind_err:
+                logger.warning(
+                    "AgentLoopStreamAPI: tool bind reconcile failed: %s",
+                    _bind_err,
+                )
             # 阶段允许时才重挂 KB；browser_interact 未声明则不得重挂
             _stage_allows_kb = bool(
                 not _stage_mount.get("restrict")
@@ -2143,6 +2207,51 @@ class AgentLoopStreamAPIView(View):
                     intent_hint = (
                         f"{intent_hint}\n\n{stage_hint}" if intent_hint else stage_hint
                     )
+            # 阶段2：续跑注入幂等计划（跳过已完成、未知先核对）
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.resume_execution import (
+                        build_resume_plan,
+                    )
+
+                    _rplan = build_resume_plan(_prior_task)
+                    _rhint = (_rplan or {}).get("hint") or ""
+                    if _rhint:
+                        intent_hint = (
+                            f"{intent_hint}\n\n{_rhint}" if intent_hint else _rhint
+                        )
+                except Exception as _rplan_err:
+                    logger.debug("resume plan hint skipped: %s", _rplan_err)
+            # 阶段3：工具与授权步骤清单
+            try:
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    build_step_tool_manifest,
+                )
+
+                _tp = None
+                if _preserve_exec and isinstance(_prior_facts.get("task_plan"), dict):
+                    _tp = _prior_facts.get("task_plan")
+                elif "_orch_plan" in locals() and _orch_plan is not None:
+                    try:
+                        _tp = _orch_plan.to_dict() if hasattr(_orch_plan, "to_dict") else None
+                    except Exception:
+                        _tp = None
+                _manifest = build_step_tool_manifest(
+                    stage_plan=[s.to_dict() for s in (_stage_specs or [])]
+                    if "_stage_specs" in locals() and _stage_specs
+                    else None,
+                    task_plan=_tp,
+                    auth_scope=_auth_scope0
+                    if "_auth_scope0" in locals()
+                    else (auth_scope if "auth_scope" in locals() else {}),
+                )
+                _ahint = (_manifest or {}).get("hint") or ""
+                if _ahint:
+                    intent_hint = (
+                        f"{intent_hint}\n\n{_ahint}" if intent_hint else _ahint
+                    )
+            except Exception as _auth_hint_err:
+                logger.debug("tool auth hint skipped: %s", _auth_hint_err)
             # FR04.5：探测经 finalize 模块统一构造
             try:
                 from orchestrator_integration.agent_loop_finalize import (
@@ -2165,6 +2274,44 @@ class AgentLoopStreamAPIView(View):
                     else specialist_hint_text
                 )
             mounted_names = [getattr(t, "name", str(t)) for t in tools]
+            # 公布文案与实际绑定对齐；去掉「未挂载 execute / 请用户重说」等虚报
+            try:
+                from orchestrator_integration.tool_binding_consistency import (
+                    build_bound_tools_advertise_hint,
+                    patch_advertise_hint_for_bound_tools,
+                )
+
+                intent_hint = patch_advertise_hint_for_bound_tools(
+                    intent_hint or "", mounted_names
+                )
+                _bound_adv = build_bound_tools_advertise_hint(
+                    mounted_names, skill_allowlist=skill_allowlist
+                )
+                intent_hint = (
+                    f"{intent_hint}\n\n{_bound_adv}" if intent_hint else _bound_adv
+                )
+            except Exception as _adv_err:
+                logger.debug("bound-tools advertise skipped: %s", _adv_err)
+            # 跨轮恢复：任务已持久化的获批 Skill 必须进入 telemetry / commission
+            _restored_grants = set()
+            if _preserve_exec and _prior_task is not None:
+                try:
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        restore_granted_skills_from_task,
+                    )
+
+                    _restored_grants = set(
+                        restore_granted_skills_from_task(
+                            _prior_task, commission=task_commission
+                        )
+                        or []
+                    )
+                    if _restored_grants:
+                        skill_allowlist = set(skill_allowlist or []) | _restored_grants
+                except Exception as _restore_err:
+                    logger.debug(
+                        "restore granted skills skipped: %s", _restore_err
+                    )
             set_telemetry_context(
                 TelemetryContext(
                     zone=skill_zone.zone_id,
@@ -2182,7 +2329,7 @@ class AgentLoopStreamAPIView(View):
                         else ""
                     ),
                     commission=task_commission,
-                    granted_skills=set(skill_allowlist or []),
+                    granted_skills=set(skill_allowlist or []) | _restored_grants,
                     short_circuit=task_commission.short_circuit,
                     draft_writes=task_commission.draft_writes,
                     current_stage=_current_stage_id,
@@ -2270,15 +2417,17 @@ class AgentLoopStreamAPIView(View):
                     else infer_auth_scope(user_message)
                 )
                 if _preserve_exec and _prior_task is not None:
-                    # 补充话术可能带出新约束，但不得用本轮短句覆盖原 deny
+                    # 阶段3：补充话术不得静默扩大 allow
+                    from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                        merge_auth_scope_for_continue,
+                    )
+
                     patch_auth = infer_auth_scope(_routing_message)
-                    allow = set(auth_scope.get("allow_actions") or [])
-                    deny = set(auth_scope.get("deny_actions") or [])
-                    allow |= set(patch_auth.get("allow_actions") or [])
-                    deny |= set(patch_auth.get("deny_actions") or [])
-                    allow -= deny
-                    auth_scope["allow_actions"] = sorted(allow)
-                    auth_scope["deny_actions"] = sorted(deny)
+                    auth_scope = merge_auth_scope_for_continue(
+                        auth_scope,
+                        patch_auth,
+                        require_l3_for_new_allows=True,
+                    )
                 if _orch_mount is not None:
                     auth_scope.update(_orch_mount.to_auth_scope_patch())
                     # 预计业务节点写入 budget 友好字段（与工具调用次数分离）
@@ -2339,6 +2488,263 @@ class AgentLoopStreamAPIView(View):
                         )
                     ),
                 )
+                # 阶段3：环境就绪检查 — 缺 Skill/执行器则立即 blocked
+                if runtime_task is not None and not (
+                    getattr(runtime_task, "task_scope", None) or {}
+                ).get("ambiguous_resume"):
+                    try:
+                        from orchestrator_integration.task_orchestrator.env_readiness import (
+                            block_task_for_missing_env,
+                            probe_required_capabilities,
+                            required_primary_skills_for_probe,
+                            resolve_available_skill_names,
+                        )
+                        from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                            build_step_tool_manifest,
+                        )
+
+                        _task_plan = (
+                            (getattr(runtime_task, "facts", None) or {}).get(
+                                "task_plan"
+                            )
+                        )
+                        _m3 = build_step_tool_manifest(
+                            stage_plan=stages,
+                            task_plan=_task_plan
+                            if isinstance(_task_plan, dict)
+                            else None,
+                            auth_scope=auth_scope,
+                        )
+                        _builtins = {
+                            "knowledge_search",
+                            "read_skill_content",
+                            "execute_skill_script",
+                            "request_tool_expansion",
+                            "request_executor_heal",
+                            "assert_task_postcondition",
+                            "report_task_blocked",
+                        }
+                        # 只硬依赖当前未完成步骤的 primary；fallback 不拦启动
+                        _facts0 = dict(getattr(runtime_task, "facts", None) or {})
+                        _need_split = required_primary_skills_for_probe(
+                            _m3,
+                            current_stage=str(
+                                getattr(runtime_task, "current_stage", "") or ""
+                            ),
+                            completed_stage_ids=_facts0.get("completed_stage_ids")
+                            or [],
+                            task_plan=_task_plan
+                            if isinstance(_task_plan, dict)
+                            else None,
+                        )
+                        _need_skills = [
+                            n
+                            for n in (_need_split.get("primary") or [])
+                            if n not in _builtins
+                        ]
+                        _optional_skills = [
+                            n
+                            for n in (_need_split.get("optional") or [])
+                            if n not in _builtins
+                        ]
+                        _browser_needed = any(
+                            n
+                            in {
+                                "playwright-skill",
+                                "playwright-cli",
+                                "browser-use",
+                                "ui-automation",
+                            }
+                            for n in _need_skills
+                        )
+                        # 业务步骤前：若编排需要执行通道但未绑定，先自动恢复挂载
+                        try:
+                            from orchestrator_integration.tool_binding_consistency import (
+                                ensure_orchestrator_tools_bound as _ensure_bind2,
+                                executor_gap_block_payload,
+                            )
+
+                            if bool(mount_execute) and not any(
+                                getattr(t, "name", "") == "execute_skill_script"
+                                for t in (tools or [])
+                            ):
+                                _pre = _ensure_bind2(
+                                    tools,
+                                    orch_mount=_orch_mount
+                                    if "_orch_mount" in locals()
+                                    else None,
+                                    builtin_tool_pool=builtin_tools
+                                    if "builtin_tools" in locals()
+                                    else [],
+                                    require_execute=True,
+                                )
+                                tools = list(_pre.get("tools") or tools)
+                                if _pre.get("remounted"):
+                                    logger.info(
+                                        "AgentLoopStreamAPI: pre-probe remounted %s",
+                                        _pre.get("remounted"),
+                                    )
+                                if not _pre.get("ok"):
+                                    _gap = executor_gap_block_payload(
+                                        missing=_pre.get("missing") or [
+                                            "execute_skill_script"
+                                        ],
+                                        remounted=_pre.get("remounted") or [],
+                                    )
+                                    _probe = {
+                                        "ok": False,
+                                        "missing": [
+                                            {
+                                                "capability": m,
+                                                "kind": "builtin",
+                                                "reason": "executor_bind_mismatch",
+                                            }
+                                            for m in (_gap.get("missing") or [])
+                                        ],
+                                        "optional_missing": [],
+                                        "recovery": [_gap.get("recovery") or ""],
+                                        "blocker_code": "executor_bind_mismatch",
+                                        "message": _gap.get("message"),
+                                    }
+                                    _blk = await sync_to_async(
+                                        block_task_for_missing_env
+                                    )(runtime_task, _probe)
+                                    _msg_text = "；".join(
+                                        _gap.get("reasons") or [_gap.get("message")]
+                                    )
+                                    if _gap.get("recovery"):
+                                        _msg_text = (
+                                            f"{_msg_text}\n恢复：{_gap['recovery']}"
+                                        )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "task_blocked",
+                                            "task_id": getattr(
+                                                runtime_task, "public_task_id", ""
+                                            )
+                                            or str(getattr(runtime_task, "id", "")),
+                                            "status": "blocked",
+                                            "acceptance": _blk.get("acceptance"),
+                                            "message_kind": "final",
+                                        }
+                                    )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "stream",
+                                            "data": _msg_text,
+                                            "message_kind": "final",
+                                        }
+                                    )
+                                    yield create_sse_data(
+                                        {
+                                            "type": "complete",
+                                            "status": "blocked",
+                                            "task_status": "blocked",
+                                            "message_kind": "final",
+                                            "closure": _blk,
+                                        }
+                                    )
+                                    yield "data: [DONE]\n\n"
+                                    return
+                        except Exception as _pre_bind_err:
+                            logger.warning(
+                                "AgentLoopStreamAPI: pre-probe remount failed: %s",
+                                _pre_bind_err,
+                            )
+                        _avail = resolve_available_skill_names(
+                            auth_scope=auth_scope,
+                            mounted_tool_names=[
+                                getattr(t, "name", "") for t in (tools or [])
+                            ],
+                        )
+                        _probe = probe_required_capabilities(
+                            required_skills=_need_skills,
+                            optional_skills=_optional_skills,
+                            mount_execute=bool(mount_execute),
+                            executor_mounted=bool(
+                                any(
+                                    getattr(t, "name", "") == "execute_skill_script"
+                                    for t in (tools or [])
+                                )
+                            ),
+                            skill_names_available=sorted(_avail),
+                            browser_required=_browser_needed,
+                            browser_alive=None,  # 未探测时不因浏览器误杀
+                        )
+                        if not _probe.get("ok"):
+                            _blk = await sync_to_async(block_task_for_missing_env)(
+                                runtime_task, _probe
+                            )
+                            _msg = (
+                                (_blk.get("acceptance") or {}).get("reasons")
+                                or [_probe.get("message")]
+                            )
+                            _msg_text = "；".join(str(x) for x in _msg if x)
+                            _rec = (_blk.get("acceptance") or {}).get("recovery") or ""
+                            if _rec:
+                                _msg_text = f"{_msg_text}\n恢复：{_rec}"
+                            yield create_sse_data(
+                                {
+                                    "type": "task_blocked",
+                                    "task_id": getattr(
+                                        runtime_task, "public_task_id", ""
+                                    )
+                                    or str(getattr(runtime_task, "id", "")),
+                                    "status": "blocked",
+                                    "acceptance": _blk.get("acceptance"),
+                                    "message_kind": "final",
+                                }
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "stream",
+                                    "data": _msg_text,
+                                    "message_kind": "final",
+                                }
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "complete",
+                                    "status": "blocked",
+                                    "task_status": "blocked",
+                                    "message_kind": "final",
+                                    "closure": _blk,
+                                }
+                            )
+                            yield "data: [DONE]\n\n"
+                            return
+                        # 就绪清单写入 facts
+                        try:
+                            _facts = dict(getattr(runtime_task, "facts", None) or {})
+                            _facts["tool_auth_manifest"] = {
+                                "steps": (_m3 or {}).get("steps") or [],
+                                "auth_scope_snapshot": (_m3 or {}).get(
+                                    "auth_scope_snapshot"
+                                )
+                                or {},
+                            }
+                            _facts["env_readiness"] = {
+                                "ok": True,
+                                "missing": [],
+                            }
+                            _facts["executor_mounted"] = bool(
+                                any(
+                                    getattr(t, "name", "")
+                                    == "execute_skill_script"
+                                    for t in (tools or [])
+                                )
+                            )
+                            runtime_task.facts = _facts
+                            await sync_to_async(runtime_task.save)(
+                                update_fields=["facts", "updated_at"]
+                            )
+                        except Exception:
+                            pass
+                    except Exception as _env_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: env readiness check failed: %s",
+                            _env_err,
+                        )
                 # create_or_resume 仍可能因旧逻辑返回消歧任务：必须可见，禁止静默 lease_held
                 if runtime_task is not None and (
                     getattr(runtime_task, "task_scope", None) or {}
@@ -2402,11 +2808,18 @@ class AgentLoopStreamAPIView(View):
                                 enabled=True,
                             )
                             facts["task_plan"] = _orch_plan.to_dict()
-                            facts["activated_fallbacks"] = sorted(
-                                _orch_mount.activated_fallbacks
-                                if _orch_mount
-                                else []
+                            # 并入已有获批，避免覆盖 request_tool_expansion 写入的授权
+                            prev_fb = set(facts.get("activated_fallbacks") or [])
+                            prev_g = set(facts.get("granted_auxiliary") or [])
+                            mount_fb = set(
+                                (_orch_mount.activated_fallbacks if _orch_mount else [])
+                                or []
                             )
+                            facts["activated_fallbacks"] = sorted(
+                                prev_fb | prev_g | mount_fb
+                            )
+                            if prev_g:
+                                facts["granted_auxiliary"] = sorted(prev_g)
                             runtime_task.facts = facts
                             if _orch_plan.current_node:
                                 runtime_task.current_stage = _orch_plan.current_node
@@ -2968,6 +3381,9 @@ class AgentLoopStreamAPIView(View):
                 current_tool_calls = []
                 interrupt_detected = False
                 user_stopped = False
+                deferred_execution_recovered = False
+                closure_result = None
+                _closure_task = None
 
                 # 15. 流式执行
                 stream_modes = ["updates", "messages"]
@@ -3540,13 +3956,18 @@ class AgentLoopStreamAPIView(View):
                 from orchestrator_integration.final_response_policy import (
                     correction_for_executor_deferral,
                     requests_user_to_remount_executor,
-                    should_continue_incomplete_task,
+                    should_attempt_checkpoint_continue,
+                    should_attempt_executor_recovery,
                 )
 
-                # Transport completion is not task completion. If the model ends its
-                # turn while persisted business checkpoints remain, continue once on
-                # the server instead of leaving an idle stream with a running task.
-                execution_continued = False
+                # A model can still emit a stale "please remount the executor" answer
+                # even though the executor is present. Do one bounded server-side
+                # continuation when the task has unfinished business and tool budget;
+                # correcting that answer and blocking the task would strand it here.
+                # Phase 1 also continues once when the model early-finals with
+                # unfinished checkpoints (e.g. 1/3 done) while budget remains.
+                deferred_execution_recovered = False
+                checkpoint_continue_attempted = False
                 if (
                     not user_stopped
                     and not interrupt_detected
@@ -3579,25 +4000,53 @@ class AgentLoopStreamAPIView(View):
                     _retry_expected = int(
                         _retry_budget.get("expected_business_steps") or 0
                     )
-                    if should_continue_incomplete_task(
+                    _do_remount_continue = should_attempt_executor_recovery(
+                        response_text=final_ai_text,
                         executor_mounted=executor_mounted,
                         user_stopped=user_stopped,
                         interrupt_detected=interrupt_detected,
-                        task_status=str(runtime_task.status or ""),
                         used_tool_actions=_retry_used,
                         reserved_tool_actions=_retry_reserved,
                         max_tool_actions=_retry_max,
                         completed_business_steps=_retry_completed,
                         expected_business_steps=_retry_expected,
-                    ):
+                    )
+                    _do_checkpoint_continue = should_attempt_checkpoint_continue(
+                        response_text=final_ai_text,
+                        executor_mounted=executor_mounted,
+                        user_stopped=user_stopped,
+                        interrupt_detected=interrupt_detected,
+                        used_tool_actions=_retry_used,
+                        reserved_tool_actions=_retry_reserved,
+                        max_tool_actions=_retry_max,
+                        completed_business_steps=_retry_completed,
+                        expected_business_steps=_retry_expected,
+                        acceptance_ok=None,
+                        missing_evidence=(
+                            _retry_expected > 0 and _retry_completed <= 0
+                        ),
+                    )
+                    if _do_remount_continue or _do_checkpoint_continue:
+                        checkpoint_continue_attempted = bool(_do_checkpoint_continue)
+                        if _do_checkpoint_continue and not _do_remount_continue:
+                            if _retry_expected > 0 and _retry_completed <= 0:
+                                _retry_reason = (
+                                    "业务进度仍为 0 且预算充足，缺本轮执行证据"
+                                )
+                            else:
+                                _retry_reason = "模型提前终答但业务检查点未齐"
+                        else:
+                            _retry_reason = "执行工具已挂载且仍有工具预算"
                         _retry_instruction = SystemMessage(
                             id=f"deferred-execution-retry-{uuid.uuid4().hex}",
                             content=(
-                                "服务端检测到当前任务仍有未完成业务检查点且工具预算充足。"
-                                "这是一次受控续跑：从当前阶段继续原任务，不要要求用户重发目标或重新挂载工具；"
-                                "先检查已有执行记录，跳过已完成动作，不要重复提交或写入。"
-                                "严格遵守原授权；若缺少必要输入或新增授权，走既有审批/澄清流程并暂停等待。"
-                                "实际推进后继续检查剩余业务检查点；不得仅因查到资料就结束。"
+                                f"服务端检测到当前任务尚未完成（{_retry_reason}）。"
+                                "这是一次受控续跑：立刻用已绑定工具继续完成原用户目标与未完成检查点；"
+                                "不要要求用户重新挂载、重发、确认，或替你提供截图/执行证据。"
+                                "先核对已有执行记录/当前状态，跳过已完成动作，禁止重复提交或重复写入。"
+                                "按原授权边界执行；缺的是本轮页面/截图/工具结果，须自己调用工具采集。"
+                                "若实际工具调用失败、需要用户授权或预算耗尽，报告具体事实。"
+                                "禁止在业务检查点未齐或无本轮证据时宣称任务完成。"
                             ),
                         )
                         try:
@@ -3730,39 +4179,13 @@ class AgentLoopStreamAPIView(View):
                                         if _candidate:
                                             final_ai_text = _candidate
                                             break
-                                _retry_start = next(
-                                    (
-                                        i
-                                        for i, _message in enumerate(all_messages)
-                                        if getattr(_message, "id", None)
-                                        == _retry_instruction.id
-                                    ),
-                                    -1,
+                                deferred_execution_recovered = (
+                                    bool(final_ai_text)
+                                    and not requests_user_to_remount_executor(
+                                        final_ai_text
+                                    )
                                 )
-                                _retry_final_text = ""
-                                for _message in reversed(
-                                    all_messages[_retry_start + 1 :]
-                                    if _retry_start >= 0
-                                    else []
-                                ):
-                                    if isinstance(_message, AIMessage) and not getattr(
-                                        _message, "tool_calls", None
-                                    ):
-                                        _content = _message.content
-                                        if isinstance(_content, list):
-                                            _content = "".join(
-                                                c.get("text", "")
-                                                if isinstance(c, dict)
-                                                else (c if isinstance(c, str) else "")
-                                                for c in _content
-                                            )
-                                        _candidate = str(_content or "").strip()
-                                        if _candidate:
-                                            _retry_final_text = _candidate
-                                            break
-                                if _retry_final_text:
-                                    final_ai_text = _retry_final_text
-                                    execution_continued = True
+                                if deferred_execution_recovered:
                                     yield create_sse_data(
                                         {
                                             "type": "final_answer",
@@ -3775,7 +4198,7 @@ class AgentLoopStreamAPIView(View):
                                         }
                                     )
                                     logger.info(
-                                        "AgentLoopStreamAPI: continued incomplete task session=%s task=%s",
+                                        "AgentLoopStreamAPI: recovered deferred execution session=%s task=%s",
                                         session_id,
                                         getattr(runtime_task, "task_id", ""),
                                     )
@@ -3803,7 +4226,7 @@ class AgentLoopStreamAPIView(View):
                 original_final_ai_text = final_ai_text
                 if (
                     requests_user_to_remount_executor(final_ai_text)
-                    and not execution_continued
+                    and not deferred_execution_recovered
                 ):
                     final_response_corrected = True
                     final_ai_text = correction_for_executor_deferral(
@@ -3916,46 +4339,175 @@ class AgentLoopStreamAPIView(View):
                             acc_err,
                         )
 
-                # Never leave a task visibly running after its SSE turn has ended
-                # without a business acceptance result. This is a truthful blocked
-                # state that the existing continuation path can resume.
+                # 第 1 阶段：流结束强制状态闭环，禁止悬挂 running
+                closure_result = None
+                _closure_task = None
+                try:
+                    if agent_runtime and agent_runtime.task is not None:
+                        _closure_task = agent_runtime.task
+                    elif runtime_task is not None:
+                        _closure_task = runtime_task
+                except Exception:
+                    _closure_task = None
+                if _closure_task is not None:
+                    try:
+                        from orchestrator_integration.task_state_closure import (
+                            close_task_after_stream,
+                        )
+                        from orchestrator_integration.runtime_progress import (
+                            progress_event,
+                        )
+
+                        _auto_ok = bool(deferred_execution_recovered)
+                        _auto_attempted = bool(deferred_execution_recovered) or bool(
+                            checkpoint_continue_attempted
+                            if "checkpoint_continue_attempted" in locals()
+                            else False
+                        ) or (
+                            bool(executor_mounted)
+                            and requests_user_to_remount_executor(
+                                original_final_ai_text or ""
+                            )
+                        )
+                        closure_result = await sync_to_async(close_task_after_stream)(
+                            _closure_task,
+                            user_stopped=bool(user_stopped),
+                            interrupt_detected=bool(interrupt_detected),
+                            acceptance=acceptance,
+                            auto_continue_attempted=_auto_attempted,
+                            auto_continue_succeeded=_auto_ok,
+                        )
+                        if closure_result.get("acceptance"):
+                            acceptance = closure_result["acceptance"]
+                        try:
+                            await sync_to_async(_closure_task.refresh_from_db)()
+                        except Exception:
+                            pass
+                        try:
+                            yield create_sse_data(
+                                await sync_to_async(progress_event)(_closure_task.pk)
+                            )
+                        except Exception:
+                            pass
+                        _c_status = str(closure_result.get("status") or "")
+                        _c_tid = getattr(_closure_task, "public_task_id", "") or str(
+                            getattr(_closure_task, "id", "")
+                        )
+                        if _c_status == "blocked":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_blocked",
+                                    "task_id": _c_tid,
+                                    "status": "blocked",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "completed":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_completed",
+                                    "task_id": _c_tid,
+                                    "status": "completed",
+                                    "acceptance": acceptance,
+                                    "closure": closure_result,
+                                }
+                            )
+                        elif _c_status == "waiting_approval":
+                            yield create_sse_data(
+                                {
+                                    "type": "task_status",
+                                    "task_id": _c_tid,
+                                    "status": "waiting_approval",
+                                    "closure": closure_result,
+                                }
+                            )
+                    except Exception as closure_err:
+                        logger.warning(
+                            "AgentLoopStreamAPI: task state closure failed: %s",
+                            closure_err,
+                            exc_info=True,
+                        )
+
+                # 证据门禁失败：剥离未关联本轮证据的验证性终态表述
                 if (
                     not user_stopped
                     and not interrupt_detected
-                    and acceptance is None
-                    and agent_runtime is not None
-                    and agent_runtime.task is not None
+                    and not final_response_corrected
+                    and acceptance is not None
                 ):
                     try:
-                        await sync_to_async(agent_runtime.task.refresh_from_db)()
-                        if str(agent_runtime.task.status or "") == "running":
-                            acceptance = {
-                                "ok": False,
-                                "reasons": [
-                                    "对话流已结束，但服务端未得到任务验收结果；任务未标记完成，可从已保存进度继续。"
-                                ],
-                                "blockers": [
-                                    {
-                                        "blocker_code": "agent_turn_ended_without_acceptance",
-                                        "step": str(
-                                            agent_runtime.task.current_stage
-                                            or "final_acceptance"
-                                        ),
-                                    }
-                                ],
-                            }
-                            _blocked_event = await sync_to_async(
-                                agent_runtime.accept
-                            )(acceptance)
-                            if _blocked_event:
-                                _blocked_event["acceptance"] = acceptance
-                                yield create_sse_data(_blocked_event)
-                    except Exception as fallback_err:
-                        logger.error(
-                            "AgentLoopStreamAPI: failed to close task without acceptance task=%s error=%s",
-                            getattr(agent_runtime.task, "task_id", ""),
-                            fallback_err,
-                            exc_info=True,
+                        from orchestrator_integration.final_response_policy import (
+                            correction_for_unverified_delivery,
+                            should_correct_unverified_delivery,
+                        )
+                        from orchestrator_integration.task_state_closure import (
+                            budget_snapshot as _budget_snap_for_corr,
+                        )
+
+                        _biz_snap = (
+                            _budget_snap_for_corr(_closure_task)
+                            if _closure_task is not None
+                            else {}
+                        )
+                        _corr_used = int(_biz_snap.get("used_tool_actions") or 0)
+                        _corr_max = int(_biz_snap.get("max_tool_actions") or 0)
+                        _corr_budget_left = (
+                            _corr_max <= 0 or _corr_used < _corr_max
+                        )
+                        if should_correct_unverified_delivery(
+                            response_text=final_ai_text,
+                            acceptance=acceptance
+                            if isinstance(acceptance, dict)
+                            else {},
+                            completed_business_steps=int(
+                                _biz_snap.get("completed_business_steps") or 0
+                            ),
+                            expected_business_steps=int(
+                                _biz_snap.get("expected_business_steps") or 0
+                            ),
+                        ):
+                            final_response_corrected = True
+                            final_ai_text = correction_for_unverified_delivery(
+                                acceptance=acceptance
+                                if isinstance(acceptance, dict)
+                                else {},
+                                completed_business_steps=int(
+                                    _biz_snap.get("completed_business_steps") or 0
+                                ),
+                                expected_business_steps=int(
+                                    _biz_snap.get("expected_business_steps") or 0
+                                ),
+                                executor_mounted=bool(executor_mounted),
+                                budget_remaining=_corr_budget_left,
+                            )
+                            await _persist_corrected_final_message(
+                                agent,
+                                invoke_config,
+                                original_final_ai_text,
+                                final_ai_text,
+                                "AgentLoopStreamAPI",
+                            )
+                            yield create_sse_data(
+                                {
+                                    "type": "final_answer",
+                                    "content": final_ai_text,
+                                    "response_locale": (
+                                        _response_locale
+                                        if "_response_locale" in locals()
+                                        else "zh-CN"
+                                    ),
+                                }
+                            )
+                            logger.warning(
+                                "AgentLoopStreamAPI: corrected unverified delivery "
+                                "claims session=%s",
+                                session_id,
+                            )
+                    except Exception as _ev_corr_err:
+                        logger.debug(
+                            "unverified delivery correction skipped: %s",
+                            _ev_corr_err,
                         )
 
                 if user_stopped:
@@ -3983,25 +4535,54 @@ class AgentLoopStreamAPIView(View):
                     logger.info(
                         "AgentLoopStreamAPI: Interrupt detected, returning early"
                     )
-                else:
-                    # RC09：complete 只表示传输结束；业务态取 acceptance / 任务实态
-                    _biz = "finished"
-                    if acceptance is not None:
-                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    # 审批等待：complete 仍推送，task_status=waiting_approval
+                    _wait_status = "waiting_approval"
                     try:
-                        if agent_runtime and agent_runtime.task is not None:
-                            _live = str(
-                                getattr(agent_runtime.task, "status", "") or ""
+                        if _closure_task is not None:
+                            await sync_to_async(_closure_task.refresh_from_db)(
+                                fields=["status"]
                             )
-                            if _live in {
-                                "cancelled",
-                                "cancelling",
-                                "blocked",
-                                "failed",
-                            }:
-                                _biz = _live
+                            if str(_closure_task.status or "") == "awaiting_approval":
+                                _wait_status = "waiting_approval"
                     except Exception:
                         pass
+                    yield create_sse_data(
+                        {
+                            "type": "complete",
+                            "status": _wait_status,
+                            "task_status": _wait_status,
+                            "message_kind": "final",
+                            "steps": step_count,
+                        }
+                    )
+                else:
+                    # RC09：complete 只表示传输结束；业务态取闭环后的持久化状态
+                    _biz = "finished"
+                    if closure_result and closure_result.get("status"):
+                        _biz = str(closure_result["status"])
+                    elif acceptance is not None:
+                        _biz = "completed" if acceptance.get("ok") else "blocked"
+                    try:
+                        _live_task = _closure_task
+                        if _live_task is None and agent_runtime and agent_runtime.task:
+                            _live_task = agent_runtime.task
+                        if _live_task is not None:
+                            await sync_to_async(_live_task.refresh_from_db)(
+                                fields=["status"]
+                            )
+                            _live = str(getattr(_live_task, "status", "") or "")
+                            from orchestrator_integration.task_state_closure import (
+                                normalize_status,
+                            )
+
+                            if _live:
+                                _biz = normalize_status(_live)
+                    except Exception:
+                        pass
+                    # 未完成不得显示成功
+                    if _biz in {"completed", "finished"} and acceptance is not None:
+                        if not acceptance.get("ok"):
+                            _biz = "blocked"
                     complete_data = {
                         "type": "complete",
                         "total_steps": step_count,
@@ -4016,6 +4597,13 @@ class AgentLoopStreamAPIView(View):
                     }
                     if acceptance is not None:
                         complete_data["acceptance"] = acceptance
+                    if closure_result is not None:
+                        complete_data["closure"] = {
+                            "action": closure_result.get("action"),
+                            "status": closure_result.get("status"),
+                            "blocker_code": closure_result.get("blocker_code"),
+                            "recovery": closure_result.get("recovery"),
+                        }
                     if generate_playwright_script:
                         complete_data["script_generation"] = {
                             "enabled": True,

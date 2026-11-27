@@ -701,15 +701,19 @@ def evaluate_delivery_evidence(
         )
         confirmed_inputs.append(f"{key}={val}")
 
-    # RC21：剩余检查点
+    # RC21：剩余检查点（排除对话-only single，与业务进度口径一致）
     remaining_checkpoints: List[str] = []
     completed_ids = set(facts.get("completed_stage_ids") or [])
     for raw in stage_plan or []:
         if isinstance(raw, dict):
             sid = str(raw.get("stage_id") or "")
-            if sid and sid not in completed_ids and sid != "summarize":
+            if (
+                sid
+                and sid not in completed_ids
+                and sid not in {"summarize", "single"}
+            ):
                 remaining_checkpoints.append(sid)
-        elif isinstance(raw, str) and raw not in completed_ids:
+        elif isinstance(raw, str) and raw not in completed_ids and raw != "single":
             remaining_checkpoints.append(raw)
 
     if not confirmed_inputs and target_url:
@@ -792,7 +796,12 @@ def evaluate_post_condition(
             ok = False
             reasons.append("业务拒绝不得记为成功")
     elif playbook_id == "platform_write":
-        # 字段名 error_code 不是失败；仅真实失败态才拒绝
+        # 字段名 error_code 不是失败；仅真实写入失败态才拒绝。
+        # 禁止用裸词 error 误杀（旁白/检索/冷却文案里常出现），否则会出现
+        # 「写入路径异常且无确认草稿」却无法对应任何写入工具结果。
+        has_draft_confirm = "needs_confirmation" in joined and (
+            "draft" in joined.lower() or "create_ui" in joined.lower()
+        )
         scrubbed = re.sub(
             r"error[_-]?code\s*[\"']?\s*[:=]\s*[\"']?[^,\"'\s}\]]*",
             "",
@@ -800,19 +809,40 @@ def evaluate_post_condition(
             flags=re.I,
         )
         scrubbed = re.sub(r'"error_code"\s*:\s*[^,}\]]+', "", scrubbed, flags=re.I)
-        real_fail = bool(
+        structured_fail = bool(
             re.search(
                 r'"status"\s*:\s*"(failed|error)"|"ok"\s*:\s*false|"success"\s*:\s*false',
                 joined,
                 re.I,
             )
-        ) or (
-            "needs_confirmation" not in joined
-            and bool(re.search(r"(?<![_\w])error(?![_\w])", scrubbed, re.I))
         )
-        if real_fail and "needs_confirmation" not in joined:
+        write_attempt = bool(
+            re.search(
+                r"(platform_write|add_testcase|update_testcase|create_testcase|"
+                r"persist|落库|写入|"
+                r"execute_skill_script[^\n]{0,160}"
+                r"(?:--action\s+)?(?:write|create|save|add_|update_|upsert))",
+                joined,
+                re.I,
+            )
+        )
+        prose_write_fail = bool(
+            write_attempt
+            and not has_draft_confirm
+            and re.search(
+                r"(写入失败|落库失败|保存失败|permission\s*denied|"
+                r"(?<![_\w])(?:error|exception|traceback)(?![_\w]))",
+                scrubbed,
+                re.I,
+            )
+        )
+        if not has_draft_confirm and (structured_fail or prose_write_fail):
             ok = False
-            reasons.append("写入路径异常且无确认草稿")
+            if write_attempt:
+                reasons.append("写入路径异常且无确认草稿")
+            else:
+                # 有结构化失败信号但未见写入尝试：勿冒充「写入路径」结论
+                reasons.append("工具返回失败且未产生可确认的写入草稿")
     elif playbook_id == "browser_act":
         browser = evaluate_browser_checkpoints(joined, auth_scope=auth_scope)
         extra["browser_checks"] = browser.get("checks")

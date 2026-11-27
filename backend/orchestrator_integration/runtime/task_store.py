@@ -142,18 +142,44 @@ class TaskStore:
                 scope["constraints"] = constraints
         task.task_scope = scope
         if auth_scope:
-            merged = dict(task.auth_scope or {})
-            allow = set(merged.get("allow_actions") or [])
-            deny = set(merged.get("deny_actions") or [])
-            allow |= set(auth_scope.get("allow_actions") or [])
-            deny |= set(auth_scope.get("deny_actions") or [])
-            allow -= deny
-            merged["allow_actions"] = sorted(allow)
-            merged["deny_actions"] = sorted(deny)
-            for k, v in auth_scope.items():
-                if k not in {"allow_actions", "deny_actions"} and k not in merged:
-                    merged[k] = v
-            task.auth_scope = merged
+            # 阶段3：继续不静默扩权；新 allow 进入 pending
+            try:
+                from orchestrator_integration.task_orchestrator.tool_auth_orchestration import (
+                    merge_auth_scope_for_continue,
+                )
+
+                prior_auth = dict(task.auth_scope or {})
+                task.auth_scope = merge_auth_scope_for_continue(
+                    prior_auth,
+                    auth_scope,
+                    require_l3_for_new_allows=True,
+                )
+                try:
+                    from orchestrator_integration.production_observability import (
+                        audit_auth_changed,
+                    )
+
+                    audit_auth_changed(
+                        task,
+                        prior_scope=prior_auth,
+                        new_scope=task.auth_scope,
+                        source="continue_merge",
+                    )
+                except Exception:
+                    pass
+            except Exception:
+                merged = dict(task.auth_scope or {})
+                allow = set(merged.get("allow_actions") or [])
+                deny = set(merged.get("deny_actions") or [])
+                allow |= set(auth_scope.get("allow_actions") or [])
+                deny |= set(auth_scope.get("deny_actions") or [])
+                allow -= deny
+                merged["allow_actions"] = sorted(allow)
+                merged["deny_actions"] = sorted(deny)
+                for k, v in auth_scope.items():
+                    if k not in {"allow_actions", "deny_actions"} and k not in merged:
+                        merged[k] = v
+                task.auth_scope = merged
         pb_id = ""
         if commission is not None:
             pb_id = str(getattr(commission, "playbook_id", "") or "")
@@ -162,11 +188,38 @@ class TaskStore:
             scope = dict(task.task_scope or {})
             scope["continuation_budget_topup"] = topup
             task.task_scope = scope
+        # 阶段2：续跑时落盘 resume_plan，供提示词与防重放使用
+        try:
+            from orchestrator_integration.resume_execution import build_resume_plan
+            from orchestrator_integration.agent_runtime import append_event
+
+            plan = build_resume_plan(task)
+            facts = dict(task.facts or {})
+            facts["resume_plan"] = {
+                "must_reconcile": plan.get("must_reconcile"),
+                "completed_count": len(plan.get("completed_steps") or []),
+                "uncertain_count": len(plan.get("uncertain_steps") or []),
+                "remaining_stages": plan.get("remaining_stages") or [],
+                "side_effect_keys": plan.get("side_effect_idempotency_keys") or [],
+                "hint": plan.get("hint") or "",
+            }
+            task.facts = facts
+            if task.status in {"blocked", "paused"}:
+                task.status = "running"
+            append_event(
+                task,
+                "resume_plan",
+                status=task.status,
+                payload=facts["resume_plan"],
+            )
+        except Exception:
+            pass
         task.save(
             update_fields=[
                 "task_scope",
                 "auth_scope",
                 "budget",
+                "facts",
                 "max_steps",
                 "updated_at",
                 "lease_owner",

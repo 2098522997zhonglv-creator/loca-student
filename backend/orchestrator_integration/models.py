@@ -72,8 +72,10 @@ class AgentTask(models.Model):
     """Agent Loop 任务 - 用于分步执行的任务管理（FR04 TaskRun）"""
     
     STATUS_CHOICES = [
-        ('pending', '待处理'),
+        ('queued', '排队中'),  # 统一态；兼容历史 pending
+        ('pending', '待处理'),  # 历史别名 ≈ queued
         ('running', '执行中'),
+        ('waiting_approval', '等待审批'),  # 统一态；兼容 awaiting_approval
         ('awaiting_approval', '等待审批'),
         ('blocked', '已阻塞'),
         ('cancelling', '正在取消'),
