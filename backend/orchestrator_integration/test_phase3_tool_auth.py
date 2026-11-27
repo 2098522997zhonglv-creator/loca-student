@@ -414,3 +414,149 @@ class Phase3ToolAuthAcceptance(TestCase):
             empty_ok and "playwright-skill" in granted,
             f"empty_ok={empty_ok} granted={sorted(granted)}",
         )
+
+    def test_v9_kb_qa_zone_elevates_after_expansion(self):
+        """kb_qa 硬拦 execute；获批/挂载执行后同轮重试须通过分区门。"""
+        from orchestrator_integration.skill_governance import (
+            elevate_zone_for_authorized_execute,
+            reject_zone_privilege_escalation,
+        )
+        from orchestrator_integration.skill_zones import (
+            ZONE_BROWSER,
+            ZONE_KB_QA,
+        )
+
+        blocked = reject_zone_privilege_escalation(
+            zone_id=ZONE_KB_QA,
+            skill_name="playwright-skill",
+            command='node run.js "await page.goto(\'https://example.com\')"',
+        )
+        still_hard = blocked is not None and "知识库问答区" in blocked
+
+        elevated = elevate_zone_for_authorized_execute(
+            ZONE_KB_QA,
+            authorized_skills={"playwright-skill"},
+            skill_name="playwright-skill",
+            mount_execute=True,
+        )
+        after = reject_zone_privilege_escalation(
+            zone_id=ZONE_KB_QA,
+            skill_name="playwright-skill",
+            command='node run.js "await page.goto(\'https://example.com\')"',
+            authorized_skills={"playwright-skill"},
+            mount_execute=True,
+        )
+        self._record(
+            "P3-V9-kb-qa-elevate",
+            still_hard and elevated == ZONE_BROWSER and after is None,
+            f"hard={still_hard} elevated={elevated} after_ok={after is None}",
+        )
+
+    def test_v10_auth_gate_reject_stops_budget_and_escalates(self):
+        """扩权后重试仍被门拒 → 报平台阻塞；门拒本身不扣预算。"""
+        from orchestrator_integration.builtin_tools.skill_tools import get_skill_tools
+        from orchestrator_integration.skill_zones import ZONE_KB_QA
+        from orchestrator_integration.task_commission import TaskCommission
+        from orchestrator_integration.task_orchestrator.node_runtime import (
+            apply_remount_to_context,
+        )
+        from orchestrator_integration.telemetry_context import (
+            TelemetryContext,
+            set_telemetry_context,
+        )
+
+        task = self._task(
+            status="running",
+            auth_scope={"allow_actions": [], "deny_actions": []},
+            facts={},
+            budget={
+                "max_tool_actions": 76,
+                "used_tool_actions": 28,
+                "max_tool_steps": 76,
+                "used_tool_steps": 28,
+            },
+        )
+        commission = TaskCommission(
+            task_id="p3-v10",
+            zone_id=ZONE_KB_QA,
+            playbook_id="",
+            primary_skills=frozenset(),
+            auxiliary_skills=frozenset({"playwright-skill"}),
+            short_circuit=False,
+            draft_writes=False,
+            channel="light",
+            max_tool_steps=76,
+            tool_steps_used=28,
+        )
+        tools = {
+            t.name: t
+            for t in get_skill_tools(
+                user_id=1,
+                project_id=1,
+                allowed_skill_names=set(),
+                allow_execute=True,
+            )
+        }
+        set_telemetry_context(
+            TelemetryContext(
+                zone=ZONE_KB_QA,
+                commission=commission,
+                runtime_task_id=task.pk,
+                granted_skills=set(),
+                tools_mounted=["read_skill_content", "execute_skill_script"],
+            )
+        )
+        try:
+            # 扩权 remount
+            apply_remount_to_context({"playwright-skill"})
+            task.refresh_from_db()
+            used_before = int(
+                (task.budget or {}).get(
+                    "used_tool_actions",
+                    (task.budget or {}).get("used_tool_steps", 28),
+                )
+            )
+            # 故意用不在授权内的 skill 触发门拒（扩权后 awaiting_retry）
+            denied = tools["execute_skill_script"].invoke(
+                {
+                    "skill_name": "browser-use",
+                    "command": "node run.js \"await page.goto('https://x')\"",
+                }
+            )
+            task.refresh_from_db()
+            used_after = int(
+                (task.budget or {}).get(
+                    "used_tool_actions",
+                    (task.budget or {}).get("used_tool_steps", used_before),
+                )
+            )
+            facts = task.facts or {}
+            escalate_ok = "平台阻塞" in denied
+            no_budget_burn = used_after == used_before
+            # 获批 playwright：分区门应放行（不实际跑浏览器）
+            from orchestrator_integration.skill_governance import (
+                reject_zone_privilege_escalation,
+            )
+            from orchestrator_integration.telemetry_context import (
+                get_telemetry_context,
+            )
+
+            ctx = get_telemetry_context()
+            pw_priv = reject_zone_privilege_escalation(
+                zone_id=ctx.zone or ZONE_KB_QA,
+                skill_name="playwright-skill",
+                command="node run.js \"await page.goto('https://example.com')\"",
+                authorized_skills=set(ctx.granted_skills or []) | {"playwright-skill"},
+                mount_execute=True,
+            )
+            zone_ok = (ctx.zone or "") != ZONE_KB_QA and pw_priv is None
+            self._record(
+                "P3-V10-gate-stop-budget",
+                escalate_ok and no_budget_burn and zone_ok,
+                f"escalate={escalate_ok} budget_same={no_budget_burn} "
+                f"used={used_before}->{used_after} "
+                f"zone={ctx.zone} pw_priv={pw_priv} "
+                f"blocked={facts.get('platform_auth_blocked')}",
+            )
+        finally:
+            set_telemetry_context(None)

@@ -1103,6 +1103,143 @@ def get_skill_tools(
         else None
     )
 
+    def _live_authorized_skills() -> set[str]:
+        """commission ∪ telemetry ∪ 任务持久化授权。"""
+        live: set[str] = set()
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            live |= set(ctx.granted_skills or [])
+            commission = ctx.commission
+            if commission is not None:
+                granted = commission.effective_allowlist()
+                if granted is not None:
+                    live |= set(granted)
+                else:
+                    live |= set(commission.primary_skills or []) | set(
+                        commission.granted_auxiliary or []
+                    )
+            try:
+                from orchestrator_integration.models import AgentTask
+
+                if getattr(ctx, "runtime_task_id", None):
+                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+                    if task is not None:
+                        auth = dict(getattr(task, "auth_scope", None) or {})
+                        facts = dict(getattr(task, "facts", None) or {})
+                        live |= {
+                            str(s).strip()
+                            for s in (auth.get("allowed_skills") or [])
+                            if s
+                        }
+                        live |= {
+                            str(s).strip()
+                            for s in (facts.get("granted_auxiliary") or [])
+                            if s
+                        }
+                        live |= {
+                            str(s).strip()
+                            for s in (facts.get("activated_fallbacks") or [])
+                            if s
+                        }
+            except Exception:
+                pass
+            if ctx.orchestrator_mount is not None:
+                try:
+                    live |= set(
+                        getattr(ctx.orchestrator_mount, "skill_allowlist", None) or []
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if allowed_names:
+            live |= set(allowed_names)
+        return {s for s in live if s}
+
+    def _mount_execute_active() -> bool:
+        if allow_execute:
+            return True
+        try:
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            mounted = set(ctx.tools_mounted or [])
+            if "execute_skill_script" in mounted:
+                return True
+            orch = ctx.orchestrator_mount
+            if orch is not None and "execute_skill_script" in set(
+                getattr(orch, "builtin_allow", None) or []
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _note_auth_gate_reject(kind: str, message: str) -> str:
+        """门控拒绝不扣预算；扩权后仍拒或连续拒绝 → 立即报平台阻塞并停重试。"""
+        escalate = False
+        streak = 1
+        try:
+            from orchestrator_integration.models import AgentTask
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            task = None
+            if getattr(ctx, "runtime_task_id", None):
+                task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+            if task is not None:
+                facts = dict(getattr(task, "facts", None) or {})
+                streak = int(facts.get("auth_gate_reject_streak") or 0) + 1
+                awaiting = bool(facts.get("expansion_awaiting_retry"))
+                facts["auth_gate_reject_streak"] = streak
+                facts["last_auth_gate_reject"] = {
+                    "kind": kind,
+                    "message": (message or "")[:400],
+                }
+                # 扩权后重试仍被同一门拒，或连续 2 次授权/分区门拒 → 停耗上报
+                escalate = awaiting or streak >= 2
+                if escalate:
+                    facts["expansion_awaiting_retry"] = False
+                    facts["platform_auth_blocked"] = True
+                task.facts = facts
+                type(task).objects.filter(pk=task.pk).update(facts=facts)
+        except Exception:
+            escalate = streak >= 2
+        if escalate:
+            return (
+                f"{message}\n"
+                "【平台阻塞】分区/Skill 授权门在扩权或重试后仍拒绝执行，"
+                "已停止继续消耗工具预算。请修复任务分区与有效授权同步后重试；"
+                "在恢复执行通道并留下本轮页面/截图证据前，不得判定用例通过或失败。"
+            )
+        return message
+
+    def _clear_auth_gate_streak() -> None:
+        try:
+            from orchestrator_integration.models import AgentTask
+            from orchestrator_integration.telemetry_context import get_telemetry_context
+
+            ctx = get_telemetry_context()
+            if not getattr(ctx, "runtime_task_id", None):
+                return
+            task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
+            if task is None:
+                return
+            facts = dict(getattr(task, "facts", None) or {})
+            if not facts.get("auth_gate_reject_streak") and not facts.get(
+                "expansion_awaiting_retry"
+            ):
+                return
+            facts["auth_gate_reject_streak"] = 0
+            facts["expansion_awaiting_retry"] = False
+            facts.pop("platform_auth_blocked", None)
+            task.facts = facts
+            type(task).objects.filter(pk=task.pk).update(facts=facts)
+        except Exception:
+            pass
+
     def _assert_skill_allowed(skill_name: Optional[str]) -> Optional[str]:
         name = (skill_name or "").strip()
         if not name:
@@ -1113,45 +1250,13 @@ def get_skill_tools(
             from orchestrator_integration.telemetry_context import get_telemetry_context
 
             ctx = get_telemetry_context()
-            live: set[str] = set(ctx.granted_skills or [])
+            live = _live_authorized_skills()
             commission = ctx.commission
             primary: set[str] = set()
             auxiliary: set[str] = set()
             if commission is not None:
                 primary = set(commission.primary_skills or [])
                 auxiliary = set(commission.auxiliary_skills or [])
-                granted = commission.effective_allowlist()
-                if granted is not None:
-                    live |= set(granted)
-                else:
-                    live |= primary | set(commission.granted_auxiliary or [])
-            # 任务持久化授权（扩权后同轮/跨轮）
-            try:
-                from orchestrator_integration.models import AgentTask
-
-                task = None
-                if getattr(ctx, "runtime_task_id", None):
-                    task = AgentTask.objects.filter(pk=ctx.runtime_task_id).first()
-                if task is not None:
-                    auth = dict(getattr(task, "auth_scope", None) or {})
-                    facts = dict(getattr(task, "facts", None) or {})
-                    live |= {
-                        str(s).strip()
-                        for s in (auth.get("allowed_skills") or [])
-                        if s
-                    }
-                    live |= {
-                        str(s).strip()
-                        for s in (facts.get("granted_auxiliary") or [])
-                        if s
-                    }
-                    live |= {
-                        str(s).strip()
-                        for s in (facts.get("activated_fallbacks") or [])
-                        if s
-                    }
-            except Exception:
-                pass
 
             if live:
                 if name in live:
@@ -1414,6 +1519,7 @@ def get_skill_tools(
         logger.info(f"[read_skill_content] skill_name={skill_name}")
         blocked = _assert_skill_allowed(skill_name)
         if blocked:
+            blocked = _note_auth_gate_reject("allowlist", blocked)
             logger.info("[read_skill_content] 分区拒绝: %s", blocked)
             _emit_telemetry(
                 tool_name="read_skill_content",
@@ -1423,6 +1529,7 @@ def get_skill_tools(
                 error_kind="allowlist",
             )
             return blocked
+        _clear_auth_gate_streak()
 
         try:
             skill = Skill.objects.filter(name=skill_name, is_active=True).first()
@@ -1967,6 +2074,7 @@ def get_skill_tools(
             catalog_reject_unregistered_write,
         )
         from orchestrator_integration.skill_governance import (
+            elevate_zone_for_authorized_execute,
             reject_cross_skill_batch,
             reject_zone_privilege_escalation,
         )
@@ -1974,7 +2082,22 @@ def get_skill_tools(
         from orchestrator_integration.tool_telemetry import TelemetryTimer
 
         def _zone_id() -> str:
-            return (get_telemetry_context().zone or "").strip()
+            ctx = get_telemetry_context()
+            live = _live_authorized_skills()
+            return elevate_zone_for_authorized_execute(
+                (ctx.zone or "").strip(),
+                authorized_skills=live,
+                mount_execute=_mount_execute_active(),
+            )
+
+        def _privilege_check(skill: Optional[str], cmd: Optional[str]) -> Optional[str]:
+            return reject_zone_privilege_escalation(
+                zone_id=get_telemetry_context().zone or "",
+                skill_name=skill,
+                command=cmd,
+                authorized_skills=_live_authorized_skills(),
+                mount_execute=_mount_execute_active(),
+            )
 
         if _should_stop_execution():
             return json.dumps(
@@ -1986,13 +2109,7 @@ def get_skill_tools(
                 ensure_ascii=False,
             )
 
-        # 单个动作在下方扣费；批次按实际启动的动作逐条扣（R07）
-        if not commands:
-            budget_err = _consume_budget(1)
-            if budget_err:
-                return budget_err
-
-        # 批量执行模式
+        # 批量执行模式（单个模式预算改到门禁通过后再扣，避免拒权空耗）
         if commands:
             if not commands:
                 return json.dumps({"error": "命令列表为空"}, ensure_ascii=False)
@@ -2047,6 +2164,7 @@ def get_skill_tools(
                     continue
                 blocked = _assert_skill_allowed(c.get("skill_name"))
                 if blocked:
+                    blocked = _note_auth_gate_reject("allowlist", blocked)
                     logger.info("[execute_skill_script] 分区拒绝批量: %s", blocked)
                     _emit_telemetry(
                         tool_name="execute_skill_script",
@@ -2073,12 +2191,9 @@ def get_skill_tools(
                         result_text=catalog_block,
                     )
                     return catalog_block
-                priv = reject_zone_privilege_escalation(
-                    zone_id=_zone_id(),
-                    skill_name=c.get("skill_name"),
-                    command=c.get("command"),
-                )
+                priv = _privilege_check(c.get("skill_name"), c.get("command"))
                 if priv:
+                    priv = _note_auth_gate_reject("privilege", priv)
                     logger.info("[execute_skill_script] 越权拒绝批量: %s", priv)
                     _emit_telemetry(
                         tool_name="execute_skill_script",
@@ -2520,6 +2635,7 @@ def get_skill_tools(
 
         blocked = _assert_skill_allowed(skill_name)
         if blocked:
+            blocked = _note_auth_gate_reject("allowlist", blocked)
             logger.info("[execute_skill_script] 分区拒绝: %s", blocked)
             _emit_telemetry(
                 tool_name="execute_skill_script",
@@ -2595,12 +2711,9 @@ def get_skill_tools(
         except Exception as _gate_err:
             logger.debug("orch input_refs gate skipped: %s", _gate_err)
 
-        priv = reject_zone_privilege_escalation(
-            zone_id=_zone_id(),
-            skill_name=skill_name,
-            command=command,
-        )
+        priv = _privilege_check(skill_name, command)
         if priv:
+            priv = _note_auth_gate_reject("privilege", priv)
             logger.info("[execute_skill_script] 越权拒绝: %s", priv)
             _emit_telemetry(
                 tool_name="execute_skill_script",
@@ -2663,6 +2776,12 @@ def get_skill_tools(
                 result_text=redirect,
             )
             return redirect
+
+        # 门禁全部通过后再扣预算（拒权/分区拒绝不得空耗额度）
+        budget_err = _consume_budget(1)
+        if budget_err:
+            return budget_err
+        _clear_auth_gate_streak()
 
         with TelemetryTimer() as timer:
             try:
